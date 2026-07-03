@@ -1,0 +1,122 @@
+---
+title: 'Context'
+description: 'createContext และ useContext, เมื่อไร Context เป็นเครื่องมือที่ถูก และเมื่อไรมันทำร้าย performance, การ split context และทำไม Context ไม่ใช่ state manager'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context: teleport ค่าลงไปทั้ง subtree
+
+**Context** ให้ parent ทำให้ค่าหนึ่งพร้อมใช้กับทุก component ที่อยู่ข้างล่าง โดยไม่ต้องส่ง props ผ่านชั้นตรงกลาง คุณสร้าง context, ห่อ subtree ด้วย provider แล้ว descendant ตัวไหนก็อ่านมันได้ด้วย `useContext`
+
+```jsx
+import { createContext, useContext, useState } from "react";
+
+const ThemeContext = createContext("light");
+
+function App() {
+  const [theme, setTheme] = useState("dark");
+  return (
+    // React 19: you can render <ThemeContext> directly as the provider.
+    // (The classic <ThemeContext.Provider> still works too.)
+    <ThemeContext value={theme}>
+      <Page />
+    </ThemeContext>
+  );
+}
+
+function Button() {
+  const theme = useContext(ThemeContext); // reads the nearest provider's value
+  return <button className={theme}>Click</button>;
+}
+```
+
+`Button` ได้ `theme` ไม่ว่ามันจะอยู่ลึกแค่ไหน และไม่มี component ตรงกลางต้องส่งต่อมัน นี่คือทางแก้ prop drilling เมื่อ composition เอื้อมไปถึง consumer ไม่ได้
+
+## เมื่อไร Context เหมาะ — และเมื่อไรมันเจ็บ
+
+Context ถูกออกแบบมาสำหรับค่าที่ **แชร์กว้างและเปลี่ยนไม่บ่อย**: theme, user/auth ปัจจุบัน, locale, config ของ design-system สิ่งที่หลาย component อ่านแต่เปลี่ยนน้อย
+
+จุดที่ต้องระวังคือ performance: **เมื่อ value ของ provider เปลี่ยน ทุก consumer จะ re-render** — และ React หยุดมันด้วย `memo` ไม่ได้ เพราะพวกมัน subscribe context โดยตรง
+
+<Mermaid title="value ของ context เปลี่ยนทีทำให้ทุก consumer re-render" code={ctxDiagram} />
+
+export const ctxDiagram = `flowchart TB
+  prov["value ของ Provider เปลี่ยน"] --> c1["Consumer A re-render"]
+  prov --> c2["Consumer B re-render"]
+  prov --> c3["Consumer C re-render"]
+  note["memo หยุด context re-render ไม่ได้"] -.-> c1`;
+
+ดังนั้นการเอา state ที่ **เปลี่ยนเร็ว** (เช่นค่าที่ update ทุก keystroke หรือทุก animation frame) ไปใส่ context กว้าง ๆ ตัวเดียวคือกับดัก performance — มันจะ re-render ทั้ง subtree ตลอดเวลา
+
+มีสองวิธีบรรเทา:
+
+- **Split context.** แยกค่าที่ไม่เกี่ยวกันไว้คนละ provider เพื่อให้การเปลี่ยนตัวหนึ่งไม่ re-render consumer ของอีกตัว การ split ที่พบบ่อย: context หนึ่งสำหรับ *state* และอีกหนึ่งสำหรับ *dispatch/updater* (updater มัน stable ดังนั้น component ที่ dispatch อย่างเดียวจะไม่ re-render)
+- **ทำให้ value stable.** memoize object `value` ของ provider เพื่อไม่ให้มันได้ reference ใหม่ทุกครั้งที่ parent render
+
+## Context ไม่ใช่ state manager
+
+ความแตกต่างสำคัญ: **Context เป็นกลไก *ขนส่ง* ไม่ใช่ที่เก็บ state** มันย้ายค่าลงไปตาม tree มันไม่ได้ถือหรือ update state ตัว state เองยังอยู่ใน `useState` หรือ `useReducer` ใน component ที่เป็น provider "ใช้ Context สำหรับ state management" จริง ๆ แล้วหมายถึง "`useState`/`useReducer` ข้างบน แล้วส่งด้วย Context"
+
+```jsx
+function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);   // the state lives here
+  return <AuthContext value={{ user, setUser }}>{children}</AuthContext>; // Context just delivers it
+}
+```
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Context teleport ค่าไปยัง descendant ตัวไหนก็ได้ผ่าน `useContext` แก้ prop drilling สำหรับข้อมูลที่ **แชร์กว้างและเปลี่ยนช้า** (theme, auth, locale) แต่ทุก consumer จะ re-render เมื่อ value ของ provider เปลี่ยน — และ `memo` หยุดไม่ได้ — ดังนั้นเอา state ที่เปลี่ยนเร็วออกจาก context กว้าง ๆ, **split context** (มักเป็น state กับ dispatch) และ memoize value Context เป็น *ขนส่ง* ไม่ใช่ state manager: state ยังอยู่ใน `useState`/`useReducer`
+</Callout>
+
+export const quizCtx = [
+  {
+    q: 'Context แก้ปัญหาอะไร?',
+    options: [
+      'ทำให้ component render เร็วขึ้น',
+      'ส่งค่าไปยัง descendant ตัวไหนก็ได้โดยไม่ต้องส่ง props ผ่านทุกชั้นตรงกลาง',
+      'แทนที่ useState ทั้งหมด',
+      'จัด style ให้ component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เกิดอะไรกับ consumer เมื่อ value ของ context provider เปลี่ยน?',
+    options: [
+      'เฉพาะ provider ที่ re-render',
+      'ทุก consumer ของ context นั้น re-render และ memo หยุดไม่ได้',
+      'ไม่มีอะไร re-render',
+      'เฉพาะ consumer ตัวแรกที่ re-render',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม Context ถึง "ไม่ใช่ state manager"?',
+    options: [
+      'มันเก็บข้อมูลอะไรไม่ได้เลย',
+      'มันแค่ขนส่งค่าลงไปตาม tree ตัว state จริงยังอยู่ใน useState/useReducer ใน provider',
+      'มันใช้ได้กับ string เท่านั้น',
+      'มันรันบน server',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรคือวิธีบรรเทา performance ของ context re-render ที่ดี?',
+    options: [
+      'เอา state ทั้งหมดใส่ context ก้อนยักษ์ก้อนเดียว',
+      'split context (เช่น state กับ dispatch) และ memoize value ของ provider',
+      'อย่าใช้ useContext เลย',
+      'ใช้ index เป็น key',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/context" questions={quizCtx} />
+
+<ProgressTracker client:visible id="state-and-data/context" />

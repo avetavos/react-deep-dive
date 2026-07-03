@@ -1,0 +1,116 @@
+---
+title: 'Rendering & Reconciliation'
+description: 'render และ commit phase, virtual tree, reconciliation diff ของเก่ากับของใหม่อย่างไร และทำไม key ถึงสำคัญมาก'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## render ไม่ใช่ "update DOM"
+
+ความเข้าใจผิดที่พบบ่อย: "re-render" แปลว่า React แตะ DOM มันไม่ใช่ React แบ่งงานเป็นสอง phase ที่ต่างกันชัดเจน:
+
+<Mermaid title="สอง phase ของการ update" code={phaseDiagram} />
+
+export const phaseDiagram = `flowchart LR
+  trigger["state change /\nparent re-render"] --> render["Render phase\n(call components, build new tree)\n— pure, no DOM"]
+  render --> recon["Reconciliation\n(diff new tree vs old)"]
+  recon --> commit["Commit phase\n(apply minimal DOM changes)\n— side effects here"]`;
+
+1. **Render phase** — React เรียก component ของคุณเพื่อสร้าง tree ของ element ใหม่ นี่คือการคำนวณล้วน ๆ: ไม่แตะ DOM และ React หยุดหรือทิ้งมันได้
+2. **Commit phase** — React เทียบ tree ใหม่กับอันก่อนหน้า คำนวณชุดการแก้ DOM ที่ *น้อยที่สุด* แล้ว apply
+
+ดังนั้น re-render ที่ให้ output เหมือนเดิมจะทำให้ DOM เปลี่ยน **ศูนย์** จุด การ render ค่อนข้างถูก ส่วนที่แพง (แตะ DOM) เกิดเฉพาะกับสิ่งที่เปลี่ยนจริงเท่านั้น
+
+## Reconciliation: diff สอง tree
+
+การเทียบ tree ใด ๆ สองอันขึ้นชื่อว่าแพง (O(n³)) React ทำให้เร็ว (O(n)) ด้วย heuristic สองข้อ:
+
+- **type ต่างกัน → ทิ้ง** ถ้า `type` ของ element เปลี่ยน (`<div>` กลายเป็น `<span>` หรือ `ComponentA` กลายเป็น `ComponentB`) React จะ unmount subtree เก่าทั้งอันแล้วสร้างใหม่ทั้งหมด — รวมถึงทำลาย state ของมันด้วย
+- **type เดียวกัน → เก็บ node ไว้ update props** ถ้า type เหมือนเดิม React เก็บ DOM node เดิมและ state ของมันไว้ แล้ว update แค่ props ที่เปลี่ยน
+
+```jsx
+// Same type across renders → the <input> keeps its DOM node and its focus/value.
+{isEditing ? <input value={text} /> : <input value={text} disabled />}
+
+// Different type → React destroys the first and mounts the second (state lost).
+{isEditing ? <input value={text} /> : <p>{text}</p>}
+```
+
+## key: identity สำหรับ list
+
+สำหรับ *list* ของ sibling ชนิดเดียวกัน React ต้องรู้ว่าไอเทมไหนเป็นไอเทมไหนข้าม render โดย default มันจับคู่ด้วย **ตำแหน่ง** (index) — ซึ่งพังทันทีที่ไอเทม reorder แทรก หรือลบ **key** ให้ identity ที่คงที่กับแต่ละไอเทม เพื่อให้ React ติดตามมันได้
+
+```jsx
+// ✅ Stable identity — React follows each todo even when the list reorders.
+{todos.map((todo) => <TodoItem key={todo.id} todo={todo} />)}
+
+// ⚠️ Index as key — reorder/insert/delete and React mismatches items,
+// corrupting per-item state (a checked box jumps to the wrong row).
+{todos.map((todo, i) => <TodoItem key={i} todo={todo} />)}
+```
+
+<Mermaid title="key ทำให้ reconciliation ติดตามไอเทมข้ามการ reorder" code={keyDiagram} />
+
+export const keyDiagram = `flowchart TB
+  before["Before: [A, B, C]\nkeys a,b,c"] -->|prepend Z| after["After: [Z, A, B, C]\nkeys z,a,b,c"]
+  after --> good["With stable keys:\nA,B,C reused, Z mounted"]
+  before2["Before: [A, B, C]\nkey = index 0,1,2"] -->|prepend Z| after2["After: index 0,1,2,3"]
+  after2 --> bad["With index keys:\nevery item mismatched,\nstate shifts to wrong rows"]`;
+
+กฎ: key ต้อง **คงที่ ไม่ซ้ำในกลุ่ม sibling และผูกกับ identity ของข้อมูล** (ปกติคือ database id) — อย่าใช้ array index สำหรับ list ที่เปลี่ยนได้ และอย่าใช้ `Math.random()` (ซึ่งเปลี่ยนทุก render และบังคับให้ remount ทั้งหมด)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+การ update มีสอง phase: **render** ที่ pure (สร้าง element tree ใหม่ — ไม่แตะ DOM) และ **commit** (apply การแก้ DOM ที่ *น้อยที่สุด*) **reconciliation** diff ของเก่ากับของใหม่ด้วย `type`: type เดียวกัน reuse node และ state, type ต่างกัน unmount แล้วสร้างใหม่ สำหรับ list, **key** ที่คงที่ (data id ไม่ใช่ index) ให้ identity กับแต่ละไอเทม เพื่อให้ state ตามแถวที่ถูกต้องข้ามการ reorder
+</Callout>
+
+export const quizRecon = [
+  {
+    q: 'ระหว่าง "render phase" เกิดอะไรขึ้น?',
+    options: [
+      'React apply การแก้ DOM',
+      'React เรียก component เพื่อสร้าง element tree ใหม่ — คำนวณล้วน ๆ ยังไม่แตะ DOM',
+      'React รัน effect ทั้งหมด',
+      'browser paint',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ระหว่าง reconciliation React ทำอะไรเมื่อ type ของ element เหมือนเดิม?',
+    options: [
+      'ทำลาย node แล้วสร้างใหม่',
+      'เก็บ DOM node เดิมและ state ของมันไว้ update แค่ props ที่เปลี่ยน',
+      'ไม่สนใจ element นั้น',
+      'throw error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการใช้ array index เป็น key ถึงเสี่ยงสำหรับ list ที่ reorder ได้?',
+    options: [
+      'index ช้าเกินไป',
+      'React จับคู่ไอเทมด้วย key พอไอเทม reorder index key จะจับคู่ผิด และ state ต่อไอเทมเลื่อนไปแถวผิด',
+      'index ใช้เป็น key ไม่ได้',
+      'มันทำให้ list เป็น read-only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ถ้า re-render ให้ output เหมือนเดิมเป๊ะ DOM เปลี่ยนกี่จุด?',
+    options: [
+      'สร้าง subtree ทั้งอันใหม่',
+      'ศูนย์ — reconciliation ไม่พบความต่างที่ต้อง commit',
+      'จุดละหนึ่ง element',
+      'มัน re-mount ทุกอย่างเสมอ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/rendering-and-reconciliation" questions={quizRecon} />
+
+<ProgressTracker client:visible id="foundations/rendering-and-reconciliation" />

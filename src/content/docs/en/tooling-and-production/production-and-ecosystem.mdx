@@ -1,0 +1,124 @@
+---
+title: 'Production & Ecosystem'
+description: 'Shipping React — production builds, code-splitting with lazy, Strict Mode vs production, and the well-established libraries you reach for: routing, data, forms, and state.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Dev build vs production build
+
+React ships two builds. The **development** build is bigger and slower on purpose — it includes helpful warnings, prop-type checks, and the Strict Mode double-invoke. The **production** build strips all of that for speed and size. Your build tool (Vite / the framework) switches automatically when you run the production build:
+
+```bash
+npm run build   # produces the optimized production bundle
+```
+
+Never ship the development build — it's meaningfully slower and larger. And remember `<StrictMode>` only double-invokes in development; in production it does nothing, so it costs you nothing to leave it on.
+
+## Code-splitting with lazy
+
+A single big bundle means users download code for pages they may never visit. **`React.lazy`** + **`<Suspense>`** split a component into its own chunk that loads on demand:
+
+```jsx
+import { lazy, Suspense } from 'react';
+
+const Dashboard = lazy(() => import('./Dashboard')); // separate chunk
+
+function App() {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Dashboard />   {/* downloaded only when this renders */}
+    </Suspense>
+  );
+}
+```
+
+Split at route boundaries first (each page becomes a chunk) — that's the highest-value split, and frameworks often do it for you.
+
+## The ecosystem: what to reach for
+
+React is deliberately minimal, so real apps assemble a few well-established libraries. The converged, current choices:
+
+| Need | Reach for |
+|------|-----------|
+| **Routing** (SPA) | React Router — or a framework's built-in router (Next.js) |
+| **Server state / data fetching** | TanStack Query (React Query), or RTK Query |
+| **Forms** | React Hook Form (+ a schema validator like Zod) |
+| **Client state** | Zustand or Redux Toolkit (or Jotai) — beyond what Context comfortably handles |
+| **Styling** | CSS Modules, Tailwind, or a CSS-in-JS library |
+| **Error monitoring** | Sentry (with an error boundary at the app root) |
+
+<Mermaid title="React plus the pieces a real app assembles" code={ecoDiagram} />
+
+export const ecoDiagram = `flowchart TB
+  react["React (view layer)"]
+  react --> route["Routing:\nReact Router / framework"]
+  react --> data["Server state:\nTanStack Query"]
+  react --> forms["Forms:\nReact Hook Form"]
+  react --> state["Client state:\nZustand / Redux Toolkit"]`;
+
+A key distinction that saves a lot of pain: **server state** (data from an API — TanStack Query) and **client state** (local UI state — useState/Context/Zustand) are different problems. Trying to hold server data in a client store (manual loading flags, cache invalidation, refetching) is the classic reinvention that a data library solves for you.
+
+## A production checklist
+
+- Build with the **production** bundle; verify it's not the dev build.
+- **Code-split** at routes with `lazy` + `Suspense`.
+- Put an **error boundary** at the app root (and around risky subtrees) and wire it to monitoring.
+- Keep **`<StrictMode>`** on — it's a dev-only guard with zero production cost.
+- Separate **server state** (a data library) from **client state** (local/store).
+
+<Callout title="The one-line takeaway">
+Ship the **production build** (never the dev build), **code-split** at routes with `lazy` + `Suspense`, and put an **error boundary** at the root wired to monitoring. React is a view layer — assemble the converged ecosystem for the rest: **React Router** (routing), **TanStack Query** (server state), **React Hook Form** (forms), **Zustand/Redux Toolkit** (client state) — and keep server state and client state as separate concerns.
+</Callout>
+
+export const quizProd = [
+  {
+    q: 'What is the difference between React’s development and production builds?',
+    options: [
+      'They are identical',
+      'Dev is bigger/slower with warnings and the Strict Mode double-invoke; production strips those for speed and size',
+      'Production has more warnings',
+      'Dev cannot render components',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you code-split a component so it loads on demand?',
+    options: [
+      'Put it in a separate file only',
+      '`React.lazy(() => import(...))` rendered inside a `<Suspense>` boundary',
+      'Wrap it in useMemo',
+      'Use a bigger bundle',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why keep server state and client state separate?',
+    options: [
+      'They are the same thing',
+      'Server state (API data) needs caching/refetching/invalidation that a data library (TanStack Query) handles; holding it in a client store reinvents that badly',
+      'Client state cannot be stored',
+      'To reduce the bundle size only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the cost of leaving `<StrictMode>` on in production?',
+    options: [
+      'It doubles render time for users',
+      'None — StrictMode only double-invokes in development; in production it does nothing',
+      'It disables hooks',
+      'It ships extra warnings to users',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/production-and-ecosystem" questions={quizProd} />
+
+<ProgressTracker client:visible id="tooling-and-production/production-and-ecosystem" />

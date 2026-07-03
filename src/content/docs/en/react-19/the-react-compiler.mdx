@@ -1,0 +1,96 @@
+---
+title: 'The React Compiler'
+description: 'Build-time automatic memoization that inserts the equivalent of useMemo, useCallback, and memo for you — and why it makes most manual memoization obsolete.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The busywork it removes
+
+Historically, keeping React fast meant sprinkling memoization by hand: `useMemo` to cache expensive values, `useCallback` to keep function identities stable, `React.memo` to skip re-rendering a component whose props didn't change. It works, but it's noisy, easy to get wrong (a missing dependency, a wrong comparison), and clutters otherwise simple code.
+
+The **React Compiler** is a **build-time** tool that does this automatically. It analyzes your components and inserts the equivalent memoization for you, so you write plain, direct code and still get the skip-unnecessary-work behavior:
+
+```jsx
+// You write this — no useMemo, no useCallback, no memo:
+function ProductList({ products, query }) {
+  const filtered = products.filter((p) => p.name.includes(query));
+  return (
+    <ul>
+      {filtered.map((p) => <Product key={p.id} product={p} onSelect={() => select(p.id)} />)}
+    </ul>
+  );
+}
+// The compiler memoizes `filtered`, the `onSelect` callbacks, and the elements
+// so unrelated state changes don't re-run or re-render this needlessly.
+```
+
+Per the React docs, the compiler **automatically applies the equivalent of `memo`** to components, which is why it "reduces the need for manual memoization."
+
+## What this means for the memoization advice
+
+The Hooks module covers `useMemo`/`useCallback`/`memo` in depth — and you still need to *understand* them, because you'll read older code full of them and you need to know what they do. But going forward, the guidance flips:
+
+- **With the compiler adopted:** write straightforward code; don't reach for `useMemo`/`useCallback` by default. Let the compiler decide.
+- **Without it (or in libraries that ship un-compiled):** manual memoization is still the tool.
+
+So the skill shifts from "where do I add `useMemo`?" to "is my code written the way the compiler expects?"
+
+## The compiler relies on the Rules of React
+
+The compiler can only safely memoize code that follows the **Rules of React** — chiefly that **render is pure** and you **don't mutate** props, state, or values you don't own. If you break those rules (mutate during render, read/write external things in the render body), the compiler can't guarantee your component is safe to memoize, and may skip it. This is the practical payoff of the purity you learned in Foundations: it's not just correctness hygiene, it's what unlocks automatic optimization.
+
+<Mermaid title="Manual vs compiler memoization" code={compilerDiagram} />
+
+export const compilerDiagram = `flowchart TB
+  before["Before: you add\nuseMemo / useCallback / memo\nby hand (noisy, error-prone)"] --> after["React Compiler\n(build time)"]
+  after --> result["Plain code +\nauto-inserted memoization"]
+  rules["Rules of React\n(pure render, no mutation)"] --> after`;
+
+Status, honestly: the React Compiler is the current, official auto-memoization tool, adopted via build configuration and function-level directives, and rolling out across the ecosystem. Treat it as the direction of travel — write compiler-friendly (pure) code now, and lean on it rather than hand-memoizing everything.
+
+<Callout title="The one-line takeaway">
+The **React Compiler** is a build-time tool that automatically inserts the equivalent of `useMemo`/`useCallback`/`memo`, so you write plain code and still skip unnecessary work — it "automatically applies the equivalent of `memo` to all components." It only works on code that follows the **Rules of React** (pure render, no mutation), which is exactly why purity matters. The advice shifts from "where do I add memoization?" to "is my code compiler-friendly?"
+</Callout>
+
+export const quizCompiler = [
+  {
+    q: 'What does the React Compiler do?',
+    options: [
+      'Compiles JSX to a string at runtime',
+      'At build time, automatically inserts the equivalent of useMemo/useCallback/memo so you do not hand-memoize',
+      'Minifies CSS',
+      'Type-checks your props',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'With the compiler adopted, what is the guidance on manual memoization?',
+    options: [
+      'Add useMemo/useCallback everywhere as before',
+      'Write straightforward code and let the compiler memoize — don\'t reach for useMemo/useCallback by default',
+      'Never use state',
+      'Memoize only class components',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What must your code follow for the compiler to safely memoize it?',
+    options: [
+      'A specific file naming scheme',
+      'The Rules of React — pure render, no mutation of props/state/external values',
+      'Only TypeScript',
+      'A minimum bundle size',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/the-react-compiler" questions={quizCompiler} />
+
+<ProgressTracker client:visible id="react-19/the-react-compiler" />

@@ -1,0 +1,123 @@
+---
+title: 'Refs, Portals & Escape Hatches'
+description: 'ก้าวออกนอก declarative model อย่างตั้งใจ — createPortal สำหรับ modal, imperative ref, flushSync สำหรับ update แบบ synchronous และเมื่อไรที่สมเหตุสมผล'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## เมื่อ declarative ไม่พอ
+
+99% ของ React เป็น declarative: เปลี่ยน state, describe UI, ให้ React sync DOM แต่ปัญหาจริงบางอย่างต้องให้คุณก้าว *ออกนอก* model นั้น — เอื้อมเข้าไปใน DOM, บังคับ timing หรือ render ไปยังที่ที่ component tree ไม่เปิดให้โดยธรรมชาติ React ให้ **escape hatch** ที่ตั้งใจไว้สำหรับสิ่งเหล่านี้ ทักษะคือรู้ว่ามันมีอยู่และใช้อย่างประหยัด
+
+## Portals: render ออกนอก DOM ของ parent
+
+**portal** render children ไปยังส่วน *อื่น* ของ DOM tree ในขณะที่ยังคงอยู่ใน React tree ตรงที่คุณเขียน นี่คือคำตอบมาตรฐานสำหรับ modal, tooltip และ dropdown — UI ที่ต้องหนี `overflow: hidden` หรือ stacking context ของ `z-index` ของ parent
+
+```jsx
+import { createPortal } from "react-dom";
+
+function Modal({ children }) {
+  // render เข้า document.body แต่ยังเป็น React child ของที่ที่ <Modal/> ถูกใช้
+  return createPortal(
+    <div className="overlay">{children}</div>,
+    document.body,
+  );
+}
+```
+
+<Mermaid title="portal แยกตำแหน่ง DOM ออกจากตำแหน่งใน tree" code={portalDiagram} />
+
+export const portalDiagram = `flowchart TB
+  react["React tree:\nApp -> Page -> Modal -> content"]
+  dom["DOM tree:\nbody -> app-root ...\nbody -> overlay (portal target)"]
+  react -->|ทางตรรกะเป็น child ของ Page| dom
+  note["event ยัง bubble ผ่าน React tree\nไม่ใช่ตำแหน่ง DOM"]`;
+
+จุดละเอียดสำคัญ: portal เปลี่ยน *ที่ที่ DOM node อยู่* ไม่ใช่ *ที่ที่มันอยู่ใน React tree* context ยังไหลเข้า และ event ยัง bubble ขึ้นผ่าน React parent — ดังนั้นการคลิกภายใน modal ที่ portal ยังไปถึง handler บน React ancestor เชิงตรรกะของมัน
+
+## Imperative ref: เรียกเข้า child หรือ DOM
+
+ส่วนใหญ่ data ไหลลงผ่าน props แต่บางครั้ง parent ต้อง *imperatively* สั่งอะไรบางอย่างบน child หรือ DOM node — focus input, เล่น video, scroll ไปยัง element **ref** ให้ handle นั้นกับคุณ
+
+```jsx
+function SearchForm() {
+  const inputRef = useRef(null);
+  return (
+    <>
+      <input ref={inputRef} />
+      <button onClick={() => inputRef.current.focus()}>Focus</button>
+    </>
+  );
+}
+```
+
+ถ้าจะเปิดเผย imperative API *แบบกำหนดเอง* จาก component (แทน DOM node ดิบ) ใช้ `useImperativeHandle` กำหนดว่า ref ของ parent เรียก method อะไรได้บ้าง เลือกใช้ props/state สำหรับสิ่งที่เป็น declarative ได้ และหยิบ imperative ref มาเฉพาะ action ที่เป็น imperative จริง (focus, scroll, media, การวัดขนาด)
+
+## `flushSync`: ออกจาก batching
+
+React **batch** การ update state และ apply DOM change แบบ asynchronous เพื่อ performance บางครั้งคุณต้องการให้ DOM ถูก update แบบ *synchronous* — เช่นเพื่ออ่าน layout ใหม่ทันที (วัด element ที่เพิ่งเพิ่ม แล้ว scroll ไปหา) `flushSync` บังคับให้ state update และการ commit DOM ของมันเกิดขึ้นทันที
+
+```jsx
+import { flushSync } from "react-dom";
+
+flushSync(() => setItems([...items, newItem])); // DOM ถูก update แล้วเมื่อบรรทัดนี้ return
+listRef.current.scrollTop = listRef.current.scrollHeight; // ตอนนี้อ่าน/scroll ได้ปลอดภัย
+```
+
+`flushSync` ทำลาย batching และทำ performance แย่ลง ดังนั้นใช้เฉพาะเมื่อจำเป็นจริง ๆ ที่ต้องอ่านหรือทำอะไรกับ DOM ก่อน browser paint
+
+<Callout title="สรุปหนึ่งบรรทัด">
+React ให้ **escape hatch** ที่ตั้งใจไว้สำหรับความจำเป็น imperative หายาก: **`createPortal`** render เข้า DOM node อื่น (modal/tooltip) ในขณะที่ยังอยู่ใน React tree เชิงตรรกะ (context และ event ยังไหลผ่าน); **ref** (+ `useImperativeHandle`) ให้ parent focus/scroll/play แบบ imperative; และ **`flushSync`** บังคับ commit DOM แบบ synchronous เมื่อต้องอ่าน layout ทันที ใช้แต่ละอย่างอย่างประหยัด — อะไรที่ยังเป็น declarative ได้ ควรเป็น
+</Callout>
+
+export const quizEscape = [
+  {
+    q: '`createPortal` ทำอะไร?',
+    options: [
+      'สร้าง React app ใหม่',
+      'render children เข้า DOM node อื่นในขณะที่ยังคงอยู่ใน React tree เชิงตรรกะ',
+      'เปิด network connection',
+      'memoize component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การคลิกภายใน modal ที่ portal — event bubble ไปที่ไหน?',
+    options: [
+      'เฉพาะผ่านตำแหน่ง DOM (document.body)',
+      'ขึ้นผ่าน React tree (React ancestor เชิงตรรกะของ modal) ดังนั้น React handler ยังจับได้',
+      'ไม่ไปไหน — portal บล็อก event',
+      'เฉพาะไปที่ window',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรหยิบ imperative ref มาใช้แทน props/state เมื่อไร?',
+    options: [
+      'สำหรับ data flow ทั้งหมด',
+      'สำหรับ action ที่เป็น imperative จริงอย่าง focus input, scroll หรือเล่น media',
+      'เพื่อเลี่ยงการใช้ hook',
+      'เพื่อเก็บ render output',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`flushSync` มีไว้ทำอะไร?',
+    options: [
+      'ทำให้ app render เร็วขึ้นโดยรวม',
+      'บังคับให้ state update และการ commit DOM ของมันเกิดแบบ synchronous — เช่นเพื่ออ่าน layout ใหม่ก่อน paint',
+      'batch update ให้มากขึ้น',
+      'fetch data',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/refs-portals-escape-hatches" questions={quizEscape} />
+
+<ProgressTracker client:visible id="performance-and-patterns/refs-portals-escape-hatches" />

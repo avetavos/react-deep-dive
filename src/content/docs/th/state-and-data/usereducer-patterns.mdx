@@ -1,0 +1,136 @@
+---
+title: 'useReducer Patterns'
+description: 'useReducer สำหรับ state transition ที่ซับซ้อน, reducer purity และ pattern context + reducer สำหรับ app state โดยไม่ต้องใช้ library'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## จากหลาย setState สู่ reducer เดียว
+
+`useState` เหมาะสุดกับ state ก้อนที่เป็นอิสระต่อกัน แต่เมื่อหลายค่าต้องเปลี่ยน *พร้อมกัน* เพื่อตอบสนอง event เดียวกัน — และ state ถัดไปขึ้นกับ state ปัจจุบันและ action — **reducer** จะรวมตรรกะนั้นไว้ใน pure function เดียว
+
+```jsx
+// The reducer is a pure function: (state, action) => nextState.
+function tasksReducer(state, action) {
+  switch (action.type) {
+    case "added":
+      return [...state, { id: action.id, text: action.text, done: false }];
+    case "toggled":
+      return state.map((t) => (t.id === action.id ? { ...t, done: !t.done } : t));
+    case "deleted":
+      return state.filter((t) => t.id !== action.id);
+    default:
+      throw new Error("unknown action: " + action.type);
+  }
+}
+
+function TaskApp() {
+  const [tasks, dispatch] = useReducer(tasksReducer, []);
+  // You describe WHAT happened (an action); the reducer decides the next state.
+  return <button onClick={() => dispatch({ type: "added", id: 1, text: "Learn" })}>Add</button>;
+}
+```
+
+`useReducer` คืน state ปัจจุบันและ function `dispatch` คุณไม่คำนวณ state ถัดไปที่จุดเรียก — คุณ **dispatch action** ที่อธิบายว่าเกิดอะไรขึ้น แล้ว reducer คำนวณผลลัพธ์ในที่เดียว
+
+## ทำไมควรใช้ reducer
+
+<Mermaid title="setState กระจัดกระจาย vs reducer เดียว" code={reducerDiagram} />
+
+export const reducerDiagram = `flowchart TB
+  subgraph a["setState หลายตัว"]
+    e1["event"] --> s1["setX"]
+    e1 --> s2["setY"]
+    e1 --> s3["setZ (ตรรกะกระจัดกระจาย)"]
+  end
+  subgraph b["reducer เดียว"]
+    e2["event"] --> d["dispatch(action)"] --> r["reducer: ตรรกะ transition ทั้งหมดอยู่นี่"]
+  end`;
+
+ใช้ `useReducer` แทน `useState` เมื่อ:
+
+- **State transition ซับซ้อน** — หลาย field เปลี่ยนพร้อมกัน หรือค่าถัดไปขึ้นกับค่าก่อนหน้าแบบไม่ธรรมดา
+- **อยากให้ตรรกะอยู่ในที่เดียวที่ test ได้** — reducer เป็น function ธรรมดาที่ unit-test ได้โดยไม่ต้องมี React เลย: `reducer(state, action)` เข้า, `nextState` ออก
+- **action บอก intent** — `dispatch({ type: "checkout_failed" })` อ่านง่ายกว่ากอง setter และให้ log ของ *สิ่งที่เกิดขึ้น*
+
+reducer purity คือกฎเดียวกับ render: ให้ state และ action เดิม ต้องคืน next state เดิม โดย **ไม่มี side effect** และ **ไม่ mutate** (คืน object/array ใหม่)
+
+## Context + reducer: app state โดยไม่ต้องใช้ library
+
+รวมสองเครื่องมือจากโมดูลนี้ แล้วคุณจะได้ app-wide state management แบบเบา ๆ โดยไม่มี dependency เลย: reducer ถือตรรกะ และ Context ส่ง state กับ `dispatch` ลงไปตาม tree
+
+```jsx
+const TasksContext = createContext(null);
+const TasksDispatchContext = createContext(null);   // split: state vs dispatch
+
+function TasksProvider({ children }) {
+  const [tasks, dispatch] = useReducer(tasksReducer, []);
+  return (
+    <TasksContext value={tasks}>
+      <TasksDispatchContext value={dispatch}>{children}</TasksDispatchContext>
+    </TasksContext>
+  );
+}
+
+// Anywhere below: read state and dispatch actions.
+function useTasks() { return useContext(TasksContext); }
+function useTasksDispatch() { return useContext(TasksDispatchContext); }
+```
+
+การ split state กับ dispatch เป็นสอง context ทำให้ component ที่ *dispatch* อย่างเดียว (ไม่เคยอ่าน list) ไม่ re-render เมื่อ list เปลี่ยน — `dispatch` มัน stable ตลอดอายุของ component pattern นี้ครอบคลุมเคส "ฉันต้องใช้ Redux" ได้มากอย่างน่าประหลาดโดยไม่ต้องใช้ library ใด ๆ
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`useReducer` ย้าย state ที่ซับซ้อนและเปลี่ยนพร้อมกันเข้าไปใน **pure reducer** เดียว `(state, action) => nextState` คุณ `dispatch` action ที่อธิบาย *สิ่งที่เกิดขึ้น* แทนการคำนวณ next state ที่จุดเรียก — ซึ่งรวมศูนย์ตรรกะและทำให้ unit-test ได้ จับคู่กับ Context (state ใน provider หนึ่ง, `dispatch` ในอีกอัน) เพื่อได้ **app-wide state โดยไม่ต้องใช้ library** — และ context ของ `dispatch` ที่ stable ทำให้ component ที่ dispatch อย่างเดียวไม่ re-render
+</Callout>
+
+export const quizReducer = [
+  {
+    q: 'reducer คืออะไร?',
+    options: [
+      'hook ที่ fetch ข้อมูล',
+      'pure function (state, action) => nextState ที่รวมศูนย์ตรรกะ state-transition',
+      'วิธี mutate DOM',
+      'utility ของ CSS',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรใช้ useReducer แทน useState เมื่อไร?',
+    options: [
+      'เสมอ',
+      'เมื่อ state transition ซับซ้อน, หลาย field เปลี่ยนพร้อมกัน หรืออยากให้ตรรกะอยู่ในที่เดียวที่ test ได้',
+      'เฉพาะกับ boolean ตัวเดียว',
+      'ไม่มีวัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน pattern context + reducer ทำไมต้อง split state กับ dispatch เป็นสอง context?',
+    options: [
+      'ดูสะอาดตากว่าเฉย ๆ',
+      'เพื่อให้ component ที่ dispatch อย่างเดียว (ไม่เคยอ่าน state) ไม่ re-render เมื่อ state เปลี่ยน',
+      'React บังคับให้ทำ',
+      'เพื่อทำให้ dispatch เป็น async',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'reducer ต้อง NOT ทำอะไร?',
+    options: [
+      'คืน state object ใหม่',
+      'mutate argument ของมันหรือทำ side effect — มันต้อง pure',
+      'ใช้ switch statement',
+      'จัดการหลาย action type',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/usereducer-patterns" questions={quizReducer} />
+
+<ProgressTracker client:visible id="state-and-data/usereducer-patterns" />

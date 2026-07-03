@@ -1,0 +1,140 @@
+---
+title: 'useState & Updates'
+description: 'useState ทำงานอย่างไร — batching, updater function, lazy initialization และการทำให้ object กับ array state เป็น immutable'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## พื้นฐานแบบเป๊ะ ๆ
+
+`useState` คืนค่าเป็นคู่: value ปัจจุบันสำหรับ render นี้ และ setter ที่ schedule ให้ re-render ด้วย value ใหม่
+
+```jsx
+const [count, setCount] = useState(0);
+// count  → the value for THIS render (a snapshot)
+// setCount(next) → schedule a re-render where count is `next`
+```
+
+การเรียก setter ไม่เปลี่ยน `count` ทันที — มันขอให้ React render อีกครั้ง ใน render ถัดไป `useState(0)` จะคืน value ที่อัปเดตแล้ว (บทเรียน "state เป็น snapshot" ใน Foundations คือ mental model ส่วนบทนี้คือกลไก)
+
+## Batching: หลาย setState, render เดียว
+
+React **batch** การอัปเดต state ที่เกิดใน event เดียวกัน หลายการเรียก setter ใน handler เดียวจะได้ re-render ครั้งเดียว ไม่ใช่ครั้งต่อการเรียก
+
+```jsx
+function handleClick() {
+  setCount(c => c + 1);
+  setFlag(true);
+  setName("Ada");
+  // → ONE re-render, with all three updates applied. React batches them.
+}
+```
+
+ตั้งแต่ React 18 การ batch นี้ครอบคลุมการอัปเดตใน promise, timeout และ native event handler ด้วย — batch เกิดอัตโนมัติทุกที่ render น้อยลง UI สอดคล้องกัน
+
+## Updater function เทียบกับ value
+
+ส่ง **value** เมื่อ state ถัดไปไม่ได้ขึ้นกับค่าก่อนหน้า ส่ง **updater function** เมื่อมันขึ้นกับค่าก่อนหน้า — React รัน updater ตามลำดับกับค่า pending ล่าสุด
+
+```jsx
+setCount(count + 1);      // value: uses the snapshot; three of these still add 1 total
+setCount(c => c + 1);     // updater: uses the pending value; three of these add 3
+```
+
+<Mermaid title="updater function ทำงานกับค่าที่เปลี่ยนไปเรื่อย ๆ" code={updaterDiagram} />
+
+export const updaterDiagram = `flowchart LR
+  start["pending = 0"] --> u1["c => c + 1\n→ 1"]
+  u1 --> u2["c => c + 1\n→ 2"]
+  u2 --> u3["c => c + 1\n→ 3"]
+  u3 --> done["next render: count = 3"]`;
+
+หลักง่าย ๆ: ถ้าคุณเรียก setter ตัวเดิมมากกว่าหนึ่งครั้งใน handler หรือค่าใหม่คำนวณจากค่าเก่า ให้ใช้ updater form
+
+## Lazy initialization
+
+argument ของ `useState` ถูกใช้แค่ใน render **แรก** เท่านั้น แต่ React ยัง evaluate มันทุก render (แล้วทิ้ง) ถ้าการคำนวณ initial value แพง ให้ส่ง **function** — React จะเรียกแค่ครั้งเดียว
+
+```jsx
+// ❌ createInitialTodos() runs on EVERY render (result discarded after the first).
+const [todos, setTodos] = useState(createInitialTodos());
+
+// ✅ Lazy: the function runs only on the first render.
+const [todos, setTodos] = useState(() => createInitialTodos());
+```
+
+## state ต้อง immutable
+
+React ตัดสินใจว่าจะ re-render ไหมโดยเทียบ **reference** การ mutate object หรือ array ในที่เดิมทำให้ reference เดิม React จึงอาจข้ามการอัปเดต — และมันทำลาย snapshot model สร้าง value ใหม่เสมอ
+
+```jsx
+// ❌ Mutation — same reference, unreliable render.
+user.name = "Ada";
+setUser(user);
+
+// ✅ New object.
+setUser({ ...user, name: "Ada" });
+
+// ✅ New arrays for add / remove / update.
+setItems([...items, newItem]);                        // add
+setItems(items.filter(i => i.id !== id));             // remove
+setItems(items.map(i => i.id === id ? { ...i, done: true } : i)); // update
+```
+
+สำหรับ state ที่ nested ลึก การ spread จะเริ่มยุ่ง — นั่นคือสัญญาณว่าควร flatten รูปทรง, ใช้ library อย่าง Immer, หรือหันไปใช้ `useReducer` (บทเรียนถัดไป)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`useState` ให้ค่า snapshot พร้อม setter ที่ **schedule re-render** React **batch** หลายการอัปเดตใน event เดียวเป็น render เดียว ใช้ **updater function** (`setX(x => ...)`) เมื่อค่าถัดไปขึ้นกับค่าก่อนหน้า ใช้ **lazy init** (`useState(() => ...)`) สำหรับ initial value ที่แพง และอัปเดต state แบบ **immutable** เสมอ — object/array ใหม่ ไม่ใช่ mutate ในที่เดิม
+</Callout>
+
+export const quizUseState = [
+  {
+    q: 'การเรียก setter ของ useState ทำอะไร?',
+    options: [
+      'เปลี่ยนตัวแปร state ทันทีในที่เดิม',
+      'schedule re-render; ค่าใหม่ปรากฏใน render ถัดไป',
+      'mutate DOM โดยตรง',
+      'ไม่ทำอะไรจนกว่าจะเรียกอีกครั้ง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไรควรใช้ updater form `setX(x => ...)`?',
+    options: [
+      'ไม่เคย — มัน deprecated แล้ว',
+      'เมื่อค่าถัดไปขึ้นกับค่าก่อนหน้า (หรือเรียก setter หลายครั้งใน handler เดียว)',
+      'เฉพาะใน useEffect',
+      'เฉพาะกับ string',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมต้องส่ง function ให้ useState (`useState(() => expensive())`)?',
+    options: [
+      'เพื่อให้เป็น async',
+      'เพื่อให้ initializer ที่แพงรันแค่ render แรก ไม่ใช่ทุก render',
+      'เป็น syntax ที่บังคับ',
+      'เพื่อหลีกเลี่ยง re-render',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมต้องอัปเดต object/array state แบบ immutable?',
+    options: [
+      'immutability เป็นแค่ความชอบด้านสไตล์',
+      'React เทียบด้วย reference; การ mutate ทำให้ reference เดิม React จึงอาจข้าม re-render',
+      'object เป็น state ไม่ได้',
+      'มันทำให้ state read-only ตลอดไป',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/usestate-and-updates" questions={quizUseState} />
+
+<ProgressTracker client:visible id="hooks/usestate-and-updates" />

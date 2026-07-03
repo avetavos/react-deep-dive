@@ -1,0 +1,130 @@
+---
+title: 'Forms & useOptimistic'
+description: 'useFormStatus สำหรับ submit button ที่ซ้อนอยู่โดยไม่ต้อง prop drilling และ useOptimistic สำหรับ UI ทันทีที่ revert อัตโนมัติเมื่อ async action จบ'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## useFormStatus: pending โดยไม่ต้อง drilling
+
+บ่อยครั้งคุณอยากให้ submit button รู้ว่า form ของมัน pending อยู่ไหม — เพื่อ disable ตัวเองและแสดง spinner การส่ง `isPending` ลงไปทุก component ระหว่างทางน่าเบื่อ **`useFormStatus`** (จาก `react-dom`) ให้ component อ่าน status ของ `<form>` ที่เป็น parent ที่ใกล้ที่สุดได้ตรง ๆ:
+
+```jsx
+import { useFormStatus } from 'react-dom';
+
+// This button reads the enclosing form's status — no props needed.
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" disabled={pending}>
+      {pending ? 'Saving…' : 'Save'}
+    </button>
+  );
+}
+
+function ProfileForm({ action }) {
+  return (
+    <form action={action}>
+      <input name="name" />
+      <SubmitButton />   {/* knows the form is pending, with zero prop drilling */}
+    </form>
+  );
+}
+```
+
+กฎเดียว: `useFormStatus` อ่าน form ที่เป็น *parent* ดังนั้น `SubmitButton` ต้องถูก **render อยู่ข้างใน** `<form>` ไม่ใช่เป็น component ที่ render form เอง
+
+## useOptimistic: แสดงผลลัพธ์ก่อนที่มันจะเป็นจริง
+
+เพื่อให้ UX กระฉับกระเฉง คุณมักอยากแสดงผลลัพธ์ที่ *คาดว่าจะเกิด* ทันทีและแก้ก็ต่อเมื่อ request ล้มเหลว **`useOptimistic`** ให้ optimistic value ที่คุณ set ทันทีและ React จะ revert กลับไปเป็นค่าจริงอัตโนมัติเมื่อ action จบ:
+
+```jsx
+import { useOptimistic } from 'react';
+
+function Thread({ messages, sendMessage }) {
+  const [optimisticMessages, addOptimistic] = useOptimistic(
+    messages,
+    (current, newText) => [...current, { text: newText, sending: true }],
+  );
+
+  async function formAction(formData) {
+    const text = formData.get('message');
+    addOptimistic(text);           // show it immediately, marked "sending"
+    await sendMessage(text);       // real request; React reconciles when it resolves
+  }
+
+  return (
+    <>
+      {optimisticMessages.map((m, i) => (
+        <p key={i}>{m.text} {m.sending && <small>(sending…)</small>}</p>
+      ))}
+      <form action={formAction}>
+        <input name="message" />
+        <button type="submit">Send</button>
+      </form>
+    </>
+  );
+}
+```
+
+message ปรากฏทันทีที่คุณ submit เมื่อ `sendMessage` resolve, React จะ drop entry ที่เป็น optimistic แล้วใช้ state จริงแทน; ถ้ามัน *ล้มเหลว* React จะ revert อัตโนมัติ คุณจึงไม่ต้อง roll back เอง
+
+<Mermaid title="optimistic update แล้วค่อย settle" code={optimisticDiagram} />
+
+export const optimisticDiagram = `sequenceDiagram
+  participant U as User
+  participant O as useOptimistic
+  participant S as server action
+  U->>O: submit (addOptimistic)
+  O->>U: show optimistic value instantly
+  O->>S: await real request
+  S-->>O: success then keep real state
+  Note over O,U: on failure React reverts automatically`;
+
+สอง hook นี้รวมกันทำให้ form รู้สึกทันใจ: `useOptimistic` สำหรับ feedback ทันที, `useFormStatus` สำหรับ affordance เรื่อง pending บนปุ่ม — ทั้งคู่โดยไม่ต้องร้อย state ผ่าน props
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**`useFormStatus`** ให้ submit button (ที่ render อยู่ *ข้างใน* `<form>`) อ่าน state `pending` ของ form ได้โดยไม่ต้อง prop drilling **`useOptimistic`** แสดงค่าที่คาดไว้ทันทีและให้ React revert อัตโนมัติถ้า async action ล้มเหลว — ไม่ต้อง roll back เอง เมื่อจับคู่กับ form Action มันทำให้ interaction รู้สึกทันที
+</Callout>
+
+export const quizForms = [
+  {
+    q: '`useFormStatus` ให้อะไรกับ component?',
+    options: [
+      'กฎ validation ของ form',
+      'status pending ของ form ที่เป็น parent ที่ใกล้ที่สุด ทำให้ submit button ที่ซ้อนอยู่ไม่ต้องใช้ props',
+      'ค่าใน form',
+      'form element ใหม่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'component ที่เรียก useFormStatus ต้องถูก render ที่ไหน?',
+    options: [
+      'ที่ไหนก็ได้ในแอป',
+      'ข้างใน <form> ที่มันอ่าน status (มันอ่าน form ที่เป็น parent)',
+      'ที่ root ของแอป',
+      'บน server เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`useOptimistic` ทำอะไรเมื่อ async action ล้มเหลว?',
+    options: [
+      'เก็บ optimistic value ไว้',
+      'revert กลับไปเป็นค่าจริงอัตโนมัติ — ไม่ต้อง roll back เอง',
+      'throw error ที่ไม่ถูกจับ',
+      'reload หน้า',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/forms-and-useoptimistic" questions={quizForms} />
+
+<ProgressTracker client:visible id="react-19/forms-and-useoptimistic" />

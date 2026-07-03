@@ -1,0 +1,136 @@
+---
+title: 'useEffect & Effects'
+description: 'effect มีไว้ทำอะไรจริง ๆ — sync component กับ external system — dependency และ cleanup และกฎสมัยใหม่ว่าคุณอาจไม่ต้องใช้ effect'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## effect มีไว้ทำอะไร
+
+`useEffect` เป็น hook ที่คนเข้าใจผิดมากที่สุด มันไม่ใช่ถังรวม "รัน code หลัง render" งานเดียวของมันคือ **sync component ของคุณกับ external system** — สิ่งที่อยู่นอกการควบคุมของ React: network connection, browser API, third-party widget, subscription, timer
+
+```jsx
+useEffect(() => {
+  const connection = createConnection(roomId);  // set up external system
+  connection.connect();
+  return () => connection.disconnect();          // clean it up
+}, [roomId]);                                     // re-sync when roomId changes
+```
+
+อ่านว่า: "ทำให้ connection sync กับ `roomId`" เมื่อ `roomId` เปลี่ยน React รัน cleanup ของค่าเก่า แล้วรัน effect ของค่าใหม่ เมื่อ component unmount มันรัน cleanup ครั้งสุดท้าย
+
+## Dependency และ cleanup
+
+**dependency array** ระบุ reactive value ทุกตัว (prop, state หรือค่า derived) ที่ effect อ่าน React รัน effect ใหม่เมื่อค่าใดค่าหนึ่งเปลี่ยน
+
+- **`[dep1, dep2]`** — รันใหม่เมื่อค่าเหล่านี้เปลี่ยน
+- **`[]`** — รันครั้งเดียวตอน mount, cleanup ตอน unmount
+- **ไม่ใส่** — รันหลัง *ทุก* render (มักไม่ใช่สิ่งที่ต้องการ)
+
+**cleanup function** ที่คุณ return ต้อง undo สิ่งที่ effect ตั้งไว้ — disconnect, clear timer, remove listener การข้าม cleanup คือแหล่งบั๊กอันดับหนึ่ง: connection ซ้ำ, leak และ listener ที่ยิงหลัง unmount
+
+<Mermaid title="effect sync แล้ว cleanup" code={effectDiagram} />
+
+export const effectDiagram = `flowchart LR
+  dep["dependency changes"] --> cleanup["run cleanup for old value"]
+  cleanup --> setup["run effect for new value"]
+  unmount["component unmounts"] --> final["run final cleanup"]`;
+
+อย่าสู้กับ linter ที่เติม dependency array ให้ ถ้า dependency ไม่สะดวก วิธีแก้แทบไม่เคยเป็นการโกหก array — แต่เป็นการ restructure (ย้ายค่าเข้าไปใน effect, ใช้ updater, หรือ memoize)
+
+## คุณอาจไม่ต้องใช้ effect
+
+นี่คือบทเรียนสำคัญที่สุดในทั้งโมดูล effect มีไว้สำหรับ external system ถ้าคุณใช้ effect เพื่อ **transform data สำหรับ render** หรือเพื่อ **ตอบสนอง user event** คุณแทบจะแน่นอนว่าไม่ต้องใช้มัน — และการใช้มันทำให้ code ช้าลงและมีบั๊กมากขึ้น
+
+**อย่า sync derived state ด้วย effect ให้คำนวณตอน render**
+
+```jsx
+// 🔴 Avoid: redundant state + an effect to keep it in sync.
+const [fullName, setFullName] = useState('');
+useEffect(() => {
+  setFullName(firstName + ' ' + lastName);
+}, [firstName, lastName]);
+
+// ✅ Good: derive it during render — no state, no effect.
+const fullName = firstName + ' ' + lastName;
+```
+
+สำหรับ derivation ที่ *แพง* ให้ห่อด้วย `useMemo` — ยังไม่ต้องใช้ effect ไม่ต้องมี state เพิ่ม
+
+```jsx
+// ✅ Cached derivation, no effect.
+const visibleTodos = useMemo(() => getFilteredTodos(todos, filter), [todos, filter]);
+```
+
+**อย่าใช้ effect จัดการ user event** logic ที่ควรรันเพราะ user ทำอะไรบางอย่างควรอยู่ใน **event handler** ที่คุณรู้แน่ชัดว่าเกิดอะไรขึ้น
+
+```jsx
+// 🔴 Avoid: reacting to a state change with an effect to send analytics.
+useEffect(() => {
+  if (submitted) post('/analytics', { event: 'submit' });
+}, [submitted]);
+
+// ✅ Good: do it in the handler that caused the submit.
+function handleSubmit() {
+  setSubmitted(true);
+  post('/analytics', { event: 'submit' });
+}
+```
+
+เทสต์เร็ว ๆ: *"นี่กำลัง sync กับสิ่งที่อยู่นอก React หรือเปล่า?"* ถ้าใช่ ใช้ effect ถ้าเป็นการ derive data หรือตอบสนอง interaction ไม่ต้องใช้ effect
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`useEffect` มีไว้ **sync กับ external system** (connection, subscription, browser API) — ระบุ reactive value ทุกตัวที่มันอ่านใน **dependency array** และ return **cleanup** ที่ undo การ setup เสมอ แต่ส่วนใหญ่คุณ **ไม่ต้องใช้ effect**: derive ค่าตอน render (หรือด้วย `useMemo`) และเอา logic ที่ขับด้วย event ไปไว้ใน **event handler** หยิบ effect มาใช้เฉพาะตอน sync กับสิ่งที่อยู่นอก React
+</Callout>
+
+export const quizEffect = [
+  {
+    q: 'งานเดียวของ useEffect คืออะไร?',
+    options: [
+      'รัน code ใด ๆ หลังทุก render',
+      'sync component กับ external system (connection, subscription, browser API)',
+      'transform data สำหรับ render',
+      'แทนที่ event handler',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณต้องการ `fullName` จาก `firstName` และ `lastName` วิธีที่ถูกคืออะไร?',
+    options: [
+      'เก็บ fullName ใน state แล้ว sync ด้วย useEffect',
+      'derive ตอน render: const fullName = firstName + " " + lastName',
+      'ใส่ใน ref',
+      'คำนวณใน cleanup function',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'cleanup function ต้องทำอะไร?',
+    options: [
+      'return state ใหม่',
+      'undo สิ่งที่ effect ตั้งไว้ (disconnect, clear timer, remove listener)',
+      'รัน component ใหม่',
+      'ไม่ทำอะไร — cleanup เป็นแค่ของประดับ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'logic ที่ควรรันเพราะ user กด submit ควรอยู่ที่ไหน?',
+    options: [
+      'ใน useEffect ที่ watch state "submitted"',
+      'ใน event handler ที่ทำให้เกิด submit',
+      'ใน render body',
+      'ใน useMemo',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/useeffect-and-effects" questions={quizEffect} />
+
+<ProgressTracker client:visible id="hooks/useeffect-and-effects" />

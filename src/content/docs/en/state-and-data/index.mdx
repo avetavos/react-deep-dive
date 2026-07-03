@@ -1,0 +1,79 @@
+---
+title: 'State Management & Data Flow'
+description: 'Where should state live? The progression from local state to lifted state to Context to an external store — and how to choose.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The one question
+
+Almost every "how do I manage state in React?" argument is really one question: **where should this piece of state live?** React gives you a ladder of answers, and the skill is climbing only as high as you need.
+
+<Mermaid title="The state-location ladder" code={ladderDiagram} />
+
+export const ladderDiagram = `flowchart TB
+  local["Local state\n(useState in one component)"] --> lifted["Lifted state\n(moved to a common ancestor)"]
+  lifted --> context["Context\n(shared down a subtree)"]
+  context --> store["External store\n(Zustand / Redux / Jotai)"]
+  note["Climb only as high as you need"] -.-> local`;
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Lifting & composition | Lifting state up, prop drilling, and fixing it with composition |
+| Context | `useContext`, when it fits, and when it hurts |
+| useReducer patterns | Reducers, and the context + reducer app-state pattern |
+| External stores | When to reach for a store, and `useSyncExternalStore` |
+
+## The guiding principle
+
+Start with the **lowest** rung that works. Keep state local until two components need it; then lift it to their common parent. Reach for **Context** only when data is genuinely shared across a whole subtree and changes infrequently (theme, auth, locale). Reach for an **external store** only when Context's re-render behavior or the shape of your data makes it painful.
+
+Most state does not need a library. A huge amount of "state management" complexity comes from reaching for the top of the ladder when a `useState` two components up would have done the job.
+
+<Callout title="The mental shift">
+"State management" sounds like a thing you install. It isn't — it's a **placement decision**. The question is never "which library?" first; it's "which component should *own* this state?" Answer that well and most apps need no store at all.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the core question behind "state management" in React?',
+    options: [
+      'Which library to install',
+      'Where should this piece of state live (which component owns it)',
+      'How to avoid using state',
+      'How to mutate the DOM directly',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the recommended approach on the state-location ladder?',
+    options: [
+      'Always start with a global store',
+      'Start at the lowest rung that works and climb only as high as needed',
+      'Put everything in Context',
+      'Avoid lifting state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is an external store (Zustand/Redux) actually warranted?',
+    options: [
+      'For every app, always',
+      'Only when local/lifted state and Context become painful for your data shape or re-render needs',
+      'Never — React has no need for stores',
+      'Only for styling',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="state-and-data/index" />

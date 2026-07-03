@@ -1,0 +1,131 @@
+---
+title: 'JSX & Elements'
+description: 'What JSX compiles to, what a React element actually is (a plain object), and why that makes elements cheap to create and describe.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## JSX is just syntax
+
+JSX looks like HTML, but it is **syntax sugar** for regular JavaScript function calls. This:
+
+```jsx
+const el = <button className="primary">Click</button>;
+```
+
+compiles (via the modern JSX transform) to roughly:
+
+```js
+import { jsx as _jsx } from "react/jsx-runtime";
+const el = _jsx("button", { className: "primary", children: "Click" });
+```
+
+The important consequence: JSX is *an expression*. It evaluates to a value you can store in a variable, return from a function, put in an array, or pass as a prop. It isn't a template language with its own rules — it's JavaScript, so `{ }` inside JSX just drops back into a JS expression.
+
+```jsx
+function List({ items, showHeader }) {
+  return (
+    <ul>
+      {showHeader && <li className="header">Items</li>}  {/* JS expression */}
+      {items.map((item) => (
+        <li key={item.id}>{item.text}</li>                {/* JS expression */}
+      ))}
+    </ul>
+  );
+}
+```
+
+## An element is a plain object
+
+What does `_jsx("button", ...)` actually return? Not a DOM node — a **plain JavaScript object** describing what you want:
+
+```js
+// Roughly what a React element is:
+const el = {
+  type: "button",                 // a string for host elements, or a function for components
+  props: { className: "primary", children: "Click" },
+  key: null,
+  // ...internal fields
+};
+```
+
+This is the key insight: **a React element is a cheap, immutable description** — not the real thing. Creating a thousand elements is just creating a thousand small objects. React builds a tree of these descriptions on every render, then compares it to the previous tree to decide what actual DOM to touch (that's reconciliation, next lesson).
+
+<Mermaid title="JSX to elements to DOM" code={jsxDiagram} />
+
+export const jsxDiagram = `flowchart LR
+  jsx["JSX\n<button>Click</button>"] -->|compiler| call["jsx('button', props)"]
+  call --> obj["element object\n{ type, props, key }"]
+  obj --> tree["tree of elements\n(the description)"]
+  tree -->|React| dom["real DOM\n(the result)"]`;
+
+## Components vs host elements
+
+The `type` field tells React what kind of node it is:
+
+- A **string** type (`"button"`, `"div"`) is a *host element* — React knows how to turn it into a real DOM node.
+- A **function** type (`Counter`, `Greeting`) is a *component* — React calls that function to get more elements, recursively, until it bottoms out in host elements.
+
+```jsx
+<Counter />
+// element: { type: Counter (the function), props: {} }
+// React calls Counter() → gets more elements → repeats until only host elements remain
+```
+
+This is why a component name **must be capitalized** in JSX: `<Counter />` (capital) means "call the `Counter` component," while `<counter />` (lowercase) means "create a host element literally named `counter`." The capitalization is how the compiler decides between a string type and a variable reference.
+
+<Callout title="The one-line takeaway">
+JSX is syntax sugar that compiles to `jsx(type, props)` calls, so it's just a JavaScript **expression** — and `{ }` inside it is plain JS. Each call returns a **React element: a cheap, immutable plain object** (`{ type, props, key }`) that *describes* UI rather than being it. Capitalized types are components (functions React calls); lowercase types are host elements (real DOM tags).
+</Callout>
+
+export const quizJsx = [
+  {
+    q: 'What does JSX compile to?',
+    options: [
+      'An HTML string',
+      'Regular JavaScript function calls like jsx(type, props)',
+      'A DOM node directly',
+      'A CSS rule',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a React element?',
+    options: [
+      'A real DOM node',
+      'A cheap, immutable plain object describing what the UI should be ({ type, props, key })',
+      'A CSS class',
+      'A hook',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why must a component be capitalized in JSX (`<Counter />` not `<counter />`)?',
+    options: [
+      'It is only a style convention with no effect',
+      'Capitalized means a component (a function React calls); lowercase means a literal host element (a real DOM tag)',
+      'Lowercase components run faster',
+      'JSX requires all tags to be capitalized',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is `{ }` inside JSX?',
+    options: [
+      'A special template directive',
+      'A drop back into a plain JavaScript expression',
+      'A CSS block',
+      'An object literal only',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/jsx-and-elements" questions={quizJsx} />
+
+<ProgressTracker client:visible id="foundations/jsx-and-elements" />

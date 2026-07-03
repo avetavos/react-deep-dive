@@ -1,0 +1,124 @@
+---
+title: 'Memoization in Practice'
+description: 'useMemo, useCallback, and React.memo — what each caches, the referential-equality pitfalls that break them, and why the React Compiler makes most of it unnecessary.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Three tools, three jobs
+
+Memoization means caching a result between renders so React can skip recomputing or re-rendering. There are three tools, and they do different jobs:
+
+- **`useMemo(fn, deps)`** — caches the *return value* of an expensive computation, recomputing only when a dependency changes.
+- **`useCallback(fn, deps)`** — caches a *function's identity*, returning the same function reference across renders until a dependency changes.
+- **`React.memo(Component)`** — wraps a *component* so it skips re-rendering when its props are shallow-equal.
+
+```jsx
+// useMemo: skip re-sorting a big list unless the list or order changes.
+const sorted = useMemo(() => items.slice().sort(compare), [items]);
+
+// useCallback: keep a stable onSelect so a memoized child does not re-render.
+const onSelect = useCallback((id) => setSelected(id), []);
+
+// React.memo: skip re-render when props are unchanged.
+const Row = React.memo(function Row({ item, onSelect }) { /* ... */ });
+```
+
+## Why `useCallback` and `React.memo` are a pair
+
+`React.memo` compares props with **shallow equality** (`===` per prop). Primitives compare by value, but objects, arrays, and functions compare by **reference** — and a component creates *brand-new* ones on every render.
+
+<Mermaid title="A fresh reference defeats React.memo" code={refDiagram} />
+
+export const refDiagram = `flowchart TB
+  parent["Parent re-renders"] --> inline["creates NEW onClick, NEW style object"]
+  inline --> memo["React.memo(Child) compares props"]
+  memo --> fail["new reference !== old reference\n→ shallow-equal fails → Child re-renders anyway"]`;
+
+```jsx
+// ❌ A fresh function and object every render — React.memo(Child) never skips.
+<Child onClick={() => doThing()} style={{ color: "red" }} />
+
+// ✅ Stable references — now React.memo(Child) can actually skip.
+const onClick = useCallback(() => doThing(), []);
+const style = useMemo(() => ({ color: "red" }), []);
+<Child onClick={onClick} style={style} />
+```
+
+This is the crux: `React.memo` only pays off when *every* prop is referentially stable, which usually means memoizing the object/array/function props with `useMemo`/`useCallback`. Get one prop wrong and the memo does nothing.
+
+## The React Compiler changes the calculus
+
+Manually keeping references stable is tedious and easy to get wrong. The **React Compiler** (React's build-time optimizer) analyzes your components and automatically memoizes values and components where it is safe — effectively applying `useMemo`/`useCallback`/`memo` for you, everywhere, without you writing them.
+
+Once the compiler is enabled on a codebase, the guidance flips:
+
+- **Do not** hand-write `useMemo`/`useCallback` by default — the compiler handles the common cases.
+- **Do** keep your components pure and follow the Rules of Hooks — that is what lets the compiler optimize safely.
+- **Reserve** manual memoization for the rare case the compiler cannot handle or a profiler still flags.
+
+## When manual memoization actually helps (today)
+
+Until the compiler is universal, hand-memoization is still worth it for a few specific cases:
+
+- A **genuinely expensive** computation (sorting/filtering thousands of items, heavy math) → `useMemo`.
+- A value/function passed to a **memoized child** or an **effect dependency** where a new reference would cause extra renders or effect runs → `useCallback`/`useMemo`.
+- A **large, frequently-bypassed subtree** → `React.memo`.
+
+Outside those, memoizing usually costs more (memory + comparison + noise) than it saves. Measure.
+
+<Callout title="The one-line takeaway">
+`useMemo` caches a value, `useCallback` caches a function's identity, and `React.memo` skips a re-render on shallow-equal props — and the last two are a **pair**, because a fresh inline object/array/function defeats `React.memo`. But the **React Compiler** now auto-memoizes for you, so the modern default is to write clean, pure components and reserve manual memoization for the few cases a profiler still flags.
+</Callout>
+
+export const quizMemo = [
+  {
+    q: 'What does `useCallback` cache?',
+    options: [
+      'The return value of a computation',
+      'A function\'s identity (the same reference across renders) until a dependency changes',
+      'A component\'s rendered output',
+      'The DOM node',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does passing an inline `style={{ color: "red" }}` to a `React.memo` child defeat the memo?',
+    options: [
+      'Inline styles are invalid',
+      'A new object is created each render, so the shallow (reference) comparison fails and the child re-renders anyway',
+      'React.memo ignores style props',
+      'It does not — memo still skips',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Once the React Compiler is enabled, what is the recommended default?',
+    options: [
+      'Wrap everything in useMemo and useCallback manually',
+      'Write clean, pure components and let the compiler auto-memoize; reserve manual memoization for edge cases',
+      'Stop using hooks',
+      'Disable memoization entirely',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuinely good use of `useMemo` today?',
+    options: [
+      'Memoizing a simple string concatenation',
+      'Caching an expensive computation like sorting thousands of items',
+      'Wrapping every render value',
+      'Replacing state',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/memoization-in-practice" questions={quizMemo} />
+
+<ProgressTracker client:visible id="performance-and-patterns/memoization-in-practice" />

@@ -1,0 +1,147 @@
+---
+title: 'Composition Patterns'
+description: 'pattern สำหรับ component ที่ reuse ได้ — composition ด้วย children, compound component, render props (และทำไม hook มาแทน) และ controlled vs uncontrolled'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Composition คือ pattern พื้นฐาน
+
+คำตอบเรื่องการ reuse ของ React ไม่ใช่ inheritance แต่คือ **composition** แทนที่จะ extend component คุณส่ง content และ behavior *เข้าไป* ในมัน รูปแบบง่ายที่สุดคือ prop `children`: component รับ JSX อะไรก็ได้ แล้วตัดสินใจว่าจะวางไว้ตรงไหน
+
+```jsx
+// Card ทั่วไปที่ไม่รู้และไม่สนว่าข้างในมีอะไร
+function Card({ title, children }) {
+  return (
+    <section className="card">
+      <h3>{title}</h3>
+      <div className="card-body">{children}</div>
+    </section>
+  );
+}
+
+<Card title="Profile">
+  <Avatar user={user} />
+  <p>{user.bio}</p>
+</Card>
+```
+
+คุณส่ง JSX ผ่าน prop *ตัวไหนก็ได้* ไม่ใช่แค่ `children` — `<Layout sidebar={<Nav />} main={<Feed />} />` ก็คือ composition นี่คือวิธีเลี่ยง prop-drilling ลึก ๆ และ inheritance tree ที่แข็งทื่อ
+
+## Compound components
+
+เมื่อหลาย component ต้องทำงานร่วมกันและ **แชร์ state** pattern *compound component* จะเปิดเผยกลุ่มชิ้นส่วนที่ประสานงานกันผ่าน state ที่แชร์ (มักผ่าน context) — ในขณะที่ผู้ใช้จัดวางมันได้อย่างอิสระ
+
+```jsx
+// ผู้ใช้ compose ชิ้นส่วนเอง; Tabs แชร์ state ผ่าน context ภายใน
+<Tabs defaultValue="a">
+  <TabList>
+    <Tab value="a">First</Tab>
+    <Tab value="b">Second</Tab>
+  </TabList>
+  <TabPanel value="a">Panel A</TabPanel>
+  <TabPanel value="b">Panel B</TabPanel>
+</Tabs>
+```
+
+ภายใน `Tabs` ให้ค่า active + setter ผ่าน context; `Tab` และ `TabPanel` อ่านด้วย `useContext` ผู้ใช้ได้ API ที่ clean และ declarative พร้อมควบคุม layout เต็มที่ โดยไม่ต้องร้อย props ผ่านทุกชิ้น นี่คือวิธีที่ library อย่าง Radix และ Headless UI จัดโครงสร้าง component
+
+<Mermaid title="compound component แชร์ state ผ่าน context" code={compoundDiagram} />
+
+export const compoundDiagram = `flowchart TB
+  tabs["Tabs (ให้ value + setValue ผ่าน context)"] --> list["TabList"]
+  list --> tab["Tab (อ่าน context, เรียก setValue)"]
+  tabs --> panel["TabPanel (อ่าน context, แสดงถ้า active)"]`;
+
+## Render props และทำไม hook มาแทนส่วนใหญ่
+
+**render prop** คือ prop ที่ค่าเป็น function ที่ return JSX — ให้ component แชร์ *logic* ในขณะที่ผู้เรียกควบคุม *การ render*
+
+```jsx
+// Render prop: MouseTracker เป็นเจ้าของ logic, ผู้เรียก render เอง
+<MouseTracker render={({ x, y }) => <p>Cursor at {x}, {y}</p>} />
+```
+
+render props เป็นวิธีคลาสสิกในการแชร์ stateful logic ก่อนมี hook วันนี้ **custom hook** ทำแบบเดียวกันได้ตรงกว่า — ไม่มี wrapper component ไม่มีการซ้อน:
+
+```jsx
+// เทียบเท่าสมัยใหม่: custom hook
+function Component() {
+  const { x, y } = useMousePosition();   // แชร์ logic ผ่าน hook
+  return <p>Cursor at {x}, {y}</p>;      // ผู้เรียก render ตามปกติ
+}
+```
+
+คุณยังจะ *เห็น* render props อยู่ (บาง library ใช้ และ `children`-เป็น-function ก็คืออันหนึ่ง) แต่สำหรับการแชร์ logic ของคุณเอง หยิบ custom hook มาก่อน
+
+## Controlled vs uncontrolled
+
+input จะเป็น **controlled** เมื่อ React state เป็น single source of truth (`value` + `onChange`) และเป็น **uncontrolled** เมื่อ DOM ถือค่าไว้และคุณอ่านผ่าน ref (หรือใน React 19 อ่านจาก `FormData` ของ form ตอน submit)
+
+```jsx
+// Controlled: state ขับ input; validate/transform ได้ทุก keystroke
+const [name, setName] = useState("");
+<input value={name} onChange={(e) => setName(e.target.value)} />
+
+// Uncontrolled: DOM เป็นเจ้าของค่า; อ่านตอนที่ต้องการ
+const ref = useRef(null);
+<input defaultValue="Ada" ref={ref} />   // ref.current.value ตอน submit
+```
+
+ใช้ **controlled** เมื่อต้อง react หรือจำกัด input ระหว่างที่เปลี่ยน; ใช้ **uncontrolled** สำหรับ form ง่าย ๆ ที่สนใจแค่ค่าสุดท้าย (state น้อยกว่า, re-render น้อยกว่า)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+React reuse ด้วย **composition** ไม่ใช่ inheritance: ส่ง JSX ผ่าน `children` หรือ prop ใดก็ได้ **compound component** ให้กลุ่มชิ้นส่วนแชร์ state ผ่าน context ในขณะที่ผู้ใช้จัดวางได้อิสระ **render props** แชร์ logic แต่ถูกแทนที่ด้วย **custom hook** เป็นส่วนใหญ่แล้ว และ input เป็น **controlled** (state เป็น source of truth) หรือ **uncontrolled** (DOM เป็น) — เลือก controlled เมื่อต้อง react ต่อการเปลี่ยนแปลง, uncontrolled สำหรับ form ที่สนแค่ค่าสุดท้าย
+</Callout>
+
+export const quizComposition = [
+  {
+    q: 'กลไกหลักของ React ในการ reuse คืออะไร?',
+    options: [
+      'class inheritance',
+      'composition — ส่ง content และ behavior เข้าไปใน component (เช่นผ่าน children)',
+      'global mixin',
+      'copy-paste component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'compound component (เช่น `<Tabs><Tab/></Tabs>`) มักแชร์ state อย่างไร?',
+    options: [
+      'global variable',
+      'ผ่าน context ที่ parent ให้ แล้วชิ้นส่วนอ่านด้วย useContext',
+      'prop-drill ผ่านทุกชั้น',
+      'แชร์ state ไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'feature สมัยใหม่อะไรที่มาแทนการใช้ render props เพื่อแชร์ logic เป็นส่วนใหญ่?',
+    options: [
+      'higher-order component',
+      'custom hook',
+      'context อย่างเดียว',
+      'class component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'controlled input เป็นตัวเลือกที่ถูกเมื่อไร?',
+    options: [
+      'เมื่อต้องการแค่ค่าสุดท้ายตอน submit',
+      'เมื่อต้อง react หรือจำกัด input ทุกครั้งที่เปลี่ยน (validation, formatting)',
+      'ไม่มีวัน — uncontrolled ดีกว่าเสมอ',
+      'เฉพาะ checkbox',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/composition-patterns" questions={quizComposition} />
+
+<ProgressTracker client:visible id="performance-and-patterns/composition-patterns" />

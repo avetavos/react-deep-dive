@@ -1,0 +1,96 @@
+---
+title: 'The React Compiler'
+description: 'auto-memoization ตอน build time ที่ใส่สิ่งที่เทียบเท่า useMemo, useCallback และ memo ให้คุณ — และทำไมมันทำให้ manual memoization ส่วนใหญ่เลิกจำเป็น'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## งานจุกจิกที่มันลบทิ้ง
+
+ในอดีต การทำให้ React เร็วหมายถึงต้องโรย memoization ด้วยมือ: `useMemo` เพื่อ cache ค่าที่คำนวณแพง, `useCallback` เพื่อให้ identity ของ function คงที่, `React.memo` เพื่อข้ามการ re-render component ที่ props ไม่เปลี่ยน มันได้ผล แต่รก, ทำพลาดง่าย (ลืม dependency, comparison ผิด) และทำให้ code ที่ควรจะเรียบง่ายรกไปหมด
+
+**React Compiler** เป็นเครื่องมือ **build-time** ที่ทำสิ่งนี้อัตโนมัติ มันวิเคราะห์ component ของคุณและใส่ memoization ที่เทียบเท่าให้ คุณจึงเขียน code แบบตรงไปตรงมาและยังได้พฤติกรรมข้ามงานที่ไม่จำเป็น:
+
+```jsx
+// You write this — no useMemo, no useCallback, no memo:
+function ProductList({ products, query }) {
+  const filtered = products.filter((p) => p.name.includes(query));
+  return (
+    <ul>
+      {filtered.map((p) => <Product key={p.id} product={p} onSelect={() => select(p.id)} />)}
+    </ul>
+  );
+}
+// The compiler memoizes `filtered`, the `onSelect` callbacks, and the elements
+// so unrelated state changes don't re-run or re-render this needlessly.
+```
+
+ตาม React docs, compiler **ใส่สิ่งที่เทียบเท่า `memo` ให้ทุก component อัตโนมัติ** ซึ่งเป็นเหตุผลว่าทำไมมัน "ลดความจำเป็นของ manual memoization"
+
+## นี่หมายความว่าอย่างไรต่อคำแนะนำเรื่อง memoization
+
+โมดูล Hooks ครอบคลุม `useMemo`/`useCallback`/`memo` เชิงลึก — และคุณยังต้อง *เข้าใจ* มัน เพราะคุณจะอ่าน code เก่าที่เต็มไปด้วยมัน และต้องรู้ว่ามันทำอะไร แต่ต่อจากนี้คำแนะนำจะพลิก:
+
+- **เมื่อ adopt compiler แล้ว:** เขียน code แบบตรงไปตรงมา; อย่าเอื้อมไปหยิบ `useMemo`/`useCallback` โดย default ปล่อยให้ compiler ตัดสิน
+- **เมื่อไม่มี (หรือใน library ที่ ship แบบยังไม่ compile):** manual memoization ยังเป็นเครื่องมือ
+
+ทักษะจึงเปลี่ยนจาก "ฉันควรใส่ `useMemo` ตรงไหน?" เป็น "code ฉันเขียนตามที่ compiler คาดหวังไหม?"
+
+## compiler พึ่งพา Rules of React
+
+compiler จะ memoize ได้อย่างปลอดภัยเฉพาะ code ที่ตาม **Rules of React** — หลัก ๆ คือ **render ต้อง pure** และคุณ **ต้องไม่ mutate** props, state หรือค่าที่ไม่ได้เป็นของคุณ ถ้าคุณละเมิดกฎเหล่านั้น (mutate ตอน render, อ่าน/เขียนของภายนอกใน render body) compiler จะการันตีไม่ได้ว่า component ปลอดภัยที่จะ memoize และอาจข้ามมันไป นี่คือผลตอบแทนเชิงปฏิบัติของ purity ที่คุณเรียนใน Foundations: มันไม่ใช่แค่สุขอนามัยเรื่องความถูกต้อง แต่คือสิ่งที่ปลดล็อก optimization อัตโนมัติ
+
+<Mermaid title="manual vs compiler memoization" code={compilerDiagram} />
+
+export const compilerDiagram = `flowchart TB
+  before["Before: you add\nuseMemo / useCallback / memo\nby hand (noisy, error-prone)"] --> after["React Compiler\n(build time)"]
+  after --> result["Plain code +\nauto-inserted memoization"]
+  rules["Rules of React\n(pure render, no mutation)"] --> after`;
+
+สถานะตามจริง: React Compiler เป็นเครื่องมือ auto-memoization อย่างเป็นทางการในปัจจุบัน ใช้งานผ่าน build configuration และ directive ระดับ function และกำลังทยอย roll out ทั่ว ecosystem มองมันเป็นทิศทางที่กำลังไป — เขียน code ที่เป็นมิตรกับ compiler (pure) ตั้งแต่ตอนนี้ และพึ่งมันแทนการ memoize ทุกอย่างด้วยมือ
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**React Compiler** เป็นเครื่องมือ build-time ที่ใส่สิ่งที่เทียบเท่า `useMemo`/`useCallback`/`memo` อัตโนมัติ คุณจึงเขียน code แบบเรียบง่ายและยังข้ามงานที่ไม่จำเป็น — มัน "ใส่สิ่งที่เทียบเท่า `memo` ให้ทุก component อัตโนมัติ" มันทำงานได้เฉพาะกับ code ที่ตาม **Rules of React** (render pure, ไม่ mutate) ซึ่งเป็นเหตุผลว่าทำไม purity ถึงสำคัญ คำแนะนำเปลี่ยนจาก "ฉันควรใส่ memoization ตรงไหน?" เป็น "code ฉันเป็นมิตรกับ compiler ไหม?"
+</Callout>
+
+export const quizCompiler = [
+  {
+    q: 'React Compiler ทำอะไร?',
+    options: [
+      'compile JSX เป็น string ตอน runtime',
+      'ตอน build time ใส่สิ่งที่เทียบเท่า useMemo/useCallback/memo อัตโนมัติ คุณจึงไม่ต้อง memoize เอง',
+      'minify CSS',
+      'type-check props ให้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อ adopt compiler แล้ว คำแนะนำเรื่อง manual memoization คืออะไร?',
+    options: [
+      'ใส่ useMemo/useCallback ทุกที่เหมือนเดิม',
+      'เขียน code แบบตรงไปตรงมาและปล่อยให้ compiler memoize — อย่าเอื้อมไปหยิบ useMemo/useCallback โดย default',
+      'อย่าใช้ state เลย',
+      'memoize เฉพาะ class component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'code ของคุณต้องตามอะไรเพื่อให้ compiler memoize ได้อย่างปลอดภัย?',
+    options: [
+      'scheme การตั้งชื่อไฟล์เฉพาะ',
+      'Rules of React — render pure, ไม่ mutate props/state/ค่าภายนอก',
+      'TypeScript เท่านั้น',
+      'ขนาด bundle ขั้นต่ำ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/the-react-compiler" questions={quizCompiler} />
+
+<ProgressTracker client:visible id="react-19/the-react-compiler" />

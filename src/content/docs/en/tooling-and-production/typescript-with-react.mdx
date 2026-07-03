@@ -1,0 +1,137 @@
+---
+title: 'TypeScript with React'
+description: 'Typing components, props, children, hooks, and events — plus the React 19 change that ref is now a normal prop, so forwardRef generics are gone.'
+sidebar:
+  order: 4
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Typing a component and its props
+
+A React component is a function, so you type it by typing its props. Define a `type` (or `interface`) for the props and annotate the parameter:
+
+```tsx
+type ButtonProps = {
+  label: string;
+  onClick: () => void;
+  variant?: 'primary' | 'secondary';  // optional, a literal union
+};
+
+function Button({ label, onClick, variant = 'primary' }: ButtonProps) {
+  return <button className={variant} onClick={onClick}>{label}</button>;
+}
+```
+
+Prefer typing the props object directly (as above) over the older `React.FC` — `React.FC` has fallen out of favor (it complicates generics and children typing). Just annotate the destructured props parameter.
+
+## Children and common React types
+
+When a component wraps other content, type `children` as `React.ReactNode` — the broadest "anything renderable" type:
+
+```tsx
+type CardProps = {
+  title: string;
+  children: React.ReactNode;   // JSX, strings, numbers, arrays, null…
+};
+
+function Card({ title, children }: CardProps) {
+  return <section><h2>{title}</h2>{children}</section>;
+}
+```
+
+Other types you'll reach for: `React.ReactNode` (renderable content), `React.ComponentProps<'button'>` (steal a host element's props), and `React.CSSProperties` (a `style` object).
+
+## Typing hooks
+
+Inference handles most hooks, but supply a type argument when the initial value doesn't pin it down:
+
+```tsx
+const [count, setCount] = useState(0);               // inferred: number
+const [user, setUser] = useState<User | null>(null); // needs the annotation
+
+const inputRef = useRef<HTMLInputElement>(null);     // ref to a DOM node
+const timer = useRef<number | undefined>(undefined); // ref to a mutable value
+```
+
+## Typing events
+
+Event handlers get typed event objects. Let contextual typing infer them inline where possible; annotate when you extract the handler:
+
+```tsx
+function onChange(e: React.ChangeEvent<HTMLInputElement>) {
+  console.log(e.target.value);
+}
+<button onClick={(e) => e.preventDefault()}>Go</button>  // e inferred as React.MouseEvent
+```
+
+## React 19: ref is a normal prop
+
+A concrete currency win: in **React 19, `ref` is a regular prop** for function components, so you no longer need `forwardRef` and its awkward generics. You type `ref` right alongside the other props:
+
+```tsx
+// React 19 — ref is just a prop.
+type InputProps = {
+  placeholder?: string;
+  ref?: React.Ref<HTMLInputElement>;
+};
+
+function TextInput({ placeholder, ref }: InputProps) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+```
+
+`forwardRef` still works and older code using `React.forwardRef<HTMLInputElement, Props>` is fine, but for new components in React 19 you skip it entirely — one fewer wrapper and no generic gymnastics.
+
+<Callout title="The one-line takeaway">
+Type a component by typing its **props object** (skip `React.FC`); type `children` as `React.ReactNode`; give hooks a type argument when the initial value is ambiguous (`useState<User | null>(null)`, `useRef<HTMLInputElement>(null)`); and type events with `React.ChangeEvent`/`MouseEvent`. In **React 19, `ref` is a normal prop** — type it as `React.Ref<T>` in your props and drop `forwardRef` for new code.
+</Callout>
+
+export const quizTs = [
+  {
+    q: 'How should you type a component’s props in modern React + TypeScript?',
+    options: [
+      'Always use React.FC<Props>',
+      'Define a type/interface for the props and annotate the destructured parameter',
+      'Use `any`',
+      'Type only the return value',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What type do you use for a component’s `children`?',
+    options: [
+      'string',
+      'React.ReactNode',
+      'JSX.Element only',
+      'object',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When must you pass a type argument to useState?',
+    options: [
+      'Always',
+      'When the initial value doesn’t pin down the type — e.g. `useState<User | null>(null)`',
+      'Never',
+      'Only for numbers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you handle a ref on a function component in React 19?',
+    options: [
+      'Wrap it in forwardRef with generics',
+      '`ref` is a normal prop — type it as `React.Ref<T>` in the props, no forwardRef needed',
+      'Refs cannot be typed',
+      'Use a global variable',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/typescript-with-react" questions={quizTs} />
+
+<ProgressTracker client:visible id="tooling-and-production/typescript-with-react" />

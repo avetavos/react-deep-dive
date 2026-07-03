@@ -1,0 +1,116 @@
+---
+title: 'Testing'
+description: 'test React แบบที่ user ใช้จริง — React Testing Library บน Vitest, query ด้วย role, userEvent และทำไมต้อง test behavior ไม่ใช่ implementation detail'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## test behavior ไม่ใช่ implementation
+
+แนวทางหลักในการ test React component คือ **React Testing Library (RTL)** ปกติรันบน **Vitest** (หรือ Jest) หลักการนำทางของมันคือ:
+
+> ยิ่ง test ของคุณเหมือนวิธีที่ software ถูกใช้จริงมากเท่าไร มันยิ่งให้ความมั่นใจมากขึ้นเท่านั้น
+
+หมายความว่าคุณไม่ test internal state, ชื่อ prop หรือว่า component เรียก hooks ตัวไหน คุณ render component, โต้ตอบกับมันแบบที่ user ทำ (click, type) แล้ว assert สิ่งที่ user เห็น เมื่อคุณ refactor internal — สลับ `useState` เป็น `useReducer`, แยก hook — test ที่อิง behavior ก็ยังผ่าน เพราะ behavior ไม่เปลี่ยน ส่วน test ที่อิง implementation จะพังโดยไม่มีเหตุผลจริง
+
+## test widget แบบ end to end
+
+```tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { expect, test } from 'vitest';
+import Counter from './Counter';
+
+test('increments when the button is clicked', async () => {
+  const user = userEvent.setup();
+  render(<Counter />);
+
+  // Query the way a user finds things: by role and accessible name.
+  const button = screen.getByRole('button', { name: /count: 0/i });
+
+  await user.click(button);
+
+  // Assert on what the user sees, not on internal state.
+  expect(screen.getByRole('button', { name: /count: 1/i })).toBeInTheDocument();
+});
+```
+
+นิสัยสำคัญ:
+
+- **query ด้วย role/label/text** ตามลำดับนี้ — `getByRole` ดีที่สุดเพราะสะท้อนวิธีที่ assistive tech (และ user) หา element ซึ่งยัง nudge ให้คุณเขียน markup ที่ accessible
+- **ใช้ `userEvent`** ไม่ใช่ `fireEvent` ดิบ ๆ สำหรับ interaction — มัน simulate การกระทำของ user จริง (focus, key sequence) ได้แม่นกว่า
+- **assert สิ่งที่ render ออกมา** (`toBeInTheDocument`, text ที่เห็น) ไม่ใช่ `component.state`
+
+## testing pyramid ฉบับ React
+
+| ระดับ | เครื่องมือ | ครอบคลุมอะไร |
+|-------|------|----------------|
+| **Unit** | Vitest | pure function, custom hook (`renderHook`), reducer |
+| **Component** | RTL + Vitest | behavior ของ component แบบ isolate (test ส่วนใหญ่ของคุณ) |
+| **End-to-end** | Playwright / Cypress | browser จริง, user flow เต็มข้ามหลายหน้า |
+
+<Mermaid title="test แต่ละแบบคุ้มค่าตรงไหน" code={pyramidDiagram} />
+
+export const pyramidDiagram = `flowchart TB
+  e2e["End-to-end (few)\nPlaywright — real browser, whole flows"]
+  comp["Component (many)\nRTL + Vitest — behavior in isolation"]
+  unit["Unit (some)\nVitest — pure logic, hooks, reducers"]
+  e2e --> comp --> unit`;
+
+แรงส่วนใหญ่ของคุณอยู่ตรงกลาง — RTL component test — เพราะที่นั่นคือที่ที่ logic ของ React อยู่จริง test end-to-end ไม่กี่ตัวครอบ happy path สำคัญข้าม app จริง
+
+<Callout title="The one-line takeaway">
+test React ด้วย **React Testing Library บน Vitest** และ test **behavior ไม่ใช่ implementation**: render component, โต้ตอบด้วย `userEvent` และ query ด้วย **role/label/text** — อย่า assert internal state หรือการเรียก hook วิธีนี้ทำให้ refactor ที่ไม่เปลี่ยน behavior ไม่ทำให้ test พัง ลงแรงส่วนใหญ่กับ component test พร้อม Playwright end-to-end ไม่กี่ตัวสำหรับ flow สำคัญ
+</Callout>
+
+export const quizTesting = [
+  {
+    q: 'หลักการนำทางของ React Testing Library คืออะไร?',
+    options: [
+      'test ทุก internal state variable',
+      'ยิ่ง test เหมือนวิธีที่ software ถูกใช้จริง ยิ่งมั่นใจ — test behavior ไม่ใช่ internal',
+      'test แค่ว่า component render โดยไม่ crash',
+      'mock ทุกอย่างรวมถึง DOM',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'query แบบไหนที่แนะนำให้ใช้หา element ใน RTL?',
+    options: [
+      'getByTestId เสมอ',
+      'getByRole (สะท้อนวิธีที่ user และ assistive tech หา element)',
+      'querySelector บน class name',
+      'เข้าถึง DOM ด้วย index',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม test ที่อิง behavior ดีกว่าอิง implementation?',
+    options: [
+      'รันเร็วกว่า',
+      'refactor internal (เช่น useState → useReducer) ไม่ทำให้มันพัง เพราะ behavior ไม่เปลี่ยน',
+      'ไม่ต้อง assert',
+      'มัน test compiler',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'test React ส่วนใหญ่อยู่ตรงไหนใน pyramid?',
+    options: [
+      'end-to-end test',
+      'component test (RTL + Vitest) เพราะที่นั่นคือที่ที่ logic ของ React อยู่',
+      'manual testing',
+      'snapshot test อย่างเดียว',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/testing" questions={quizTesting} />
+
+<ProgressTracker client:visible id="tooling-and-production/testing" />

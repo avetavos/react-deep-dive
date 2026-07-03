@@ -1,0 +1,156 @@
+---
+title: 'Actions & useActionState'
+description: 'async form action พร้อม pending, error และ result state ในตัว — useActionState ยุบ pattern useState-บวก-try-catch-บวก-loading เหลือ call เดียว'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## pattern ที่ React 19 ลบทิ้ง
+
+ก่อนมี Actions การ submit form หมายถึงต้อง wire state สามชิ้นด้วยมือ และต้องจำอัปเดตทุกตัว:
+
+```jsx
+// The old way — lots of manual bookkeeping.
+function ChangeName() {
+  const [name, setName] = useState('');
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setIsPending(true);
+    setError(null);
+    try {
+      await updateName(name);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsPending(false); // must not forget this
+    }
+  }
+  // ...form wired to handleSubmit
+}
+```
+
+async form ทุกอันในแอปทำซ้ำแบบนี้: loading flag, error slot, `try/catch/finally` มันคือ boilerplate และถ้าลืม `finally` spinner จะค้างตลอดกาล
+
+## Action: async function ที่ส่งให้ form
+
+**Action** ก็แค่ async function ที่คุณส่งให้ `<form>` ผ่าน prop `action` React เรียกมันตอน submit, ส่ง `FormData` ให้ และจัดการ pending state กับการ reset form ให้:
+
+```jsx
+<form action={async (formData) => {
+  await updateName(formData.get('name'));
+}}>
+  <input name="name" />
+  <button type="submit">Update</button>
+</form>
+```
+
+ไม่ต้อง `onSubmit`, ไม่ต้อง `preventDefault`, ไม่ต้องประกอบ `FormData` เอง แต่คุณยังต้องการ state ของ *pending* และ *error* เพื่อแสดงให้ user เห็นว่าเกิดอะไรขึ้น — นั่นคือสิ่งที่ `useActionState` เพิ่มเข้ามา
+
+## useActionState: pending, error และ result ใน call เดียว
+
+`useActionState(action, initialState)` ห่อ action ของคุณและคืน **tuple สามตัว**: state ปัจจุบัน, action ที่ห่อแล้วสำหรับส่งให้ form และ boolean pending
+
+```jsx
+import { useActionState } from 'react';
+
+function ChangeName() {
+  const [error, submitAction, isPending] = useActionState(
+    async (previousState, formData) => {
+      const error = await updateName(formData.get('name'));
+      if (error) {
+        return error;        // returned value becomes the new state
+      }
+      redirect('/profile');
+      return null;           // success: clear the error
+    },
+    null,                    // initial state
+  );
+
+  return (
+    <form action={submitAction}>
+      <input type="text" name="name" />
+      <button type="submit" disabled={isPending}>Update</button>
+      {error && <p>{error}</p>}
+    </form>
+  );
+}
+```
+
+อ่าน shape ให้ดี ๆ — นี่คือส่วนที่คนมักทำผิด:
+
+- **action** รับ `(previousState, formData)` และ return **state ถัดไป**
+- `useActionState` คืน `[state, formAction, isPending]` — `state` คือค่าที่ action คุณ return ล่าสุด, `formAction` คือสิ่งที่ส่งให้ `<form action={...}>` และ `isPending` ถูกจัดการให้
+
+<Mermaid title="lifecycle ของ Action" code={actionDiagram} />
+
+export const actionDiagram = `sequenceDiagram
+  participant U as User
+  participant F as form action
+  participant A as your async action
+  U->>F: submit
+  F->>F: isPending = true
+  F->>A: action(prevState, formData)
+  A-->>F: returns next state
+  F->>F: isPending = false, state updated
+  F->>U: re-render with new state`;
+
+ทั้งการเต้นสามจังหวะ — loading flag, error slot, try/catch/finally — ยุบเหลือ hook เดียวที่ลืม reset spinner ไม่ได้
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**Action** คือ async function ที่ส่งให้ `<form action={fn}>`; React เรียกมันพร้อม `FormData` และจัดการการ submit ให้ **`useActionState(action, initialState)`** ห่อมันและคืน **`[state, formAction, isPending]`** — action รับ `(previousState, formData)` และ return state ถัดไป และ pending ถูก track อัตโนมัติ นี่แทนที่ boilerplate เดิมที่ต้องมี `useState`-สำหรับ-data + `useState`-สำหรับ-loading + `try/catch/finally`
+</Callout>
+
+export const quizActions = [
+  {
+    q: '"Action" ของ React 19 คืออะไร?',
+    options: [
+      'Redux action object',
+      'async function ที่ส่งให้ form ผ่าน prop action; React เรียกมันตอน submit พร้อม FormData',
+      'CSS transition',
+      'router redirect',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`useActionState(action, initialState)` คืนอะไร?',
+    options: [
+      'แค่ boolean pending',
+      'tuple: [state, formAction, isPending]',
+      'object FormData',
+      'promise',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'action ที่ส่งให้ useActionState รับ argument อะไร?',
+    options: [
+      '(event)',
+      '(previousState, formData) — และ return state ถัดไป',
+      '(props, context)',
+      'ไม่รับอะไรเลย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'useActionState แทนที่ boilerplate อะไร?',
+    options: [
+      'ตัว JSX เอง',
+      'loading flag + error state + try/catch/finally รอบการ submit แบบ async ที่ทำด้วยมือ',
+      'บรรทัด import',
+      'ตัว function component',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/actions-and-useactionstate" questions={quizActions} />
+
+<ProgressTracker client:visible id="react-19/actions-and-useactionstate" />

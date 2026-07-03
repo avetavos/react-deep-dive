@@ -1,0 +1,80 @@
+---
+title: 'React 19: Actions, RSC & Forms'
+description: 'React 19 เพิ่มอะไรและทำไมมันเปลี่ยนวิธีเขียนแอป — Actions, use hook, ref เป็น prop, Server Components และ React Compiler'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## เวอร์ชันที่ลบ boilerplate ทิ้ง
+
+React 19 ไม่ได้เน้น syntax ใหม่ แต่เน้น **ลบ pattern ที่คุณเคยต้องเขียนเองด้วยมือ** ธีมที่วนซ้ำคือ: สิ่งที่คุณเคย wire เอง — loading flag, `try/catch` รอบการ submit, `useMemo` เต็มไปหมด, `forwardRef` wrapper — ตอนนี้ React ทำให้แทน
+
+โมดูลนี้ครอบคลุมห้าการเปลี่ยนแปลงที่สำคัญที่สุดในการเขียน code ประจำวัน
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Server Components | component ที่รันบน server, fetch ตรง ๆ และไม่ส่ง code ไป client |
+| Actions & useActionState | async form action พร้อม pending/error state ในตัว |
+| Forms & useOptimistic | `useFormStatus` และ optimistic UI แบบทันที |
+| The React Compiler | auto-memoization ตอน build time ที่ทำให้ `useMemo`/`useCallback` แบบ manual เลิกจำเป็น |
+
+## เส้นเรื่องหลัก
+
+<Mermaid title="React 19: wiring ด้วยมือน้อยลง" code={themeDiagram} />
+
+export const themeDiagram = `flowchart LR
+  old["Before: you wrote it\nloading flags · try/catch\nuseMemo everywhere · forwardRef"] --> r19["React 19"]
+  r19 --> new["Now React does it\nActions + useActionState\nCompiler auto-memo\nref as a prop"]`;
+
+นอกจากสี่หัวข้อในโมดูลนี้ ยังมีอีกสองการเปลี่ยนแปลงเล็ก ๆ ของ React 19 ที่เจอได้ทุกที่:
+
+- **`ref` เป็น prop แล้ว** function component รับ `ref` ได้ตรง ๆ — `forwardRef` ไม่จำเป็นสำหรับ code ใหม่อีกต่อไป (อยู่ในโมดูล Hooks)
+- **`use()` hook** อ่าน promise หรือ context และทำงานร่วมกับ Suspense (อยู่ในโมดูล Concurrent) เป็นครึ่งฝั่ง client ของเรื่อง Server Components
+
+<Callout title="การเปลี่ยนวิธีคิด">
+React ยุคก่อนสอนให้คุณ *จัดการ* async เอง: `useState` ตัวหนึ่งสำหรับ data, อีกตัวสำหรับ loading, อีกตัวสำหรับ error และ `useEffect` มาผูกทุกอย่างเข้าด้วยกัน Actions ของ React 19 ยุบทั้งหมดนั้นเหลือ `useActionState` call เดียว และ compiler ก็ลบงานจุกจิกเรื่อง memoization ออกไป คุณเขียน *ว่า UI คืออะไร* แล้ว React จัดการ *ว่าจะทำอย่างไร* ให้มากขึ้น
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ธีมที่วนซ้ำของ React 19 คืออะไร?',
+    options: [
+      'component syntax ใหม่ทั้งหมด',
+      'ลบ boilerplate ที่เขียนด้วยมือ — loading flag, try/catch, manual memoization, forwardRef',
+      'เลิกรองรับ hooks',
+      'แทนที่ JSX',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน React 19 function component รับ ref อย่างไร?',
+    options: [
+      'ผ่าน forwardRef เท่านั้นเหมือนเดิม',
+      'เป็น prop ธรรมดา — forwardRef ไม่จำเป็นสำหรับ code ใหม่อีกต่อไป',
+      'ref ถูกลบออก',
+      'ผ่าน context เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'React Compiler ทำอะไร?',
+    options: [
+      'compile JSX เป็น HTML string',
+      'memoize component และ value อัตโนมัติตอน build time ลดความจำเป็นของ useMemo/useCallback แบบ manual',
+      'รัน test ให้',
+      'bundle CSS ให้',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="react-19/index" />

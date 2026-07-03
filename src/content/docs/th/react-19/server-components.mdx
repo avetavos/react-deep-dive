@@ -1,0 +1,130 @@
+---
+title: 'Server Components'
+description: 'component ที่ render บน server, fetch data ตรง ๆ และไม่ส่งไป client — server/client boundary, use client และอะไรที่ข้าม boundary ได้'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## component ที่ไม่มีวันไปถึง browser
+
+**React Server Component (RSC)** รันบน server, ผลิต output ที่นั่น และ **ไม่ส่ง code ไปที่ client** browser ได้รับแค่ *ผลลัพธ์* ไม่ใช่ตัว component นั่นให้ประโยชน์สองอย่าง: dependency ของ component (Markdown parser, database client) ไม่ไปอยู่ใน client bundle และ component เข้าถึง resource ของ server ได้ตรง ๆ
+
+เพราะรันบน server, Server Component จึงเป็น **async** และ fetch data แบบ inline ได้ — ไม่ต้อง `useEffect`, ไม่ต้องมี loading state, ไม่ต้อง round-trip ไป client:
+
+```jsx
+// Server Component — runs on the server. Note: it's an async function.
+export default async function ProductPage({ id }) {
+  const product = await db.products.findById(id); // direct DB access, on the server
+  return (
+    <article>
+      <h1>{product.name}</h1>
+      <p>{product.description}</p>
+    </article>
+  );
+}
+```
+
+ไม่มี `'use client'` ตรงนี้ มันจึงเป็น Server Component มัน await data แล้ว return JSX; client เห็นแค่ markup ที่ render แล้วเท่านั้น
+
+## server/client boundary: `'use client'`
+
+Server Component ทำเรื่อง interactive ไม่ได้ — ไม่มี `useState`, ไม่มี `onClick`, ไม่มี browser API เพราะ code นั้นไม่เคยรันใน browser เมื่อคุณต้องการ interactivity คุณข้ามไปเป็น **Client Component** โดยใส่ directive `'use client'` ที่ด้านบนของไฟล์:
+
+```jsx
+'use client';
+import { useState } from 'react';
+
+// Client Component — ships to the browser, can use state and events.
+export default function AddToCart({ productId }) {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>In cart: {count}</button>;
+}
+```
+
+`'use client'` มาร์ค **boundary**: ไฟล์นั้นและทุกอย่างที่มัน import จะกลายเป็น client code Server Component สามารถ *render* Client Component ได้ (server page ใส่ปุ่ม interactive ได้) แต่ทิศทางกลับกันไม่ได้แบบเดียวกัน — ทิศของ boundary สำคัญ
+
+<Mermaid title="server/client boundary" code={boundaryDiagram} />
+
+export const boundaryDiagram = `flowchart TB
+  subgraph server["Server (never shipped)"]
+    sc["Server Component\nasync, DB access, secrets"]
+  end
+  subgraph client["Client (shipped to browser)"]
+    cc["Client Component\nuse client, useState, onClick"]
+  end
+  sc -->|renders + passes\nserializable props| cc`;
+
+## อะไรข้าม boundary ได้บ้าง
+
+Server Component ส่ง **props** ให้ Client Component แต่ props เหล่านั้นต้อง **serializable** — ต้องรอดจากการถูกส่งข้าม network ในรูปของ data:
+
+- ✅ string, number, boolean, plain object/array, JSX และ **promise** (client resolve ด้วย `use()`)
+- ❌ function (event handler), class instance หรืออะไรที่ถือ live state — serialize แล้วส่งไม่ได้
+
+```jsx
+// Server Component passes a promise across the boundary:
+export default function Page() {
+  const commentsPromise = fetchComments(); // not awaited here
+  return <Comments commentsPromise={commentsPromise} />; // Client resolves it with use()
+}
+```
+
+## RSC มาจาก framework
+
+ข้อควรรู้ตามจริง: คุณไม่ได้ Server Components จาก `react` เปล่า ๆ + bundler RSC ต้องใช้ framework หรือ build setup ที่เข้าใจการแยก server/client และ serialize boundary ได้ — ในทางปฏิบัติคือ **Next.js (App Router)** และ framework อื่นที่รองรับ RSC แนวคิดเป็นของ React ส่วนการ wiring เป็นของ framework
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**Server Component** รันบน server เป็น `async` และ fetch data ตรง ๆ ได้ และไม่ส่ง code ไป browser — client ได้ผลลัพธ์ที่ render แล้ว ใส่ `'use client'` เพื่อข้ามไปเป็น **Client Component** ที่ interactive (state, event) props ที่ข้าม boundary ต้อง **serializable** (รวมถึง promise ที่ client อ่านด้วย `use()`) RSC ใช้งานผ่าน framework อย่าง Next.js App Router ไม่ใช่ React เปล่า ๆ
+</Callout>
+
+export const quizRsc = [
+  {
+    q: 'อะไรคือจุดเด่นของ React Server Component?',
+    options: [
+      'มันรันใน Web Worker',
+      'มันรันบน server และไม่ส่ง code ไป client — browser ได้ผลลัพธ์ที่ render แล้ว',
+      'มันคือ JSX ที่เร็วกว่า',
+      'มันต้องใช้ useEffect เพื่อ fetch data',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Server Component fetch data อย่างไร?',
+    options: [
+      'ด้วย useEffect และ useState เท่านั้น',
+      'ตรง ๆ — มันเป็น async และ await data (เช่น DB call) บน server ได้',
+      'มัน fetch data ไม่ได้',
+      'ผ่าน client-only API',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'directive `use client` มาร์คอะไร?',
+    options: [
+      'ว่าไฟล์ควรถูกลบ',
+      'boundary ที่ code กลายเป็น Client Component (ส่งไป browser, ใช้ state และ event ได้)',
+      'function ที่ใช้บน server เท่านั้น',
+      'CSS module',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'prop ใดที่ส่งจาก Server Component ไป Client Component ไม่ได้?',
+    options: [
+      'string',
+      'plain object',
+      'function (event handler) — เพราะ serialize ไม่ได้',
+      'promise',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="react-19/server-components" questions={quizRsc} />
+
+<ProgressTracker client:visible id="react-19/server-components" />

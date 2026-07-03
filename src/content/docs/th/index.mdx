@@ -1,0 +1,60 @@
+---
+title: React Deep Dive
+description: เชี่ยวชาญ React ตั้งแต่พื้นฐาน — model แบบ UI-เป็น-ฟังก์ชันของ state, JSX, reconciliation, hooks เชิงลึก, state management, concurrent features และ Suspense, React 19 Actions และ Server Components, React Compiler, performance และ production สำหรับ React 19
+template: splash
+hero:
+  tagline: คอร์สแบบ standalone ระดับ intermediate→advanced ว่าด้วย React 19 ตั้งแต่ rendering model และ reconciliation ไปจนถึง hooks เชิงลึก, state และ data flow, transitions และ Suspense, Server Components และ Actions, React Compiler และ performance — สอนผ่าน code ที่ annotate ให้เห็นชัดว่า React ทำอะไรและทำไม
+  actions:
+    - text: เริ่มที่นี่
+      link: /react/th/foundations/
+      icon: right-arrow
+      variant: primary
+    - text: ข้ามไปที่ Hooks
+      link: /react/th/hooks/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## สิ่งที่คุณจะได้เรียน
+
+<CardGrid>
+  <Card title="Foundations & Mental Model" icon="rocket">
+    UI เป็นฟังก์ชันของ state, JSX & element, reconciliation และทำไม render ต้อง pure [เริ่ม →](/react/th/foundations/)
+  </Card>
+  <Card title="Hooks In Depth" icon="seti:react">
+    useState, useEffect (และเมื่อไรไม่ควรใช้), useRef, memoization & compiler และ custom hooks [เรียน →](/react/th/hooks/)
+  </Card>
+  <Card title="State Management & Data Flow" icon="seti:plan">
+    lifting state, composition, Context, useReducer และ external store [จัดการ →](/react/th/state-and-data/)
+  </Card>
+  <Card title="Concurrent React & Suspense" icon="random">
+    transitions, useDeferredValue, Suspense & lazy, error boundary และ use() hook [concurrent →](/react/th/concurrent-and-suspense/)
+  </Card>
+  <Card title="React 19: Actions, RSC & Forms" icon="approve-check">
+    Server Components, Actions & useActionState, useOptimistic & form และ React Compiler [level up →](/react/th/react-19/)
+  </Card>
+  <Card title="Performance & Patterns" icon="seti:config">
+    rendering performance, memoization ในทางปฏิบัติ, composition pattern และ escape hatch [optimize →](/react/th/performance-and-patterns/)
+  </Card>
+  <Card title="Tooling, Testing & Production" icon="puzzle">
+    Vite & framework, testing ด้วย RTL, TypeScript กับ React และ ecosystem ตอน production [ship →](/react/th/tooling-and-production/)
+  </Card>
+</CardGrid>
+
+## คอร์สนี้ทำงานยังไง
+
+<CardGrid>
+  <Card title="เข้าใจ model ก่อน แล้วค่อยดู code" icon="rocket">
+    ทุกหัวข้อเริ่มจาก model — UI = f(state), reconciliation ตัดสินใจอย่างไรว่าอะไรเปลี่ยน, ทำไม effect ถึง sync กับโลกภายนอก — พอเข้าใจแล้ว React จะเลิกดูเหมือนเวทมนตร์และกลายเป็นเรื่องที่สมเหตุสมผล
+  </Card>
+  <Card title="React 19 ที่ verify แล้ว" icon="seti:react">
+    เขียนบน React 19 และตรวจสอบกับ official docs — Actions, `use()`, `useActionState`/`useOptimistic`, ref-as-prop และ React Compiler ถูกสอนตามที่มีอยู่จริงวันนี้ ไม่ใช่แบบเมื่อสามปีก่อน
+  </Card>
+  <Card title="เน้นการออกแบบ ไม่ใช่แค่ syntax" icon="approve-check">
+    ไม่ใช่แค่ "นี่คือ useEffect" แต่เป็น "ทำไมคุณอาจไม่ต้องใช้มัน และควรทำอะไรแทน" คุณจะ reason เรื่อง render, dependency และ performance ได้อย่างมั่นใจ
+  </Card>
+  <Card title="ไดอะแกรมที่อธิบายได้" icon="puzzle">
+    render/commit phase, reconciliation, state-เป็น-snapshot, effect timing และ Suspense เป็นไดอะแกรม Mermaid ที่รองรับธีม สองภาษา (English / ไทย) พร้อมบันทึกความคืบหน้า quiz
+  </Card>
+</CardGrid>

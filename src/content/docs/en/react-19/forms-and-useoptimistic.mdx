@@ -1,0 +1,130 @@
+---
+title: 'Forms & useOptimistic'
+description: 'useFormStatus for a nested submit button without prop drilling, and useOptimistic for instant UI that reverts automatically when the async action settles.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## useFormStatus: pending, without drilling
+
+You often want a submit button to know if its form is pending — to disable itself and show a spinner. Passing `isPending` down through every intermediate component is tedious. **`useFormStatus`** (from `react-dom`) lets a component read the status of the nearest parent `<form>` directly:
+
+```jsx
+import { useFormStatus } from 'react-dom';
+
+// This button reads the enclosing form's status — no props needed.
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" disabled={pending}>
+      {pending ? 'Saving…' : 'Save'}
+    </button>
+  );
+}
+
+function ProfileForm({ action }) {
+  return (
+    <form action={action}>
+      <input name="name" />
+      <SubmitButton />   {/* knows the form is pending, with zero prop drilling */}
+    </form>
+  );
+}
+```
+
+The one rule: `useFormStatus` reads the *parent* form, so `SubmitButton` must be **rendered inside** the `<form>`, not be the component that renders the form itself.
+
+## useOptimistic: show the result before it's real
+
+For a snappy UI, you often want to show the *expected* outcome immediately and correct it only if the request fails. **`useOptimistic`** gives you an optimistic value that you set instantly and that React automatically reverts to the real value once the action settles:
+
+```jsx
+import { useOptimistic } from 'react';
+
+function Thread({ messages, sendMessage }) {
+  const [optimisticMessages, addOptimistic] = useOptimistic(
+    messages,
+    (current, newText) => [...current, { text: newText, sending: true }],
+  );
+
+  async function formAction(formData) {
+    const text = formData.get('message');
+    addOptimistic(text);           // show it immediately, marked "sending"
+    await sendMessage(text);       // real request; React reconciles when it resolves
+  }
+
+  return (
+    <>
+      {optimisticMessages.map((m, i) => (
+        <p key={i}>{m.text} {m.sending && <small>(sending…)</small>}</p>
+      ))}
+      <form action={formAction}>
+        <input name="message" />
+        <button type="submit">Send</button>
+      </form>
+    </>
+  );
+}
+```
+
+The message appears the instant you submit. When `sendMessage` resolves, React drops the optimistic entry in favor of the real state; if it *fails*, React automatically reverts, so you don't manually roll back.
+
+<Mermaid title="Optimistic update, then settle" code={optimisticDiagram} />
+
+export const optimisticDiagram = `sequenceDiagram
+  participant U as User
+  participant O as useOptimistic
+  participant S as server action
+  U->>O: submit (addOptimistic)
+  O->>U: show optimistic value instantly
+  O->>S: await real request
+  S-->>O: success → keep real state
+  Note over O,U: on failure React reverts automatically`;
+
+Together these two hooks make a form feel instant: `useOptimistic` for immediate feedback, `useFormStatus` for the pending affordance on the button — both without threading state through props.
+
+<Callout title="The one-line takeaway">
+**`useFormStatus`** lets a submit button (rendered *inside* a `<form>`) read the form's `pending` state with no prop drilling. **`useOptimistic`** shows an expected value immediately and lets React revert automatically if the async action fails — no manual rollback. Paired with a form Action, they make an interaction feel instant.
+</Callout>
+
+export const quizForms = [
+  {
+    q: 'What does `useFormStatus` give a component?',
+    options: [
+      'The form validation rules',
+      'The pending status of the nearest parent form, so a nested submit button needs no props',
+      'The form values',
+      'A new form element',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where must a component calling useFormStatus be rendered?',
+    options: [
+      'Anywhere in the app',
+      'Inside the <form> whose status it reads (it reads the parent form)',
+      'At the root of the app',
+      'Only on the server',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does `useOptimistic` do when the async action fails?',
+    options: [
+      'Keeps the optimistic value',
+      'Automatically reverts to the real value — no manual rollback needed',
+      'Throws an uncaught error',
+      'Reloads the page',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/forms-and-useoptimistic" questions={quizForms} />
+
+<ProgressTracker client:visible id="react-19/forms-and-useoptimistic" />

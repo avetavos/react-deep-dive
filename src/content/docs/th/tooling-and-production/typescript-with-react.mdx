@@ -1,0 +1,137 @@
+---
+title: 'TypeScript with React'
+description: 'type component, props, children, hooks และ event — พร้อมการเปลี่ยนแปลงใน React 19 ที่ ref เป็น prop ธรรมดา ทำให้ forwardRef generics หายไป'
+sidebar:
+  order: 4
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## type component และ props ของมัน
+
+React component คือ function คุณจึง type มันด้วยการ type props นิยาม `type` (หรือ `interface`) สำหรับ props แล้ว annotate พารามิเตอร์:
+
+```tsx
+type ButtonProps = {
+  label: string;
+  onClick: () => void;
+  variant?: 'primary' | 'secondary';  // optional, a literal union
+};
+
+function Button({ label, onClick, variant = 'primary' }: ButtonProps) {
+  return <button className={variant} onClick={onClick}>{label}</button>;
+}
+```
+
+ให้ type props object ตรง ๆ (แบบข้างบน) แทน `React.FC` แบบเก่า — `React.FC` เลิกนิยมแล้ว (มันทำให้ generics และการ type children ยุ่งยาก) แค่ annotate พารามิเตอร์ props ที่ destructure ก็พอ
+
+## children และ React type ที่พบบ่อย
+
+เมื่อ component ครอบ content อื่น ให้ type `children` เป็น `React.ReactNode` — type "อะไรก็ตามที่ render ได้" ที่กว้างที่สุด:
+
+```tsx
+type CardProps = {
+  title: string;
+  children: React.ReactNode;   // JSX, strings, numbers, arrays, null…
+};
+
+function Card({ title, children }: CardProps) {
+  return <section><h2>{title}</h2>{children}</section>;
+}
+```
+
+type อื่นที่จะใช้: `React.ReactNode` (content ที่ render ได้), `React.ComponentProps<'button'>` (ขโมย props ของ host element), และ `React.CSSProperties` (object `style`)
+
+## type hooks
+
+inference จัดการ hooks ส่วนใหญ่ให้ แต่ให้ type argument เมื่อค่าเริ่มต้นไม่ pin type:
+
+```tsx
+const [count, setCount] = useState(0);               // inferred: number
+const [user, setUser] = useState<User | null>(null); // needs the annotation
+
+const inputRef = useRef<HTMLInputElement>(null);     // ref to a DOM node
+const timer = useRef<number | undefined>(undefined); // ref to a mutable value
+```
+
+## type event
+
+event handler ได้ event object ที่ถูก type ปล่อยให้ contextual typing infer แบบ inline เมื่อทำได้; annotate เมื่อแยก handler ออกมา:
+
+```tsx
+function onChange(e: React.ChangeEvent<HTMLInputElement>) {
+  console.log(e.target.value);
+}
+<button onClick={(e) => e.preventDefault()}>Go</button>  // e inferred as React.MouseEvent
+```
+
+## React 19: ref เป็น prop ธรรมดา
+
+จุด currency ที่ชัดเจน: ใน **React 19 `ref` เป็น prop ธรรมดา** สำหรับ function component คุณจึงไม่ต้องใช้ `forwardRef` และ generics ที่เก้ ๆ กัง ๆ ของมันอีก type `ref` ไว้ข้าง ๆ props ตัวอื่นได้เลย:
+
+```tsx
+// React 19 — ref is just a prop.
+type InputProps = {
+  placeholder?: string;
+  ref?: React.Ref<HTMLInputElement>;
+};
+
+function TextInput({ placeholder, ref }: InputProps) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+```
+
+`forwardRef` ยังทำงานได้ และ code เก่าที่ใช้ `React.forwardRef<HTMLInputElement, Props>` ก็ไม่มีปัญหา แต่สำหรับ component ใหม่ใน React 19 ข้ามมันไปได้เลย — wrapper น้อยลงหนึ่งชั้นและไม่ต้องเล่นกล generic
+
+<Callout title="The one-line takeaway">
+type component ด้วยการ type **props object** (ข้าม `React.FC`); type `children` เป็น `React.ReactNode`; ให้ type argument กับ hook เมื่อค่าเริ่มต้นกำกวม (`useState<User | null>(null)`, `useRef<HTMLInputElement>(null)`); และ type event ด้วย `React.ChangeEvent`/`MouseEvent` ใน **React 19 `ref` เป็น prop ธรรมดา** — type เป็น `React.Ref<T>` ใน props และเลิกใช้ `forwardRef` สำหรับ code ใหม่
+</Callout>
+
+export const quizTs = [
+  {
+    q: 'ควร type props ของ component อย่างไรใน React + TypeScript สมัยใหม่?',
+    options: [
+      'ใช้ React.FC<Props> เสมอ',
+      'นิยาม type/interface สำหรับ props แล้ว annotate พารามิเตอร์ที่ destructure',
+      'ใช้ `any`',
+      'type แค่ค่า return',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใช้ type อะไรสำหรับ `children` ของ component?',
+    options: [
+      'string',
+      'React.ReactNode',
+      'JSX.Element อย่างเดียว',
+      'object',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไรต้องส่ง type argument ให้ useState?',
+    options: [
+      'เสมอ',
+      'เมื่อค่าเริ่มต้นไม่ pin type — เช่น `useState<User | null>(null)`',
+      'ไม่มีวัน',
+      'เฉพาะกับตัวเลข',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'จัดการ ref บน function component ใน React 19 อย่างไร?',
+    options: [
+      'ครอบด้วย forwardRef พร้อม generics',
+      '`ref` เป็น prop ธรรมดา — type เป็น `React.Ref<T>` ใน props ไม่ต้องใช้ forwardRef',
+      'ref type ไม่ได้',
+      'ใช้ global variable',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/typescript-with-react" questions={quizTs} />
+
+<ProgressTracker client:visible id="tooling-and-production/typescript-with-react" />

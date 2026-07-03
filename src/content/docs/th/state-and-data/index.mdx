@@ -1,0 +1,79 @@
+---
+title: 'State Management & Data Flow'
+description: 'state ควรอยู่ที่ไหน? ไล่จาก local state ไป lifted state ไป Context ไป external store และเลือกอย่างไร'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## คำถามเดียว
+
+เกือบทุกการถกเถียงว่า "จัดการ state ใน React ยังไง?" จริง ๆ แล้วคือคำถามเดียว: **state ก้อนนี้ควรอยู่ที่ไหน?** React ให้บันไดของคำตอบมา และทักษะคือปีนขึ้นไปแค่เท่าที่จำเป็น
+
+<Mermaid title="บันไดตำแหน่งของ state" code={ladderDiagram} />
+
+export const ladderDiagram = `flowchart TB
+  local["Local state\n(useState ใน component เดียว)"] --> lifted["Lifted state\n(ย้ายไป common ancestor)"]
+  lifted --> context["Context\n(แชร์ลงไปทั้ง subtree)"]
+  context --> store["External store\n(Zustand / Redux / Jotai)"]
+  note["ปีนขึ้นแค่เท่าที่จำเป็น"] -.-> local`;
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Lifting & composition | lifting state ขึ้น, prop drilling และแก้ด้วย composition |
+| Context | `useContext`, เมื่อไรเหมาะ และเมื่อไรเจ็บ |
+| useReducer patterns | reducer และ pattern context + reducer สำหรับ app state |
+| External stores | เมื่อไรควรใช้ store และ `useSyncExternalStore` |
+
+## หลักการนำทาง
+
+เริ่มที่ขั้น **ต่ำสุด** ที่ใช้ได้ก่อน เก็บ state ไว้ local จนกว่าจะมีสอง component ต้องใช้ร่วมกัน แล้วค่อย lift ขึ้นไปที่ parent ร่วม ใช้ **Context** เฉพาะเมื่อข้อมูลถูกแชร์ทั้ง subtree จริง ๆ และเปลี่ยนไม่บ่อย (theme, auth, locale) ใช้ **external store** เฉพาะเมื่อพฤติกรรมการ re-render ของ Context หรือรูปร่างของข้อมูลทำให้มันเจ็บปวด
+
+state ส่วนใหญ่ไม่ต้องใช้ library ความซับซ้อนของ "state management" จำนวนมากมาจากการรีบปีนขึ้นไปบนสุดของบันได ทั้งที่ `useState` สูงขึ้นไปสอง component ก็จบงานแล้ว
+
+<Callout title="การเปลี่ยนมุมมอง">
+"State management" ฟังดูเหมือนของที่ต้องติดตั้ง แต่จริง ๆ ไม่ใช่ — มันคือ **การตัดสินใจเรื่องตำแหน่ง** คำถามไม่ใช่ "library ไหน?" เป็นอันดับแรก แต่คือ "component ไหนควรเป็น *เจ้าของ* state นี้?" ตอบข้อนี้ให้ดี แล้วแอปส่วนใหญ่ก็ไม่ต้องใช้ store เลย
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'คำถามหลักที่อยู่เบื้องหลัง "state management" ใน React คืออะไร?',
+    options: [
+      'จะติดตั้ง library ไหน',
+      'state ก้อนนี้ควรอยู่ที่ไหน (component ไหนเป็นเจ้าของ)',
+      'จะเลี่ยงการใช้ state อย่างไร',
+      'จะ mutate DOM ตรง ๆ อย่างไร',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'แนวทางที่แนะนำบนบันไดตำแหน่งของ state คืออะไร?',
+    options: [
+      'เริ่มด้วย global store เสมอ',
+      'เริ่มที่ขั้นต่ำสุดที่ใช้ได้ แล้วปีนขึ้นแค่เท่าที่จำเป็น',
+      'ใส่ทุกอย่างไว้ใน Context',
+      'เลี่ยงการ lift state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'external store (Zustand/Redux) จำเป็นจริง ๆ เมื่อไร?',
+    options: [
+      'ทุกแอป เสมอ',
+      'เฉพาะเมื่อ local/lifted state และ Context เริ่มเจ็บปวดกับรูปร่างข้อมูลหรือความต้องการเรื่อง re-render',
+      'ไม่มีวัน — React ไม่ต้องใช้ store',
+      'เฉพาะเรื่อง styling',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="state-and-data/index" />

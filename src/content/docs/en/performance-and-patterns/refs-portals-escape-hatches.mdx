@@ -1,0 +1,123 @@
+---
+title: 'Refs, Portals & Escape Hatches'
+description: 'Stepping outside the declarative model on purpose — createPortal for modals, imperative refs, flushSync for synchronous updates, and when it is justified.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## When declarative is not enough
+
+Ninety-nine percent of React is declarative: change state, describe the UI, let React sync the DOM. But a few real problems need you to step *outside* that model — reach into the DOM, force timing, or render somewhere the component tree does not naturally allow. React provides deliberate **escape hatches** for these. The skill is knowing they exist and using them sparingly.
+
+## Portals: render outside the parent DOM
+
+A **portal** renders children into a *different* part of the DOM tree, while keeping them in the React tree where you wrote them. This is the standard solution for modals, tooltips, and dropdowns — UI that must escape a parent's `overflow: hidden` or `z-index` stacking context.
+
+```jsx
+import { createPortal } from "react-dom";
+
+function Modal({ children }) {
+  // Rendered into document.body, but still a React child of wherever <Modal/> is used.
+  return createPortal(
+    <div className="overlay">{children}</div>,
+    document.body,
+  );
+}
+```
+
+<Mermaid title="A portal splits DOM location from tree position" code={portalDiagram} />
+
+export const portalDiagram = `flowchart TB
+  react["React tree:\nApp → Page → Modal → content"]
+  dom["DOM tree:\nbody → app-root ...\nbody → overlay (portal target)"]
+  react -->|logically a child of Page| dom
+  note["Events still bubble through the React tree,\nnot the DOM location"]`;
+
+The key subtlety: a portal changes *where the DOM node lives*, not *where it sits in the React tree*. Context still flows in, and events still bubble up through the React parent — so a click inside a portaled modal still reaches handlers on its logical React ancestors.
+
+## Imperative refs: calling into a child or the DOM
+
+Most of the time data flows down through props. But sometimes a parent needs to *imperatively* trigger something on a child or DOM node — focus an input, play a video, scroll to an element. A **ref** gives you that handle.
+
+```jsx
+function SearchForm() {
+  const inputRef = useRef(null);
+  return (
+    <>
+      <input ref={inputRef} />
+      <button onClick={() => inputRef.current.focus()}>Focus</button>
+    </>
+  );
+}
+```
+
+To expose a *custom* imperative API from a component (rather than the raw DOM node), use `useImperativeHandle` to define exactly which methods a parent's ref can call. Prefer props/state for anything that can be declarative; reach for an imperative ref only for genuinely imperative actions (focus, scroll, media, measurement).
+
+## `flushSync`: opt out of batching
+
+React **batches** state updates and applies the DOM changes asynchronously for performance. Occasionally you need the DOM updated *synchronously* — for example, to read the new layout immediately (measure a just-added element, then scroll to it). `flushSync` forces a state update and its DOM commit to happen right away.
+
+```jsx
+import { flushSync } from "react-dom";
+
+flushSync(() => setItems([...items, newItem])); // DOM is updated by the time this returns
+listRef.current.scrollTop = listRef.current.scrollHeight; // now safe to read/scroll
+```
+
+`flushSync` defeats batching and hurts performance, so use it only when you truly must read or act on the DOM before the browser paints.
+
+<Callout title="The one-line takeaway">
+React gives you deliberate **escape hatches** for the rare imperative need: **`createPortal`** renders into a different DOM node (modals/tooltips) while staying logically in the React tree (context and events still flow through it); **refs** (+ `useImperativeHandle`) let a parent imperatively focus/scroll/play; and **`flushSync`** forces a synchronous DOM commit when you must read layout immediately. Use each sparingly — anything that can stay declarative should.
+</Callout>
+
+export const quizEscape = [
+  {
+    q: 'What does `createPortal` do?',
+    options: [
+      'Creates a new React app',
+      'Renders children into a different DOM node while keeping them logically in the React tree',
+      'Opens a network connection',
+      'Memoizes a component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A click inside a portaled modal — where do its events bubble?',
+    options: [
+      'Only through the DOM location (document.body)',
+      'Up through the React tree (the modal\'s logical React ancestors), so React handlers still catch it',
+      'Nowhere — portals block events',
+      'Only to window',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you reach for an imperative ref instead of props/state?',
+    options: [
+      'For all data flow',
+      'For genuinely imperative actions like focusing an input, scrolling, or playing media',
+      'To avoid using hooks',
+      'To store render output',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is `flushSync` for?',
+    options: [
+      'Making the app render faster overall',
+      'Forcing a state update and its DOM commit to happen synchronously — e.g. to read new layout before paint',
+      'Batching more updates together',
+      'Fetching data',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/refs-portals-escape-hatches" questions={quizEscape} />
+
+<ProgressTracker client:visible id="performance-and-patterns/refs-portals-escape-hatches" />

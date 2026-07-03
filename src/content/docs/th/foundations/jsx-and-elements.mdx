@@ -1,0 +1,131 @@
+---
+title: 'JSX & Elements'
+description: 'JSX compile เป็นอะไร, React element จริง ๆ คืออะไร (object ธรรมดา) และทำไมสิ่งนี้ทำให้ element สร้างได้ถูกและใช้อธิบาย UI ได้'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## JSX เป็นแค่ syntax
+
+JSX หน้าตาเหมือน HTML แต่มันเป็น **syntax sugar** ของการเรียกฟังก์ชัน JavaScript ธรรมดา อันนี้:
+
+```jsx
+const el = <button className="primary">Click</button>;
+```
+
+compile (ผ่าน JSX transform สมัยใหม่) เป็นประมาณนี้:
+
+```js
+import { jsx as _jsx } from "react/jsx-runtime";
+const el = _jsx("button", { className: "primary", children: "Click" });
+```
+
+ผลที่สำคัญ: JSX เป็น *expression* มันประเมินค่าเป็นค่าที่คุณเก็บใส่ตัวแปรได้ return จากฟังก์ชันได้ ใส่ใน array ได้ หรือส่งเป็น prop ได้ มันไม่ใช่ template language ที่มีกฎของตัวเอง — มันคือ JavaScript ดังนั้น `{ }` ใน JSX ก็แค่หลุดกลับไปเป็น JS expression
+
+```jsx
+function List({ items, showHeader }) {
+  return (
+    <ul>
+      {showHeader && <li className="header">Items</li>}  {/* JS expression */}
+      {items.map((item) => (
+        <li key={item.id}>{item.text}</li>                {/* JS expression */}
+      ))}
+    </ul>
+  );
+}
+```
+
+## element คือ object ธรรมดา
+
+`_jsx("button", ...)` return อะไรจริง ๆ? ไม่ใช่ DOM node — แต่เป็น **object JavaScript ธรรมดา** ที่อธิบายสิ่งที่คุณต้องการ:
+
+```js
+// Roughly what a React element is:
+const el = {
+  type: "button",                 // a string for host elements, or a function for components
+  props: { className: "primary", children: "Click" },
+  key: null,
+  // ...internal fields
+};
+```
+
+นี่คือ insight สำคัญ: **React element คือคำอธิบายที่ถูกและ immutable** — ไม่ใช่ตัวจริง สร้าง element พันตัวก็แค่สร้าง object เล็ก ๆ พันตัว React สร้าง tree ของคำอธิบายเหล่านี้ทุกครั้งที่ render แล้วเทียบกับ tree ก่อนหน้าเพื่อตัดสินว่าจะแตะ DOM จริงตรงไหน (นั่นคือ reconciliation บทเรียนถัดไป)
+
+<Mermaid title="จาก JSX สู่ element สู่ DOM" code={jsxDiagram} />
+
+export const jsxDiagram = `flowchart LR
+  jsx["JSX\n<button>Click</button>"] -->|compiler| call["jsx('button', props)"]
+  call --> obj["element object\n{ type, props, key }"]
+  obj --> tree["tree of elements\n(the description)"]
+  tree -->|React| dom["real DOM\n(the result)"]`;
+
+## component เทียบกับ host element
+
+field `type` บอก React ว่ามันเป็น node ชนิดไหน:
+
+- `type` ที่เป็น **string** (`"button"`, `"div"`) คือ *host element* — React รู้วิธีแปลงเป็น DOM node จริง
+- `type` ที่เป็น **function** (`Counter`, `Greeting`) คือ *component* — React เรียกฟังก์ชันนั้นเพื่อได้ element เพิ่ม วนซ้ำไปเรื่อย ๆ จนเหลือแต่ host element
+
+```jsx
+<Counter />
+// element: { type: Counter (the function), props: {} }
+// React calls Counter() → gets more elements → repeats until only host elements remain
+```
+
+นี่คือเหตุผลที่ชื่อ component **ต้องขึ้นต้นด้วยตัวใหญ่** ใน JSX: `<Counter />` (ตัวใหญ่) แปลว่า "เรียก component `Counter`" ส่วน `<counter />` (ตัวเล็ก) แปลว่า "สร้าง host element ชื่อ `counter` ตรง ๆ" ตัวเล็กตัวใหญ่คือวิธีที่ compiler ตัดสินระหว่าง type ที่เป็น string กับการอ้างถึงตัวแปร
+
+<Callout title="สรุปหนึ่งบรรทัด">
+JSX เป็น syntax sugar ที่ compile เป็นการเรียก `jsx(type, props)` มันจึงเป็นแค่ JavaScript **expression** — และ `{ }` ในนั้นคือ JS ธรรมดา แต่ละการเรียก return **React element: object ธรรมดาที่ถูกและ immutable** (`{ type, props, key }`) ที่ *อธิบาย* UI ไม่ใช่เป็น UI type ที่เป็นตัวใหญ่คือ component (ฟังก์ชันที่ React เรียก) type ตัวเล็กคือ host element (DOM tag จริง)
+</Callout>
+
+export const quizJsx = [
+  {
+    q: 'JSX compile เป็นอะไร?',
+    options: [
+      'HTML string',
+      'การเรียกฟังก์ชัน JavaScript ธรรมดาแบบ jsx(type, props)',
+      'DOM node โดยตรง',
+      'CSS rule',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'React element คืออะไร?',
+    options: [
+      'DOM node จริง',
+      'object ธรรมดาที่ถูกและ immutable ที่อธิบายว่า UI ควรเป็นอะไร ({ type, props, key })',
+      'CSS class',
+      'hook',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม component ต้องขึ้นต้นด้วยตัวใหญ่ใน JSX (`<Counter />` ไม่ใช่ `<counter />`)?',
+    options: [
+      'เป็นแค่ convention ด้านสไตล์ ไม่มีผล',
+      'ตัวใหญ่แปลว่า component (ฟังก์ชันที่ React เรียก) ตัวเล็กแปลว่า host element จริง (DOM tag จริง)',
+      'component ตัวเล็กรันเร็วกว่า',
+      'JSX บังคับให้ทุก tag เป็นตัวใหญ่',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`{ }` ใน JSX คืออะไร?',
+    options: [
+      'template directive พิเศษ',
+      'การหลุดกลับไปเป็น JavaScript expression ธรรมดา',
+      'CSS block',
+      'object literal เท่านั้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/jsx-and-elements" questions={quizJsx} />
+
+<ProgressTracker client:visible id="foundations/jsx-and-elements" />

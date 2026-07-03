@@ -1,0 +1,80 @@
+---
+title: 'React 19: Actions, RSC & Forms'
+description: 'What React 19 added and why it changes how you write apps — Actions, the use hook, ref as a prop, Server Components, and the React Compiler.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The version that removed the boilerplate
+
+React 19 is less about new syntax and more about **deleting patterns you used to write by hand**. The recurring theme: things you used to wire up manually — loading flags, `try/catch` around a submit, `useMemo` everywhere, `forwardRef` wrappers — React now does for you.
+
+This module covers the five changes that matter most in day-to-day code.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Server Components | Components that run on the server, fetch directly, and never ship to the client |
+| Actions & useActionState | Async form actions with built-in pending/error state |
+| Forms & useOptimistic | `useFormStatus` and instant optimistic UI |
+| The React Compiler | Build-time auto-memoization that retires manual `useMemo`/`useCallback` |
+
+## The through-line
+
+<Mermaid title="React 19: less manual wiring" code={themeDiagram} />
+
+export const themeDiagram = `flowchart LR
+  old["Before: you wrote it\nloading flags · try/catch\nuseMemo everywhere · forwardRef"] --> r19["React 19"]
+  r19 --> new["Now React does it\nActions + useActionState\nCompiler auto-memo\nref as a prop"]`;
+
+Beyond this module's four topics, two smaller React 19 wins show up everywhere:
+
+- **`ref` is now a prop.** Function components accept `ref` directly — `forwardRef` is no longer needed for new code (covered in the Hooks module).
+- **The `use()` hook** reads a promise or context and integrates with Suspense (covered in the Concurrent module). It's the client half of the Server Components data story.
+
+<Callout title="The mental shift">
+Earlier React taught you to *manage* async yourself: a `useState` for data, one for loading, one for error, and a `useEffect` to tie them together. React 19's Actions collapse that into a single `useActionState` call, and the compiler removes the memoization busywork. You write *what the UI is*; React handles more of the *how*.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the recurring theme of React 19?',
+    options: [
+      'A brand-new component syntax',
+      'Removing hand-written boilerplate — loading flags, try/catch, manual memoization, forwardRef',
+      'Dropping support for hooks',
+      'Replacing JSX',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In React 19, how do function components receive a ref?',
+    options: [
+      'Only via forwardRef, as before',
+      'As a regular prop — forwardRef is no longer needed for new code',
+      'Refs are removed',
+      'Through context only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the React Compiler do?',
+    options: [
+      'Compiles JSX to HTML strings',
+      'Automatically memoizes components and values at build time, reducing the need for manual useMemo/useCallback',
+      'Runs your tests',
+      'Bundles your CSS',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="react-19/index" />

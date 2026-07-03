@@ -1,0 +1,78 @@
+---
+title: 'Concurrent React & Suspense'
+description: 'ทำไม React ถึง interrupt และจัดลำดับความสำคัญของการ render ได้ — urgent vs non-urgent update, Suspense สำหรับ loading UI, error boundary และ use() hook'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ไม่ใช่ทุก update จะเร่งด่วนเท่ากัน
+
+React รุ่นเก่า render ทุก update แบบ synchronous จนจบ — พอเริ่มแล้วหยุดไม่ได้ ดังนั้น re-render ก้อนใหญ่จะ block browser และทำให้พิมพ์หนืด **Concurrent React** เปลี่ยนเรื่องนี้: การ render กลายเป็นสิ่งที่ *interrupt ได้* React เริ่ม render update หนึ่ง แล้วหยุดไว้เพื่อจัดการงานที่ด่วนกว่า แล้วค่อยกลับมา render ต่อได้
+
+แนวคิดคือ update บางอย่าง **urgent** (พิมพ์ลง input ต้องรู้สึกทันที) และบางอย่าง **non-urgent** (filter list ยักษ์ใหม่, โหลดหน้าใหม่) concurrent features ให้คุณบอก React ว่าอันไหนเป็นอันไหน เพื่อให้งาน urgent ไม่ถูก block ด้วยงานหนัก
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Transitions | `useTransition` และ `useDeferredValue` — ทำให้ UI responsive |
+| Suspense & lazy | loading UI แบบ declarative และ code-splitting ด้วย `React.lazy` |
+| Error boundaries | จับ render error และจับคู่กับ Suspense |
+| use() & data fetching | `use()` hook ของ React 19 และ render-as-you-fetch |
+
+## mental model เดียวที่ต้องจำ
+
+<Mermaid title="urgent update แทรก non-urgent update ได้" code={concDiagram} />
+
+export const concDiagram = `flowchart TB
+  urgent["Urgent update\n(keystroke)"] --> render1["render ทันที\n(ไม่ถูก block)"]
+  nonurgent["Non-urgent update\n(filter list ใหญ่)"] --> render2["render เบื้องหลัง\n(interrupt ได้)"]
+  urgent -.interrupt.-> render2`;
+
+คุณ mark update ที่หนักเป็น non-urgent (เรียกว่า *transition*) แล้ว React จะ render มันเบื้องหลังในที่ที่ keystroke แทรกได้ ส่วน **Suspense** จัดการกรณีที่บางส่วนของ tree ยังไม่พร้อม (กำลังโหลด data หรือ code) โดยแสดง fallback แบบ declarative แทนที่คุณจะต้องมานั่งจัดการ loading boolean เอง
+
+<Callout title="การเปลี่ยนมุมมอง">
+เลิกคิดว่าการ render เป็น pass เดียวที่ block และ all-or-nothing Concurrent React ทำให้การ render **interrupt ได้และมี priority** — browser ยัง responsive เพราะ urgent update ลัดคิวได้ คุณไม่ต้อง schedule เองเลย แค่ *ติดป้าย* update (transition) และ *วาง boundary* (Suspense) แล้ว React จัดการ scheduling ให้
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'concurrent rendering ทำอะไรได้ที่ synchronous rendering แบบเก่าทำไม่ได้?',
+    options: [
+      'รัน React บนหลาย CPU thread',
+      'interrupt render ที่กำลังทำอยู่เพื่อจัดการ update ที่ด่วนกว่า แล้วค่อย resume',
+      'ข้าม DOM ไปเลย',
+      'render โดยไม่มี component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณบอก React อย่างไรว่า update ไหนเป็น non-urgent?',
+    options: [
+      'บอกไม่ได้ — React เดาเอง',
+      'ติดป้ายว่าเป็น transition (เช่นด้วย useTransition) แล้ว React จะ schedule เป็นงานเบื้องหลังที่ interrupt ได้',
+      'ใส่ไว้ใน setTimeout',
+      'mark ว่า urgent',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Suspense จัดการอะไร?',
+    options: [
+      'network retry',
+      'แสดง fallback แบบ declarative ระหว่างที่บางส่วนของ tree ยังไม่พร้อม (กำลังโหลด data หรือ code)',
+      'global state',
+      'routing',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/index" />

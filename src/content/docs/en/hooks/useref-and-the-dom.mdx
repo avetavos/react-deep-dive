@@ -1,0 +1,141 @@
+---
+title: 'useRef & the DOM'
+description: 'Refs for mutable values that survive renders without triggering them, refs for DOM access, and ref as a regular prop in React 19 (forwardRef is no longer needed).'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## A ref is a box that survives renders
+
+`useRef` gives you a mutable container — an object `{ current: value }` — that React keeps across renders but **does not watch**. Changing `ref.current` does *not* trigger a re-render.
+
+```jsx
+const ref = useRef(0);
+ref.current += 1;   // mutate freely — NO re-render happens
+```
+
+That's the whole difference from state:
+
+| | `useState` | `useRef` |
+|--|-----------|----------|
+| Survives re-renders | ✅ | ✅ |
+| Changing it re-renders | ✅ yes | ❌ no |
+| Read during render | ✅ (it's the snapshot) | ⚠️ avoid (mutable, not reactive) |
+| Use for | data shown in the UI | values you need to remember but not render |
+
+Use a ref for things the UI doesn't directly display: a timer id, the previous value of something, a mutable counter, a scroll position, or a reference to a DOM node.
+
+```jsx
+// Classic use: hold a timer id so you can clear it later.
+const intervalRef = useRef(null);
+function start() {
+  intervalRef.current = setInterval(tick, 1000);
+}
+function stop() {
+  clearInterval(intervalRef.current);
+}
+```
+
+## Refs for DOM access
+
+The most common use is grabbing a DOM node — to focus an input, measure an element, or call an imperative browser API. Attach the ref to a host element via the `ref` attribute; after commit, `ref.current` points at the real DOM node.
+
+```jsx
+function SearchBox() {
+  const inputRef = useRef(null);
+  return (
+    <>
+      <input ref={inputRef} />
+      <button onClick={() => inputRef.current.focus()}>Focus</button>
+    </>
+  );
+}
+```
+
+This is an *escape hatch* — you're stepping outside the declarative model to talk to the DOM directly. Use it for focus, scrolling, measurements, and integrating non-React widgets; don't use it to do things state can do.
+
+## React 19: `ref` is just a prop
+
+Previously, passing a ref *through* your own component to a DOM node inside it required wrapping the component in `forwardRef`. **In React 19, `ref` is a regular prop** — you can accept it and pass it down like any other prop, and `forwardRef` is no longer needed for new code.
+
+```jsx
+// ✅ React 19: accept ref as a normal prop — no forwardRef.
+function MyInput({ placeholder, ref }) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+
+// Parent:
+const ref = useRef(null);
+<MyInput ref={ref} placeholder="Search" />;
+```
+
+The old form still works — `forwardRef` is not removed — but it's now legacy. New components should take `ref` as a prop.
+
+For the rarer case where you want to expose a *custom* imperative API (not the raw DOM node) to a parent, `useImperativeHandle` lets you define exactly what the ref exposes:
+
+```jsx
+function FancyInput({ ref }) {
+  const inputRef = useRef(null);
+  useImperativeHandle(ref, () => ({
+    focus: () => inputRef.current.focus(),
+    clear: () => { inputRef.current.value = ''; },
+  }));
+  return <input ref={inputRef} />;
+}
+```
+
+<Callout title="The one-line takeaway">
+A **ref** is a mutable `{ current }` box that persists across renders but **does not trigger one** — use it for values you must remember but not display (timer ids, previous values) and for **DOM access** (focus, measure) as an escape hatch. In **React 19, `ref` is a normal prop**, so `forwardRef` is legacy — accept `ref` and pass it down directly. Use `useImperativeHandle` only to expose a custom imperative API instead of the raw node.
+</Callout>
+
+export const quizRef = [
+  {
+    q: 'What is the key difference between useRef and useState?',
+    options: [
+      'Refs are faster to read',
+      'Changing a ref does NOT trigger a re-render; changing state does',
+      'Refs cannot hold objects',
+      'State does not survive re-renders',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a good use for a ref?',
+    options: [
+      'Data that is displayed in the UI',
+      'A value to remember but not render — a timer id, previous value, or a DOM node',
+      'Deriving values during render',
+      'Replacing all state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In React 19, how do you pass a ref through your own component to an inner DOM node?',
+    options: [
+      'You must wrap the component in forwardRef',
+      'Accept `ref` as a normal prop and pass it down — forwardRef is no longer needed',
+      'It is impossible',
+      'Use a global variable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does useImperativeHandle do?',
+    options: [
+      'Triggers a re-render',
+      'Lets a component expose a custom imperative API through its ref instead of the raw DOM node',
+      'Replaces useEffect',
+      'Memoizes a value',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/useref-and-the-dom" questions={quizRef} />
+
+<ProgressTracker client:visible id="hooks/useref-and-the-dom" />

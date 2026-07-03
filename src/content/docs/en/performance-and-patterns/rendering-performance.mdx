@@ -1,0 +1,130 @@
+---
+title: 'Rendering Performance'
+description: 'Why components re-render, the render-propagates-downward default, keeping state low, stopping propagation with React.memo, and profiling before optimizing.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Why a component re-renders
+
+There are exactly three reasons a component re-renders:
+
+1. **Its own state changed** (a setter was called).
+2. **Its parent re-rendered** — by default, when a component renders, React re-renders *all* of its children.
+3. **A context it consumes changed** value.
+
+That second one surprises people: a parent re-rendering re-renders the whole subtree below it, **even children whose props did not change**. React does this because it cannot know, without checking, whether a child's output depends on something that changed.
+
+<Mermaid title="A render propagates down the whole subtree" code={propDiagram} />
+
+export const propDiagram = `flowchart TB
+  app["App re-renders\n(state changed)"] --> header["Header re-renders"]
+  app --> main["Main re-renders"]
+  main --> list["List re-renders"]
+  list --> item1["Item re-renders"]
+  list --> item2["Item re-renders"]
+  note["Every descendant re-renders,\neven if its props are unchanged"]`;
+
+Re-rendering is not free, but it is usually cheap — remember reconciliation produces **zero DOM changes** when output is unchanged. The problem only appears when a large subtree, or an expensive component, re-renders needlessly and often.
+
+## Fix #1: keep state low and local
+
+The best fix is structural. If a piece of state lives high in the tree but only one small branch uses it, every state change re-renders the whole tree. **Move the state down** to the component that actually needs it, so a change re-renders only that small branch.
+
+```jsx
+// ❌ Search text lives in App, so typing re-renders the entire app.
+function App() {
+  const [query, setQuery] = useState("");
+  return (
+    <>
+      <SearchBox query={query} onChange={setQuery} />
+      <HugeExpensiveDashboard />   {/* re-renders on every keystroke! */}
+    </>
+  );
+}
+
+// ✅ Move the state into SearchBox; typing re-renders only SearchBox.
+function App() {
+  return (
+    <>
+      <SearchBox />
+      <HugeExpensiveDashboard />   {/* never re-renders while typing */}
+    </>
+  );
+}
+```
+
+A related trick: **lift content by composition**. If a fast-changing parent must wrap a slow child, pass the slow child in as `children` — children passed as props do not re-render just because the parent's state changed.
+
+## Fix #2: stop propagation with `React.memo`
+
+When you cannot move state and a child is genuinely expensive, wrap it in `React.memo`. A memoized component skips re-rendering when its props are **shallow-equal** to the previous render — it becomes a wall that a parent re-render does not cross.
+
+```jsx
+const ExpensiveList = React.memo(function ExpensiveList({ items }) {
+  // Only re-renders when `items` (by reference) actually changes.
+  return items.map((it) => <Row key={it.id} item={it} />);
+});
+```
+
+The catch: `React.memo` only helps if the props are actually stable. Pass a fresh inline object, array, or function as a prop and the shallow comparison always fails — which is why memoization often needs `useMemo`/`useCallback` on the props too (next lesson).
+
+## Measure first: the Profiler
+
+Do not guess where the slowness is. The **React DevTools Profiler** records a session and shows you exactly which components rendered, how often, and how long each took — and *why* each rendered. Optimize the component the profiler points at, not the one you suspect.
+
+<Callout title="The one-line takeaway">
+A component re-renders when its **own state changes**, its **parent re-renders** (which cascades to the whole subtree), or a **context** it reads changes. Fix needless re-renders structurally first — **keep state low** and lift slow children in via `children` — then use **`React.memo`** to wall off a genuinely expensive subtree. Always confirm with the **DevTools Profiler** before optimizing.
+</Callout>
+
+export const quizRender = [
+  {
+    q: 'What are the three reasons a component re-renders?',
+    options: [
+      'CSS change, image load, scroll',
+      'Its own state changed, its parent re-rendered, or a context it consumes changed',
+      'The URL changed, cookies changed, or the tab focused',
+      'Only when you call forceUpdate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When a parent re-renders, what happens to its children by default?',
+    options: [
+      'Only children with changed props re-render',
+      'All children re-render, even those whose props did not change',
+      'No children re-render',
+      'Only the first child re-renders',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the best FIRST fix for a component that re-renders too often?',
+    options: [
+      'Wrap everything in useMemo',
+      'Move the state down to the component that actually needs it, so changes re-render a smaller subtree',
+      'Convert to a class component',
+      'Disable StrictMode',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When does `React.memo` actually prevent a re-render?',
+    options: [
+      'Always',
+      'When the component\'s props are shallow-equal to the previous render (stable references)',
+      'Only for class components',
+      'Only when there is no state',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/rendering-performance" questions={quizRender} />
+
+<ProgressTracker client:visible id="performance-and-patterns/rendering-performance" />

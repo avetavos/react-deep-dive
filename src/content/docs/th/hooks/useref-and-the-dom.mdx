@@ -1,0 +1,141 @@
+---
+title: 'useRef & the DOM'
+description: 'ref สำหรับ mutable value ที่อยู่ข้าม render โดยไม่ trigger, ref สำหรับเข้าถึง DOM และ ref เป็น prop ธรรมดาใน React 19 (ไม่ต้องใช้ forwardRef แล้ว)'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ref คือกล่องที่อยู่ข้าม render
+
+`useRef` ให้ container ที่ mutable — object `{ current: value }` — ที่ React เก็บไว้ข้าม render แต่ **ไม่เฝ้าดู** การเปลี่ยน `ref.current` *ไม่* trigger re-render
+
+```jsx
+const ref = useRef(0);
+ref.current += 1;   // mutate freely — NO re-render happens
+```
+
+นั่นคือความต่างทั้งหมดจาก state:
+
+| | `useState` | `useRef` |
+|--|-----------|----------|
+| อยู่ข้าม re-render | ✅ | ✅ |
+| เปลี่ยนแล้ว re-render | ✅ ใช่ | ❌ ไม่ |
+| อ่านตอน render | ✅ (มันคือ snapshot) | ⚠️ เลี่ยง (mutable, ไม่ reactive) |
+| ใช้สำหรับ | data ที่แสดงใน UI | value ที่ต้องจำแต่ไม่ render |
+
+ใช้ ref สำหรับสิ่งที่ UI ไม่ได้แสดงตรง ๆ: timer id, ค่าก่อนหน้าของบางอย่าง, counter ที่ mutable, scroll position หรือ reference ไปยัง DOM node
+
+```jsx
+// Classic use: hold a timer id so you can clear it later.
+const intervalRef = useRef(null);
+function start() {
+  intervalRef.current = setInterval(tick, 1000);
+}
+function stop() {
+  clearInterval(intervalRef.current);
+}
+```
+
+## ref สำหรับเข้าถึง DOM
+
+การใช้บ่อยที่สุดคือคว้า DOM node — เพื่อ focus input, วัดขนาด element หรือเรียก imperative browser API ผูก ref กับ host element ผ่าน attribute `ref` หลัง commit `ref.current` จะชี้ไปยัง DOM node จริง
+
+```jsx
+function SearchBox() {
+  const inputRef = useRef(null);
+  return (
+    <>
+      <input ref={inputRef} />
+      <button onClick={() => inputRef.current.focus()}>Focus</button>
+    </>
+  );
+}
+```
+
+นี่คือ *escape hatch* — คุณกำลังก้าวออกนอก declarative model เพื่อคุยกับ DOM โดยตรง ใช้กับ focus, scroll, การวัดขนาด และการ integrate widget ที่ไม่ใช่ React อย่าใช้ทำสิ่งที่ state ทำได้
+
+## React 19: `ref` เป็นแค่ prop
+
+เมื่อก่อน การส่ง ref *ผ่าน* component ของคุณเองไปยัง DOM node ข้างในต้องห่อ component ด้วย `forwardRef` **ใน React 19 `ref` เป็น prop ธรรมดา** — คุณรับมันและส่งต่อได้เหมือน prop อื่น ๆ และ **ไม่ต้องใช้ `forwardRef`** สำหรับ code ใหม่แล้ว
+
+```jsx
+// ✅ React 19: accept ref as a normal prop — no forwardRef.
+function MyInput({ placeholder, ref }) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+
+// Parent:
+const ref = useRef(null);
+<MyInput ref={ref} placeholder="Search" />;
+```
+
+form เก่ายังใช้ได้ — `forwardRef` ไม่ได้ถูกถอดออก — แต่ตอนนี้เป็น legacy component ใหม่ควรรับ `ref` เป็น prop
+
+สำหรับกรณีที่พบน้อยกว่า ที่คุณอยากเปิดเผย imperative API *แบบ custom* (ไม่ใช่ raw DOM node) ให้ parent `useImperativeHandle` ให้คุณกำหนดได้ว่า ref เปิดเผยอะไรบ้าง
+
+```jsx
+function FancyInput({ ref }) {
+  const inputRef = useRef(null);
+  useImperativeHandle(ref, () => ({
+    focus: () => inputRef.current.focus(),
+    clear: () => { inputRef.current.value = ''; },
+  }));
+  return <input ref={inputRef} />;
+}
+```
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**ref** คือกล่อง `{ current }` ที่ mutable ซึ่งอยู่ข้าม render แต่ **ไม่ trigger re-render** — ใช้สำหรับค่าที่ต้องจำแต่ไม่แสดง (timer id, ค่าก่อนหน้า) และสำหรับ **เข้าถึง DOM** (focus, วัดขนาด) เป็น escape hatch ใน **React 19 `ref` เป็น prop ธรรมดา** ดังนั้น `forwardRef` เป็น legacy — รับ `ref` แล้วส่งต่อได้เลย ใช้ `useImperativeHandle` เฉพาะตอนอยากเปิดเผย imperative API แบบ custom แทน raw node
+</Callout>
+
+export const quizRef = [
+  {
+    q: 'ความต่างสำคัญระหว่าง useRef กับ useState คืออะไร?',
+    options: [
+      'ref อ่านเร็วกว่า',
+      'การเปลี่ยน ref ไม่ trigger re-render; การเปลี่ยน state trigger',
+      'ref ถือ object ไม่ได้',
+      'state ไม่อยู่ข้าม re-render',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรคือการใช้ ref ที่เหมาะสม?',
+    options: [
+      'data ที่แสดงใน UI',
+      'value ที่ต้องจำแต่ไม่ render — timer id, ค่าก่อนหน้า หรือ DOM node',
+      'derive ค่าตอน render',
+      'แทนที่ state ทั้งหมด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน React 19 คุณส่ง ref ผ่าน component ของคุณเองไปยัง DOM node ข้างในอย่างไร?',
+    options: [
+      'ต้องห่อ component ด้วย forwardRef',
+      'รับ `ref` เป็น prop ธรรมดาแล้วส่งต่อ — ไม่ต้องใช้ forwardRef แล้ว',
+      'ทำไม่ได้',
+      'ใช้ global variable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'useImperativeHandle ทำอะไร?',
+    options: [
+      'trigger re-render',
+      'ให้ component เปิดเผย imperative API แบบ custom ผ่าน ref แทน raw DOM node',
+      'แทนที่ useEffect',
+      'memoize ค่า',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/useref-and-the-dom" questions={quizRef} />
+
+<ProgressTracker client:visible id="hooks/useref-and-the-dom" />

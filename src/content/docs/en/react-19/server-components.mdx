@@ -1,0 +1,130 @@
+---
+title: 'Server Components'
+description: 'Components that render on the server, fetch data directly, and never ship to the client — the server/client boundary, use client, and what can cross it.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## A component that never reaches the browser
+
+A **React Server Component (RSC)** runs on the server, produces its output there, and **never ships its code to the client**. The browser receives the *result*, not the component. That has two big payoffs: the component's dependencies (a Markdown parser, a database client) stay off the client bundle, and the component can access server resources directly.
+
+Because it runs on the server, a Server Component can be **async** and fetch data inline — no `useEffect`, no loading state, no client round-trip:
+
+```jsx
+// Server Component — runs on the server. Note: it's an async function.
+export default async function ProductPage({ id }) {
+  const product = await db.products.findById(id); // direct DB access, on the server
+  return (
+    <article>
+      <h1>{product.name}</h1>
+      <p>{product.description}</p>
+    </article>
+  );
+}
+```
+
+There is no `'use client'` here, so this is a Server Component. It awaits data and returns JSX; the client only ever sees the rendered markup.
+
+## The server/client boundary: `'use client'`
+
+Server Components can't do interactive things — no `useState`, no `onClick`, no browser APIs, because that code never runs in the browser. When you need interactivity, you cross into a **Client Component** by putting the `'use client'` directive at the top of the file:
+
+```jsx
+'use client';
+import { useState } from 'react';
+
+// Client Component — ships to the browser, can use state and events.
+export default function AddToCart({ productId }) {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>In cart: {count}</button>;
+}
+```
+
+`'use client'` marks the **boundary**: that file and everything it imports become client code. Server Components can *render* Client Components (a server page can include an interactive button), but not the reverse in the same way — the direction of the boundary matters.
+
+<Mermaid title="The server/client boundary" code={boundaryDiagram} />
+
+export const boundaryDiagram = `flowchart TB
+  subgraph server["Server (never shipped)"]
+    sc["Server Component\nasync, DB access, secrets"]
+  end
+  subgraph client["Client (shipped to browser)"]
+    cc["Client Component\nuse client, useState, onClick"]
+  end
+  sc -->|renders + passes\nserializable props| cc`;
+
+## What can cross the boundary
+
+A Server Component passes **props** to a Client Component, but those props must be **serializable** — they have to survive being sent over the network as data:
+
+- ✅ Strings, numbers, booleans, plain objects/arrays, JSX, and **promises** (the client resolves them with `use()`).
+- ❌ Functions (event handlers), class instances, or anything holding live state — these can't be serialized and sent.
+
+```jsx
+// Server Component passes a promise across the boundary:
+export default function Page() {
+  const commentsPromise = fetchComments(); // not awaited here
+  return <Comments commentsPromise={commentsPromise} />; // Client resolves it with use()
+}
+```
+
+## RSC comes from a framework
+
+One honest caveat: you don't get Server Components from bare `react` + a bundler. RSC needs a framework or build setup that understands the server/client split and can serialize the boundary — in practice, **Next.js (App Router)**, and other RSC-capable frameworks. The concepts here are React's; the wiring is the framework's.
+
+<Callout title="The one-line takeaway">
+A **Server Component** runs on the server, can be `async` and fetch data directly, and never ships its code to the browser — the client gets the rendered result. Add `'use client'` to cross into an interactive **Client Component** (state, events). Props across the boundary must be **serializable** (including promises, which the client reads with `use()`). RSC is adopted through a framework like Next.js App Router, not bare React.
+</Callout>
+
+export const quizRsc = [
+  {
+    q: 'What is distinctive about a React Server Component?',
+    options: [
+      'It runs in a Web Worker',
+      'It runs on the server and never ships its code to the client — the browser receives the rendered result',
+      'It is faster JSX',
+      'It requires useEffect to fetch data',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How can a Server Component fetch data?',
+    options: [
+      'Only with useEffect and useState',
+      'Directly — it can be async and await data (e.g. a DB call) on the server',
+      'It cannot fetch data',
+      'Through a client-only API',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the `use client` directive mark?',
+    options: [
+      'That the file should be deleted',
+      'The boundary where code becomes a Client Component (ships to the browser, can use state and events)',
+      'A server-only function',
+      'A CSS module',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which prop can NOT be passed from a Server Component to a Client Component?',
+    options: [
+      'A string',
+      'A plain object',
+      'A function (event handler) — it is not serializable',
+      'A promise',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="react-19/server-components" questions={quizRsc} />
+
+<ProgressTracker client:visible id="react-19/server-components" />

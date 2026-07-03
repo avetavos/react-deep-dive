@@ -1,0 +1,129 @@
+---
+title: 'Lifting State & Composition'
+description: 'Lifting state to a common ancestor, one-way data flow, the prop-drilling problem, and composition as the first fix before reaching for Context.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Lifting state up
+
+When two components need to share the same state, that state cannot live in either one — it must move **up** to their closest common ancestor, which then passes it down as props. This is *lifting state up*, and it's the default answer to "these two components need to stay in sync."
+
+```jsx
+// The parent owns the state; both children read/update it through props.
+function TemperatureApp() {
+  const [celsius, setCelsius] = useState(0);
+  return (
+    <>
+      <CelsiusInput value={celsius} onChange={setCelsius} />
+      <FahrenheitLabel celsius={celsius} />
+    </>
+  );
+}
+```
+
+The state has a **single source of truth** (the parent), and data flows one way: down as props, back up as callbacks. Two inputs can never disagree because there is only one value.
+
+## The prop-drilling problem
+
+Lifting works beautifully until the ancestor is *far* above the consumer. Then the props have to thread through every intermediate component that doesn't care about them:
+
+```jsx
+// theme is only used by Button, but every layer must pass it through.
+<App theme={theme}>
+  <Page theme={theme}>
+    <Sidebar theme={theme}>
+      <Button theme={theme} />   {/* finally used here */}
+    </Sidebar>
+  </Page>
+</App>
+```
+
+Every intermediate component gains a prop it only forwards. This is **prop drilling** — noisy, and a refactor headache. The instinct is to jump straight to Context, but there's a simpler fix to try first.
+
+## Composition: pass JSX as props
+
+Before Context, reach for **composition**. Instead of drilling a value through a component, pass the *already-rendered* JSX in as `children` (or a named prop), so the intermediate component never sees the value at all.
+
+```jsx
+// Sidebar doesn't know about `theme` — it just renders whatever children it's given.
+function Sidebar({ children }) {
+  return <aside className="sidebar">{children}</aside>;
+}
+
+// The Button is created where `theme` is in scope, then handed to Sidebar as content.
+<Page>
+  <Sidebar>
+    <Button theme={theme} />   {/* theme is bound here, not drilled */}
+  </Sidebar>
+</Page>
+```
+
+<Mermaid title="Drilling threads props through; composition hands over rendered content" code={compDiagram} />
+
+export const compDiagram = `flowchart TB
+  subgraph drill["Prop drilling"]
+    a1["App theme"] --> p1["Page theme"] --> s1["Sidebar theme"] --> b1["Button uses theme"]
+  end
+  subgraph comp["Composition"]
+    a2["App: renders Button here"] --> s2["Sidebar: renders children"]
+    a2 -.passes JSX.-> s2
+  end`;
+
+You can also pass JSX through named props (`<Layout sidebar={<Nav />} main={<Feed />} />`). The intermediate components become generic containers ("render whatever you're given"), which is more reusable *and* removes the drilling. Context is for when even composition can't reach — truly cross-cutting data consumed in many scattered places.
+
+<Callout title="The one-line takeaway">
+When two components share state, **lift it** to their closest common ancestor — one source of truth, data down, callbacks up. When props must pass through many uninterested layers (**prop drilling**), try **composition first**: pass the rendered JSX as `children` or a prop so intermediate components stay generic and never see the value. Only reach for Context when composition can't reach the consumers.
+</Callout>
+
+export const quizLift = [
+  {
+    q: 'When two sibling components need the same state, where should it live?',
+    options: [
+      'Duplicated in both siblings',
+      'Lifted up to their closest common ancestor, passed down as props',
+      'In a global variable',
+      'In the DOM',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is prop drilling?',
+    options: [
+      'Passing props through many intermediate components that only forward them to reach a deep consumer',
+      'Mutating props',
+      'Using too many hooks',
+      'Rendering on the server',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'What is the composition fix for prop drilling?',
+    options: [
+      'Put the value in a global variable',
+      'Pass the already-rendered JSX as children/props so intermediate components never see the value',
+      'Duplicate the state everywhere',
+      'Always use Context immediately',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In one-way data flow, how does data move?',
+    options: [
+      'Up as props, down as callbacks',
+      'Down as props, back up via callbacks',
+      'Sideways between siblings directly',
+      'Randomly',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/lifting-and-composition" questions={quizLift} />
+
+<ProgressTracker client:visible id="state-and-data/lifting-and-composition" />

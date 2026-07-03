@@ -1,0 +1,122 @@
+---
+title: 'Context'
+description: 'createContext and useContext, when Context is the right tool and when it hurts performance, splitting contexts, and why Context is not a state manager.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context: teleport a value down a subtree
+
+**Context** lets a parent make a value available to every component below it, without passing props through the layers in between. You create a context, wrap a subtree in a provider, and any descendant reads it with `useContext`.
+
+```jsx
+import { createContext, useContext, useState } from "react";
+
+const ThemeContext = createContext("light");
+
+function App() {
+  const [theme, setTheme] = useState("dark");
+  return (
+    // React 19: you can render <ThemeContext> directly as the provider.
+    // (The classic <ThemeContext.Provider> still works too.)
+    <ThemeContext value={theme}>
+      <Page />
+    </ThemeContext>
+  );
+}
+
+function Button() {
+  const theme = useContext(ThemeContext); // reads the nearest provider's value
+  return <button className={theme}>Click</button>;
+}
+```
+
+`Button` gets `theme` no matter how deep it is, and no intermediate component has to forward it. This is the fix for prop drilling when composition can't reach the consumers.
+
+## When Context fits — and when it hurts
+
+Context is designed for **low-frequency, broadly-shared** values: theme, current user/auth, locale, a design-system config. Things that many components read but that change rarely.
+
+The catch is performance: **when a provider's value changes, every consumer re-renders** — and React can't skip them with `memo`, because they subscribe to the context directly.
+
+<Mermaid title="A context value change re-renders all its consumers" code={ctxDiagram} />
+
+export const ctxDiagram = `flowchart TB
+  prov["Provider value changes"] --> c1["Consumer A re-renders"]
+  prov --> c2["Consumer B re-renders"]
+  prov --> c3["Consumer C re-renders"]
+  note["memo cannot stop a context re-render"] -.-> c1`;
+
+So putting **fast-changing** state (e.g. a value that updates on every keystroke or animation frame) in a single wide context is a performance trap — it re-renders the whole subtree constantly.
+
+Two mitigations:
+
+- **Split contexts.** Put unrelated values in separate providers so a change to one doesn't re-render consumers of the other. A common split: one context for the *state* and one for the *dispatch/updater* (the updater is stable, so components that only dispatch never re-render).
+- **Keep the value stable.** Memoize the provider's `value` object so it doesn't get a new reference on every parent render.
+
+## Context is not a state manager
+
+A crucial distinction: **Context is a *transport* mechanism, not a state container.** It moves a value down the tree; it does not hold or update state. The state itself still lives in a `useState` or `useReducer` in the provider component. "Using Context for state management" really means "`useState`/`useReducer` at the top, delivered by Context."
+
+```jsx
+function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);   // the state lives here
+  return <AuthContext value={{ user, setUser }}>{children}</AuthContext>; // Context just delivers it
+}
+```
+
+<Callout title="The one-line takeaway">
+Context teleports a value to any descendant via `useContext`, fixing prop drilling for **broadly-shared, slowly-changing** data (theme, auth, locale). But every consumer re-renders when the provider value changes — and `memo` can't stop it — so keep fast-changing state out of a wide context, **split contexts** (often state vs dispatch), and memoize the value. Context is a *transport*, not a state manager: the state still lives in `useState`/`useReducer`.
+</Callout>
+
+export const quizCtx = [
+  {
+    q: 'What problem does Context solve?',
+    options: [
+      'It makes components render faster',
+      'It delivers a value to any descendant without passing props through every intermediate layer',
+      'It replaces useState entirely',
+      'It styles components',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What happens to consumers when a context provider\'s value changes?',
+    options: [
+      'Only the provider re-renders',
+      'Every consumer of that context re-renders, and memo cannot prevent it',
+      'Nothing re-renders',
+      'Only the first consumer re-renders',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is Context "not a state manager"?',
+    options: [
+      'It cannot hold any data',
+      'It only transports a value down the tree; the actual state still lives in useState/useReducer in the provider',
+      'It only works with strings',
+      'It runs on the server',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a good mitigation for context re-render performance?',
+    options: [
+      'Put all state in one giant context',
+      'Split contexts (e.g. state vs dispatch) and memoize the provider value',
+      'Never use useContext',
+      'Use index keys',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/context" questions={quizCtx} />
+
+<ProgressTracker client:visible id="state-and-data/context" />

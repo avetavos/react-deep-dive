@@ -1,0 +1,129 @@
+---
+title: 'Suspense & lazy'
+description: 'Declarative loading UI with Suspense, how a component "suspends", code-splitting with React.lazy, and nesting suspense boundaries.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Loading UI, declaratively
+
+Managing loading states by hand means threading `isLoading` booleans through your components and rendering spinners in a dozen places. **Suspense** replaces that with a boundary: you wrap part of the tree, give it a `fallback`, and while anything inside is "not ready," React shows the fallback instead.
+
+```jsx
+import { Suspense } from "react";
+
+function Page() {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Profile />       {/* if this suspends, the Spinner shows */}
+      <Timeline />      {/* until BOTH are ready, then both appear together */}
+    </Suspense>
+  );
+}
+```
+
+You don't write "if loading show spinner" anywhere. The boundary owns the loading UI for its subtree, declaratively.
+
+## What "suspend" means
+
+A component **suspends** when it can't finish rendering yet because it's waiting on something — code that hasn't downloaded (`React.lazy`), or data (via the `use()` hook or a Suspense-aware data library). When a component suspends, React "unwinds" to the nearest `<Suspense>` above it and shows that boundary's `fallback`. When the awaited thing resolves, React retries the render and swaps the real content in.
+
+<Mermaid title="A suspending child shows the nearest boundary's fallback" code={suspDiagram} />
+
+export const suspDiagram = `flowchart TB
+  boundary["Suspense fallback=Spinner"] --> child["Child suspends\n(waiting on code or data)"]
+  child --> show["React shows Spinner"]
+  show --> resolve["awaited thing resolves"]
+  resolve --> retry["React retries render\n→ shows real content"]`;
+
+## Code-splitting with React.lazy
+
+The most common use of Suspense is **lazy-loading** a component so its code isn't in the initial bundle. `React.lazy` takes a dynamic `import()` and returns a component that suspends until the chunk downloads.
+
+```jsx
+import { lazy, Suspense } from "react";
+
+// SettingsPanel's code is a separate chunk, fetched only when first rendered.
+const SettingsPanel = lazy(() => import("./SettingsPanel"));
+
+function App({ showSettings }) {
+  return (
+    <Suspense fallback={<Spinner />}>
+      {showSettings && <SettingsPanel />}
+    </Suspense>
+  );
+}
+```
+
+Until `SettingsPanel` is actually rendered, its JavaScript is never downloaded — a direct win for initial load time. When it first renders, it suspends (downloading), the fallback shows, then the panel appears.
+
+## Nesting boundaries
+
+Suspense boundaries **nest**, and you place them to control the loading *granularity*. A boundary high in the tree means "show one big spinner for everything below." Boundaries deeper down mean "reveal the shell immediately, and show small spinners only for the parts still loading."
+
+```jsx
+<Suspense fallback={<PageSkeleton />}>
+  <Header />
+  <Suspense fallback={<FeedSkeleton />}>
+    <Feed />                 {/* the header shows while only the feed loads */}
+  </Suspense>
+</Suspense>
+```
+
+Choosing where boundaries go is a UX decision: fewer boundaries = simpler but more "all or nothing"; more boundaries = progressive reveal.
+
+<Callout title="The one-line takeaway">
+`<Suspense fallback={...}>` is a **declarative loading boundary**: while any child "suspends" (waiting on code from `React.lazy` or data from `use()`), React shows the nearest boundary's fallback, then swaps in the real content when it resolves. Nest boundaries to control loading granularity — one big spinner vs a shell that reveals progressively.
+</Callout>
+
+export const quizSusp = [
+  {
+    q: 'What does a `<Suspense fallback={...}>` boundary do?',
+    options: [
+      'Catches JavaScript errors',
+      'Shows its fallback while any child is "not ready" (suspended), then reveals the real content when it resolves',
+      'Fetches data automatically',
+      'Memoizes children',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does it mean for a component to "suspend"?',
+    options: [
+      'It throws an error',
+      'It cannot finish rendering yet because it is waiting on code or data, so React shows the nearest boundary fallback',
+      'It stops all rendering forever',
+      'It re-renders in a loop',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does `React.lazy(() => import("./X"))` achieve?',
+    options: [
+      'Caches X in memory',
+      'Code-splits X into a separate chunk downloaded only when it first renders (suspending until it arrives)',
+      'Makes X render faster',
+      'Preloads all components',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why nest multiple Suspense boundaries?',
+    options: [
+      'It is required by React',
+      'To control loading granularity — a shell can appear immediately while deeper parts show their own smaller fallbacks',
+      'To catch errors at each level',
+      'To improve SEO only',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/suspense-and-lazy" questions={quizSusp} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/suspense-and-lazy" />

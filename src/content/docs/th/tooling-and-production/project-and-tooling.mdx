@@ -1,0 +1,109 @@
+---
+title: 'Project & Tooling'
+description: 'เริ่มโปรเจกต์ React วันนี้ — Vite สำหรับ SPA, framework สำหรับ routing และ SSR, ทำไม Create React App หายไป และ dev tool ที่ทำให้ React ใช้งานสนุก'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Create React App ถูก deprecated แล้ว
+
+หลายปีที่ผ่านมา คำตอบมาตรฐานของ "เริ่ม React app ยังไง?" คือ Create React App (CRA) ยุคนั้นจบแล้ว: ทีม React **deprecated CRA อย่างเป็นทางการในปี 2025** ตอนนี้ติดตั้งมันจะขึ้น warning ชี้ไปยังตัวเลือกปัจจุบัน อย่าเริ่มโปรเจกต์ใหม่ด้วยมัน และควรพิจารณาย้ายโปรเจกต์เดิมออก
+
+ตัวแทนคือทางแยก: **build tool** สำหรับ client-side SPA หรือ **framework** สำหรับอะไรก็ตามที่ต้องการ routing, server rendering หรือ Server Components
+
+## Vite สำหรับ single-page app
+
+สำหรับ SPA แบบ client-rendered **Vite** คือมาตรฐาน: dev server ที่เร็วทันใจ, Fast Refresh และ production build ที่เร็ว
+
+```bash
+npm create vite@latest my-app -- --template react-ts
+cd my-app
+npm install
+npm run dev
+```
+
+template `react-ts` ให้ React + TypeScript ตั้งค่ามาพร้อม นั่นคือ setup ทั้งหมด — ไม่ต้องเขียน config เอง
+
+## framework สำหรับ routing, SSR และ RSC
+
+เมื่อไรที่ต้องการ routing จริง, server-side rendering, data loading หรือ **React Server Components** ให้หยิบ framework มาใช้แทนการประกอบเอง คำแนะนำปัจจุบันจาก React docs:
+
+```bash
+npx create-next-app@latest        # Next.js — App Router, RSC, SSR
+npx create-react-router@latest    # React Router (framework mode) — routing + SSR
+```
+
+<Mermaid title="เลือกวิธีเริ่ม" code={chooseDiagram} />
+
+export const chooseDiagram = `flowchart TB
+  q{"ต้องการ routing / SSR /\nServer Components?"}
+  q -->|no, client SPA| vite["Vite\n(build tool)"]
+  q -->|yes| fw["Framework:\nNext.js or React Router"]
+  cra["Create React App"] -->|deprecated| x["do not use"]`;
+
+framework ดูแลเรื่องที่ build tool ทิ้งให้คุณจัดการ: nested route, data fetching บน server, streaming และ RSC boundary (อยู่ในโมดูล React 19) สำหรับ SPA แบบ dashboard หลัง login Vite เพียงพอ; สำหรับ content site หรืออะไรที่เน้น SEO หรือ server-data ก็คุ้มที่จะใช้ framework
+
+## dev experience
+
+ไม่ว่าเลือกอันไหน สิ่งเหล่านี้ทำให้การพัฒนา React สนุก:
+
+- **React DevTools** (browser extension) — ดู component tree, props, state และ hooks; Profiler บอกว่าทำไมและ component render บ่อยแค่ไหน (สำคัญมากในโมดูล performance)
+- **Fast Refresh** — แก้ component แล้วเห็นผลทันที โดย *เก็บ* state ของ component ไว้ built-in ใน Vite และ framework
+- **JSX transform สมัยใหม่** — ไม่ต้อง `import React from 'react'` ที่หัวทุกไฟล์แค่เพื่อใช้ JSX อีกต่อไป; compiler inject runtime import ให้ (ยังต้อง import hooks และ API ที่ใช้)
+- **Strict Mode** — ครอบ app ด้วย `<StrictMode>` ใน development เพื่อจับ render ที่ไม่ pure และบั๊ก effect (การ double-invoke ที่คุณเจอใน Foundations)
+
+<Callout title="The one-line takeaway">
+**Create React App ถูก deprecated แล้ว** — เริ่มโปรเจกต์ใหม่ด้วย **Vite** (`npm create vite@latest -- --template react-ts`) สำหรับ client SPA หรือ **framework** (Next.js / React Router) เมื่อต้องการ routing, SSR หรือ Server Components พึ่ง **React DevTools**, **Fast Refresh**, JSX transform อัตโนมัติ และ **Strict Mode** เพื่อ dev loop ที่เร็วและปลอดภัย
+</Callout>
+
+export const quizProject = [
+  {
+    q: 'ทีม React แนะนำอะไรสำหรับ client-side SPA ใหม่?',
+    options: [
+      'Create React App',
+      'Vite (เช่น `npm create vite@latest -- --template react-ts`)',
+      'Webpack config ดิบ ๆ',
+      'แก้ script tag บน CDN',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรเลือก framework (Next.js / React Router) แทน Vite เมื่อไร?',
+    options: [
+      'ไม่มีวัน — Vite ครอบคลุมทุกอย่าง',
+      'เมื่อต้องการ routing, server-side rendering หรือ Server Components',
+      'เฉพาะ app เล็ก ๆ',
+      'เฉพาะเมื่อใช้ JavaScript ไม่ใช่ TypeScript',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Fast Refresh ทำอะไร?',
+    options: [
+      'reload ทั้งหน้าและ reset state',
+      'apply การแก้ component ทันทีโดยเก็บ state ของ component ไว้',
+      'เร่ง production build อย่างเดียว',
+      'รัน test ให้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมปกติไม่ต้องเขียน `import React from "react"` ที่หัวทุกไฟล์อีกแล้ว?',
+    options: [
+      'React ถูกลบออก',
+      'JSX transform สมัยใหม่ inject runtime import ให้อัตโนมัติ',
+      'JSX ไม่ต้องใช้ React อีกต่อไป',
+      'มัน import แบบ global ผ่าน script tag',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/project-and-tooling" questions={quizProject} />
+
+<ProgressTracker client:visible id="tooling-and-production/project-and-tooling" />

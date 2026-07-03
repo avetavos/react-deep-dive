@@ -1,0 +1,126 @@
+---
+title: 'use() & Data Fetching'
+description: 'use() hook ของ React 19 — อ่าน promise หรือ context, integrate กับ Suspense อย่างไร, render-as-you-fetch และทำไมมักใช้ framework หรือ data library'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## `use()` API ของ React 19
+
+`use()` เป็น API ของ React 19 ที่ **อ่านค่าของ resource** ระหว่าง render — ที่สำคัญที่สุดคือ **promise** หรือ **context** เมื่อคุณส่ง promise เข้าไป component จะ **suspend** ระหว่างที่ promise ยัง pending (แสดง Suspense fallback ที่ใกล้ที่สุด) และคืนค่าที่ resolve แล้วเมื่อมัน settle
+
+```jsx
+import { use, Suspense } from "react";
+
+function Message({ messagePromise }) {
+  const text = use(messagePromise);   // suspend จนกว่า promise จะ resolve
+  return <p>{text}</p>;
+}
+
+function Container({ messagePromise }) {
+  return (
+    <Suspense fallback={<p>Loading…</p>}>
+      <Message messagePromise={messagePromise} />
+    </Suspense>
+  );
+}
+```
+
+`use()` แหกกฎข้อหนึ่งที่คุณเรียนกับ hook อื่น: มัน **เรียกแบบมีเงื่อนไขได้** — ใน `if` หรือใน loop ที่เป็นแบบนั้นได้เพราะมันไม่ได้ผูกกับ hook slot ตายตัวแบบ `useState`/`useEffect`
+
+## กฎสำคัญ: cache promise ไว้
+
+`use()` *ไม่* เริ่ม fetch และไม่ cache อะไรเลย มันอ่าน promise ที่คุณให้ — ดังนั้น promise นั้น **ต้องเสถียรข้าม render** การสร้าง promise ใน body ของ component หมายถึง promise ใหม่ทุก render ซึ่งจะ suspend ตลอดกาล (หรือ refetch ไม่หยุด)
+
+```jsx
+// ❌ promise ใหม่ทุก render — refetch / ไม่ settle
+function Bad({ id }) {
+  const data = use(fetch(`/api/${id}`).then(r => r.json()));
+  // ...
+}
+
+// ✅ promise ถูกสร้างข้างนอกและส่งเข้ามา (cache โดย caller/framework)
+function Good({ dataPromise }) {
+  const data = use(dataPromise);
+  // ...
+}
+```
+
+นี่คือเหตุผลที่ `use()` ดิบ ๆ มักจับคู่กับ **cache** เสมอ — ไม่ว่าจะเป็น data layer ของ framework หรือ `Map` cache ที่ทำเอง — ที่คืน promise instance *เดิม* สำหรับ request เดิม
+
+## Render-as-you-fetch
+
+pattern ที่ `use()` เปิดทางให้คือ **render-as-you-fetch**: เริ่ม request *ก่อนหรือขณะ* ที่คุณ render (เช่นใน route loader หรือตอน hover) ส่ง promise ลงไป แล้วปล่อยให้ component อ่านมันผ่าน `use()` ใน Suspense boundary เทียบสามแนวทาง:
+
+<Mermaid title="fetch-on-render vs render-as-you-fetch" code={fetchDiagram} />
+
+export const fetchDiagram = `flowchart TB
+  subgraph old["fetch-on-render (useEffect)"]
+    r1["render"] --> e1["effect รัน"] --> f1["แล้ว fetch ค่อยเริ่ม"] --> r2["re-render พร้อม data"]
+  end
+  subgraph new["render-as-you-fetch (use + Suspense)"]
+    start["เริ่ม fetch ก่อน\n(loader / event)"] --> pass["ส่ง promise ลงไป"]
+    pass --> read["use(promise) suspend\n→ Suspense fallback → data"]
+  end`;
+
+`use()` ยังอ่าน **context** ได้ด้วย และต่างจาก `useContext` ตรงที่เรียกแบบมีเงื่อนไขได้ — สะดวกสำหรับอ่าน context ใน branch
+
+## ปกติคุณจะไม่เขียนเองด้วยมือ
+
+นี่คือส่วนที่ต้องซื่อสัตย์ `use()` ดิบ ๆ + Suspense + promise cache ที่เขียนเองนั้นทรงพลังแต่ระดับต่ำ ในแอปจริงคุณเกือบทุกครั้งจะได้ render-as-you-fetch ผ่าน **framework** (router/loader ที่ fetch ต่อ route และให้ cache) หรือ **data library** อย่าง TanStack Query (ที่จัดการ caching, revalidation และ Suspense integration ให้) เรียน `use()` เพื่อเข้าใจกลไก; ใช้ library เพื่อ ship จริง
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`use()` (React 19) อ่าน resource ระหว่าง render — ส่ง **promise** เข้าไปแล้ว component จะ **suspend** จนกว่ามัน resolve (จับคู่กับ Suspense สำหรับ loading และ error boundary สำหรับ rejection); มันอ่าน context ได้ด้วย และต่างจาก hook อื่นตรงที่เรียกแบบ **มีเงื่อนไข** ได้ ข้อควรระวัง: `use()` ไม่ fetch และไม่ cache — promise ต้อง **เสถียรข้าม render** ซึ่งเป็นเหตุผลที่ใช้ framework หรือ data library (TanStack Query) จัดการ cache ในทางปฏิบัติ
+</Callout>
+
+export const quizUse = [
+  {
+    q: 'เกิดอะไรขึ้นเมื่อคุณส่ง promise ที่ pending เข้า `use()`?',
+    options: [
+      'คืน null ทันที',
+      'component suspend จนกว่า promise จะ resolve (แสดง Suspense fallback ที่ใกล้ที่สุด) แล้วคืนค่าที่ resolve แล้ว',
+      'มัน throw error',
+      'มัน block main thread',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`use()` ต่างจาก hook อย่าง `useState` อย่างไร?',
+    options: [
+      'มันอ่านค่าไม่ได้',
+      'มันเรียกแบบมีเงื่อนไขได้ (ใน if หรือ loop)',
+      'มันรันบน server เท่านั้น',
+      'มันไม่ต้องใช้ React',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม promise ที่ส่งเข้า `use()` ต้องถูก cache / เสถียรข้าม render?',
+    options: [
+      'เพื่อ TypeScript',
+      'เพราะ promise ใหม่ทุก render จะ suspend ตลอดกาลหรือ refetch ไม่หยุด — use() อ่าน promise ไม่ได้ cache ให้',
+      'เพื่อลด bundle size',
+      'มันไม่ต้องเสถียร',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ในทางปฏิบัติ แอปส่วนใหญ่ทำ render-as-you-fetch อย่างไร?',
+    options: [
+      'เขียน use() ดิบ ๆ + cache ทำเองทุกที่',
+      'ผ่าน framework router/loader หรือ data library (เช่น TanStack Query) ที่ให้ caching และ Suspense integration',
+      'ด้วย useEffect เท่านั้น',
+      'ไม่ fetch data เลย',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/use-and-data-fetching" questions={quizUse} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/use-and-data-fetching" />

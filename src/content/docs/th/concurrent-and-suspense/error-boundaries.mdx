@@ -1,0 +1,130 @@
+---
+title: 'Error Boundaries'
+description: 'จับ render error ด้วย error boundary, มันจับอะไรและไม่จับอะไร และการจับคู่กับ Suspense เพื่อ UI แบบ loading บวก error'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## component เดียว crash ไม่ควรทำทั้งแอปว่างเปล่า
+
+ถ้า component throw ระหว่าง render React — โดยตั้งใจ — จะ unmount *ทั้ง* tree แทนที่จะแสดง UI ที่เสียหาย **error boundary** คือ component ที่จับ error แบบนั้นใน subtree ของมัน เพื่อให้ความล้มเหลวใน widget เดียวแสดง fallback ตรงนั้น แทนที่จะทำทั้งหน้าล่ม
+
+error boundary ยังต้องเขียนเป็น **class component** เพราะมันพึ่ง lifecycle method สองตัวที่ไม่มี hook เทียบเท่า:
+
+```jsx
+import { Component } from "react";
+
+class ErrorBoundary extends Component {
+  state = { error: null };
+
+  // render phase: คืน state ใหม่เพื่อแสดง fallback ใน render ถัดไป
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  // commit phase: side effect — log error ไปยัง reporting service ของคุณ
+  componentDidCatch(error, info) {
+    reportError(error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) return this.props.fallback;
+    return this.props.children;
+  }
+}
+```
+
+ใน production ส่วนใหญ่ใช้ library เล็ก ๆ ชื่อ **`react-error-boundary`** ที่ห่อของแบบนี้และเพิ่มกลไก reset — แต่กลไกข้างในก็คือด้านบนเป๊ะ ๆ
+
+```jsx
+<ErrorBoundary fallback={<p>Something went wrong.</p>}>
+  <Widget />   {/* ถ้า Widget throw ระหว่าง render, fallback จะโชว์ตรงนี้ */}
+</ErrorBoundary>
+```
+
+## มันจับอะไร — และไม่จับอะไร
+
+ตรงนี้คนเข้าใจผิดบ่อย error boundary จับ error ที่เกิด **ระหว่าง rendering** (และใน lifecycle method กับ constructor) ของ component ที่อยู่ *ใต้* มัน มัน **ไม่** จับ:
+
+- **event handler** — error ใน `onClick` เป็น JS error ปกติ; ใช้ `try/catch`
+- **asynchronous code** — promise ที่ reject หรือ callback ของ `setTimeout` รันนอก render ของ React ดังนั้นไม่มี boundary ไหนเห็น
+- **error ใน boundary เอง** — จับเฉพาะที่อยู่ *ใต้* มัน
+- **server-side rendering error** — จัดการแยกต่างหาก
+
+<Mermaid title="error boundary จับอะไร" code={ebDiagram} />
+
+export const ebDiagram = `flowchart TB
+  eb["Error Boundary"] --> child["child render"]
+  child -->|throw ระหว่าง render| caught["จับได้ → แสดง fallback"]
+  handler["onClick throw"] -.ไม่ถูกจับ.-> handler2["ใช้ try/catch"]
+  async["promise reject / setTimeout"] -.ไม่ถูกจับ.-> async2["จัดการเอง"]`;
+
+## จับคู่กับ Suspense
+
+Suspense และ error boundary เสริมกัน: Suspense จัดการ state *loading* (child กำลังรอ) ส่วน error boundary จัดการ state *failure* (child throw — รวมถึง promise ที่ reject ซึ่งอ่านด้วย `use()`) รวมกันได้ทั้งสาม state ของ async UI แบบ declarative:
+
+```jsx
+<ErrorBoundary fallback={<Error />}>
+  <Suspense fallback={<Spinner />}>
+    <Profile />   {/* loading → Spinner, error → Error, success → Profile */}
+  </Suspense>
+</ErrorBoundary>
+```
+
+เมื่อ `use()` อ่าน promise ที่ *reject* React จะ propagate มันไปยัง error boundary ที่ใกล้ที่สุด — ดังนั้น boundary เดียวกันที่จัดการ render crash ก็จัดการ data-fetch failure ด้วย
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**error boundary** (class component ที่ใช้ `getDerivedStateFromError` + `componentDidCatch` หรือ library `react-error-boundary`) จับ error ที่ throw **ระหว่าง render** ใน children และแสดง fallback แทนที่จะ unmount ทั้งแอป มัน **ไม่** จับ error ใน event handler, async callback หรือตัวมันเอง — พวกนั้นใช้ `try/catch` ครอบ `<Suspense>` ด้วย error boundary เพื่อได้ state loading, error และ success แบบ declarative
+</Callout>
+
+export const quizEb = [
+  {
+    q: 'error boundary จับอะไร?',
+    options: [
+      'ทุก error ทุกที่ในแอป',
+      'error ที่ throw ระหว่าง rendering (และ lifecycle) ของ component ที่อยู่ใต้มัน',
+      'เฉพาะ network error',
+      'เฉพาะ syntax error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อันไหนที่ error boundary ไม่จับ?',
+    options: [
+      'component ที่ throw ระหว่าง render',
+      'error ใน onClick event handler (ต้องใช้ try/catch แทน)',
+      'error ใน constructor ของ child',
+      'error ใน lifecycle method',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม error boundary ยังต้องเขียนเป็น class component?',
+    options: [
+      'class เร็วกว่า',
+      'มันพึ่ง getDerivedStateFromError และ componentDidCatch ซึ่งไม่มี hook เทียบเท่า',
+      'hook render อะไรไม่ได้',
+      'เป็นแค่ความชอบด้าน style',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Suspense กับ error boundary ทำงานร่วมกันอย่างไร?',
+    options: [
+      'ทำงานเหมือนกัน',
+      'Suspense จัดการ state loading; error boundary จัดการ state failure (รวมถึง promise ที่ reject ซึ่งอ่านด้วย use())',
+      'ใช้ได้ทีละอันเท่านั้น',
+      'error boundary แทนที่ Suspense',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/error-boundaries" questions={quizEb} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/error-boundaries" />

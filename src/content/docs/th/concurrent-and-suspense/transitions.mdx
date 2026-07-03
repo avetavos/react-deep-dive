@@ -1,0 +1,128 @@
+---
+title: 'Transitions'
+description: 'useTransition สำหรับ mark update เป็น non-urgent เพื่อให้ input responsive, useDeferredValue สำหรับ defer การ re-render ที่แพง และเมื่อไรควรใช้อันไหน'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ปัญหา: update ที่ช้า block อันที่เร็ว
+
+ลองนึกถึง search box ที่ filter list ยักษ์ ทุก keystroke อัปเดตสองอย่าง: ค่าใน input (ต้องรู้สึกทันที) และผลลัพธ์ที่ filter แล้ว (คำนวณแพง) ถ้าทั้งคู่ urgent การ filter ที่แพงจะ block keystroke และพิมพ์จะสะดุด
+
+Transitions ให้คุณแยกมันออก: keystroke ยัง urgent ส่วนการ filter กลายเป็น *transition* priority ต่ำที่ React interrupt ได้เมื่อ keystroke ถัดไปมา
+
+## useTransition: mark update เป็น non-urgent
+
+`useTransition` คืน `[isPending, startTransition]` ครอบ state update ที่เป็น non-urgent ไว้ใน `startTransition` และใช้ `isPending` แสดง hint "updating" เบา ๆ
+
+```jsx
+function SearchResults({ allItems }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState(allItems);
+  const [isPending, startTransition] = useTransition();
+
+  function handleChange(e) {
+    setQuery(e.target.value);          // urgent — input อัปเดตทันที
+    startTransition(() => {
+      // non-urgent — React render อันนี้เบื้องหลัง, interrupt ได้
+      setResults(filterExpensive(allItems, e.target.value));
+    });
+  }
+
+  return (
+    <>
+      <input value={query} onChange={handleChange} />
+      {isPending && <span>updating…</span>}
+      <List items={results} />
+    </>
+  );
+}
+```
+
+keystroke ไม่เคยถูก block เลย: ถ้าคุณพิมพ์อีกก่อน filter จะเสร็จ React จะทิ้ง render ของ filter ที่ค้างอยู่แล้วเริ่มอันใหม่ `isPending` เป็น `true` ระหว่างที่ transition กำลัง render
+
+<Mermaid title="urgent update ลงก่อน แล้ว transition ค่อย render ทีหลัง" code={transDiagram} />
+
+export const transDiagram = `flowchart LR
+  key["keystroke"] --> urgent["setQuery (urgent)\ninput อัปเดตทันที"]
+  key --> trans["startTransition(setResults)\n(non-urgent)"]
+  trans --> bg["render เบื้องหลัง\ninterrupt ได้โดย keystroke ถัดไป"]`;
+
+## useDeferredValue: defer ที่ค่า แทนที่จะ defer ที่ update
+
+`useDeferredValue` คือแนวคิดเดียวกันจากอีกด้าน แทนที่จะครอบ *update* คุณครอบ *ค่า* ที่คุณอ่าน: มันคืนค่าเวอร์ชันที่ "ตามหลัง" ระหว่างงาน urgent ดังนั้นส่วนที่แพงจะ re-render จากค่า deferred (ที่เก่าไปนิดชั่วขณะ)
+
+```jsx
+function SearchResults({ allItems, query }) {
+  const deferredQuery = useDeferredValue(query);
+  // list render จาก deferredQuery ระหว่างที่ user พิมพ์ deferredQuery จะตามหลังหนึ่งก้าว
+  // ทำให้การ render list ที่แพงเกิดเบื้องหลัง
+  const results = filterExpensive(allItems, deferredQuery);
+
+  const isStale = query !== deferredQuery;
+  return <List items={results} style={{ opacity: isStale ? 0.6 : 1 }} />;
+}
+```
+
+## อันไหนดี?
+
+- ใช้ **`useTransition`** เมื่อ *คุณเป็นเจ้าของ state update* และครอบมันใน `startTransition` ได้ — คุณมี setter อยู่ตรงจุดที่เรียก
+- ใช้ **`useDeferredValue`** เมื่อค่ามาจาก *นอกการควบคุมของคุณ* (เป็น prop หรือ state ที่ครอบไม่ได้) — คุณ defer การอ่านมันแทน
+
+ทั้งคู่ทำให้ input urgent ยัง responsive โดยปล่อยให้การ re-render ที่แพงเกิดเป็นงานเบื้องหลังที่ interrupt ได้ ทั้งคู่ *ไม่ได้* ทำให้งานที่แพงเร็วขึ้น — มันเปลี่ยน *priority* ไม่ใช่ *cost* (สำหรับ list ที่ใหญ่จริง ๆ คุณยังต้องใช้ virtualization)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Transitions ทำให้ UI responsive โดย mark update ที่หนักเป็น **non-urgent** เพื่อให้ keystroke แทรกได้ ใช้ **`useTransition`** (`[isPending, startTransition]`) เมื่อคุณควบคุม state update และครอบมันได้; ใช้ **`useDeferredValue`** เมื่อคุณมีแค่ค่า (เป็น prop) และอยาก defer การอ่านมัน ทั้งคู่เปลี่ยน *priority* ไม่ใช่ *cost* — มันไม่ได้ทำให้งานช้ากลายเป็นเร็ว
+</Callout>
+
+export const quizTrans = [
+  {
+    q: 'การครอบ state update ไว้ใน `startTransition` ทำอะไร?',
+    options: [
+      'ทำให้รันบน Web Worker',
+      'mark ว่า non-urgent ดังนั้น React render มันเป็นงานเบื้องหลังที่ interrupt ได้ และ keystroke แทรกได้',
+      'หน่วง 300ms',
+      'ยกเลิกมัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`useTransition` คืนอะไร?',
+    options: [
+      'boolean ตัวเดียว',
+      'คู่ `[isPending, startTransition]`',
+      'ค่า deferred',
+      'ref',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไร `useDeferredValue` เหมาะกว่า `useTransition`?',
+    options: [
+      'เสมอ',
+      'เมื่อค่ามาจากนอกการควบคุม (เป็น prop) จนครอบ update ไม่ได้ — คุณ defer การอ่านค่านั้นแทน',
+      'เมื่ออยากทำให้การ filter เร็วขึ้น',
+      'เมื่อไม่มี state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'transition ทำให้งานที่แพงเร็วขึ้นไหม?',
+    options: [
+      'ใช่ มัน optimize การคำนวณ',
+      'ไม่ — มันเปลี่ยน priority ของ update (interrupt ได้, non-blocking) ไม่ใช่ cost',
+      'ใช่ มัน cache ผลลัพธ์',
+      'เฉพาะตอน production',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/transitions" questions={quizTrans} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/transitions" />

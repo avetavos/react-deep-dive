@@ -1,0 +1,133 @@
+---
+title: 'External Stores'
+description: 'เมื่อ built-in state ไม่พอ, external store อย่าง Zustand และ Redux และ useSyncExternalStore — ทำไมมันถึงมีอยู่ และ tearing คืออะไร'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## เมื่อไรควรออกจาก built-in state ของ React
+
+`useState`, `useReducer` และ Context รับมือแอปส่วนใหญ่ได้ คุณจะไปหา **external store** (Zustand, Jotai, Redux Toolkit, XState) เมื่อชนขีดจำกัดของพวกมัน:
+
+- state ถูกอ่าน/เขียนโดย **หลาย component ในที่กระจัดกระจาย** และพฤติกรรม "re-render ทุก consumer" ของ Context หยาบเกินไป
+- คุณอยากได้ **fine-grained subscription** — component ที่ re-render เฉพาะเมื่อ *slice ของตัวเอง* ใน store เปลี่ยน ไม่ใช่ทุกครั้งที่ store update
+- state มี **ตรรกะซับซ้อนหรืออยู่นอก React tree** (cache, websocket connection, state machine) ที่ควรมีอยู่อิสระจาก component ใด ๆ
+
+external store เก็บ state ไว้ *นอก* React และให้ component subscribe เฉพาะส่วนที่มันใช้
+
+```jsx
+// Zustand — the store lives outside React; components select a slice.
+import { create } from "zustand";
+
+const useCartStore = create((set) => ({
+  items: [],
+  add: (item) => set((s) => ({ items: [...s.items, item] })),
+}));
+
+function CartCount() {
+  // Re-renders only when items.length changes — a fine-grained subscription.
+  const count = useCartStore((s) => s.items.length);
+  return <span>{count}</span>;
+}
+```
+
+## useSyncExternalStore: subscribe อย่างปลอดภัย
+
+store ป้อนข้อมูลเข้า React อย่างปลอดภัยได้อย่างไร? แต่ก่อนคุณจะต่อ `useEffect` + `useState` แต่นั่นมีบั๊กแฝงภายใต้ **concurrent rendering**: React render ในเบื้องหลังได้ และค่าภายนอกอาจเปลี่ยน *กลาง render* ทำให้ component ต่าง ๆ ใน render เดียวกันอ่านค่าคนละค่า ความไม่สอดคล้องนี้เรียกว่า **tearing** — บางส่วนของ UI แสดงค่าเก่า บางส่วนแสดงค่าใหม่
+
+React ให้ **`useSyncExternalStore`** มาเพื่อ subscribe external store ใด ๆ โดยไม่ tearing library ของ store ใช้มันอยู่เบื้องหลัง แต่คุณใช้ตรง ๆ ก็ได้:
+
+```jsx
+import { useSyncExternalStore } from "react";
+
+// subscribe: register a callback, return an unsubscribe fn.
+// getSnapshot: return the current value (must be consistent within a render).
+function useOnlineStatus() {
+  return useSyncExternalStore(
+    (callback) => {
+      window.addEventListener("online", callback);
+      window.addEventListener("offline", callback);
+      return () => {
+        window.removeEventListener("online", callback);
+        window.removeEventListener("offline", callback);
+      };
+    },
+    () => navigator.onLine,          // client snapshot
+    () => true                       // server snapshot (for SSR)
+  );
+}
+```
+
+<Mermaid title="useSyncExternalStore ทำให้ React สอดคล้องกับแหล่งข้อมูลภายนอก" code={ssesDiagram} />
+
+export const ssesDiagram = `flowchart LR
+  store["External store\n(นอก React)"] -->|getSnapshot| hook["useSyncExternalStore"]
+  store -->|subscribe/notify| hook
+  hook --> react["React อ่าน snapshot\nที่สอดคล้องหนึ่งเดียวต่อ render\n(ไม่ tearing)"]`;
+
+## เลือกบ้านให้ state
+
+| ความต้องการ | ใช้ |
+|------|-----|
+| ใช้โดย component เดียว | Local `useState` / `useReducer` |
+| แชร์โดย component ใกล้ ๆ ไม่กี่ตัว | lift state ไปที่ common ancestor |
+| แชร์กว้าง เปลี่ยนไม่บ่อย | Context (+ `useReducer`) |
+| เข้าถึงกระจัดกระจาย, ต้อง fine-grained subscription หรืออยู่นอก React | External store (ผ่าน `useSyncExternalStore`) |
+
+สรุปตามจริง: ไปหา store เมื่อคุณ *รู้สึกถึงความเจ็บปวด* ไม่ใช่ล่วงหน้า หลายทีมใส่ Redux ตั้งแต่วันแรกและไม่เคยต้องใช้เลย เริ่มต่ำบนบันได แล้วปีนเมื่อแอปบอกให้ปีน
+
+<Callout title="สรุปหนึ่งบรรทัด">
+ไปหา **external store** (Zustand, Redux, Jotai) เมื่อ state ถูกเข้าถึงในที่กระจัดกระจาย, ต้องการ **fine-grained subscription** หรืออยู่นอก React tree store subscribe เข้า React ผ่าน **`useSyncExternalStore`** ซึ่งมีอยู่เพื่อป้องกัน **tearing** — การอ่านที่ไม่สอดคล้องเมื่อค่าภายนอกเปลี่ยนกลาง render ภายใต้ concurrent rendering เลือกขั้นต่ำสุดที่ใช้ได้ เพิ่ม store เมื่อรู้สึกถึงความเจ็บปวดเท่านั้น
+</Callout>
+
+export const quizStore = [
+  {
+    q: 'external store เป็นตัวเลือกที่ถูกต้องเมื่อไร?',
+    options: [
+      'ทุกแอป React ตั้งแต่วันแรก',
+      'เมื่อ state ถูกเข้าถึงในหลายที่กระจัดกระจาย, ต้องการ fine-grained subscription หรืออยู่นอก React tree',
+      'เฉพาะ state เรื่อง styling',
+      'ไม่มีวัน — Context ครอบคลุมทุกอย่าง',
+    ],
+    answer: 1,
+  },
+  {
+    q: '"tearing" คืออะไร?',
+    options: [
+      'บั๊ก layout ของ CSS',
+      'การอ่านที่ไม่สอดคล้อง ที่ component ต่าง ๆ ใน render เดียวกันเห็นค่าของแหล่งภายนอกคนละค่า',
+      'memory leak',
+      'type error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'useSyncExternalStore ทำอะไร?',
+    options: [
+      'fetch ข้อมูลจาก server',
+      'subscribe React เข้ากับ external store อย่างปลอดภัย ให้ snapshot ที่สอดคล้องหนึ่งเดียวต่อ render (ไม่ tearing)',
+      'แทนที่ useState',
+      'รัน effect หลัง paint',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'argument หลักสองตัวของ useSyncExternalStore คืออะไร?',
+    options: [
+      'state และ setState',
+      'subscribe (register callback เมื่อมีการเปลี่ยน) และ getSnapshot (คืนค่าปัจจุบัน)',
+      'props และ children',
+      'reducer และ initialState',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/external-stores" questions={quizStore} />
+
+<ProgressTracker client:visible id="state-and-data/external-stores" />

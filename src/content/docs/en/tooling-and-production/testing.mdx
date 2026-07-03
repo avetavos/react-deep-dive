@@ -1,0 +1,116 @@
+---
+title: 'Testing'
+description: 'Testing React the way users use it — React Testing Library on Vitest, querying by role, userEvent, and why you test behavior instead of implementation details.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Test behavior, not implementation
+
+The dominant approach for testing React components is **React Testing Library (RTL)**, usually run on **Vitest** (or Jest). Its guiding principle:
+
+> The more your tests resemble the way your software is used, the more confidence they give you.
+
+That means you don't test internal state, prop names, or which hooks a component calls. You render the component, interact with it the way a user would (click, type), and assert on what the user can see. When you refactor the internals — swap `useState` for `useReducer`, extract a hook — behavior-based tests keep passing, because the behavior didn't change. Implementation-based tests would break for no real reason.
+
+## A widget test, end to end
+
+```tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { expect, test } from 'vitest';
+import Counter from './Counter';
+
+test('increments when the button is clicked', async () => {
+  const user = userEvent.setup();
+  render(<Counter />);
+
+  // Query the way a user finds things: by role and accessible name.
+  const button = screen.getByRole('button', { name: /count: 0/i });
+
+  await user.click(button);
+
+  // Assert on what the user sees, not on internal state.
+  expect(screen.getByRole('button', { name: /count: 1/i })).toBeInTheDocument();
+});
+```
+
+The important habits:
+
+- **Query by role/label/text**, in that priority — `getByRole` is best because it mirrors how assistive tech (and users) find elements, which also nudges you toward accessible markup.
+- **Use `userEvent`**, not raw `fireEvent`, for interactions — it simulates real user actions (focus, key sequences) more faithfully.
+- **Assert on the rendered output** (`toBeInTheDocument`, visible text), never on `component.state`.
+
+## The testing pyramid, React edition
+
+| Level | Tool | What it covers |
+|-------|------|----------------|
+| **Unit** | Vitest | Pure functions, custom hooks (`renderHook`), reducers |
+| **Component** | RTL + Vitest | A component's behavior in isolation (most of your tests) |
+| **End-to-end** | Playwright / Cypress | Real browser, full user flows across pages |
+
+<Mermaid title="Where each kind of test earns its keep" code={pyramidDiagram} />
+
+export const pyramidDiagram = `flowchart TB
+  e2e["End-to-end (few)\nPlaywright — real browser, whole flows"]
+  comp["Component (many)\nRTL + Vitest — behavior in isolation"]
+  unit["Unit (some)\nVitest — pure logic, hooks, reducers"]
+  e2e --> comp --> unit`;
+
+Most of your effort lives in the middle — RTL component tests — because that's where React logic actually is. A few end-to-end tests cover the critical happy paths across the real app.
+
+<Callout title="The one-line takeaway">
+Test React with **React Testing Library on Vitest**, and test **behavior, not implementation**: render the component, interact with `userEvent`, and query by **role/label/text** — never assert on internal state or hook calls. That way refactors that don't change behavior don't break your tests. Put most effort into component tests, with a few Playwright end-to-end tests for critical flows.
+</Callout>
+
+export const quizTesting = [
+  {
+    q: 'What is the guiding principle of React Testing Library?',
+    options: [
+      'Test every internal state variable',
+      'The more your tests resemble how the software is used, the more confidence they give — test behavior, not internals',
+      'Only test that components render without crashing',
+      'Mock everything, including the DOM',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which query is preferred for finding an element in RTL?',
+    options: [
+      'getByTestId always',
+      'getByRole (mirrors how users and assistive tech find elements)',
+      'querySelector on class names',
+      'Accessing the DOM by index',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why prefer behavior-based tests over implementation-based ones?',
+    options: [
+      'They run faster',
+      'Refactoring internals (e.g. useState → useReducer) doesn’t break them, because behavior is unchanged',
+      'They require no assertions',
+      'They test the compiler',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where do most of your React tests live in the pyramid?',
+    options: [
+      'End-to-end tests',
+      'Component tests (RTL + Vitest), since that is where React logic is',
+      'Manual testing',
+      'Snapshot tests only',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/testing" questions={quizTesting} />
+
+<ProgressTracker client:visible id="tooling-and-production/testing" />

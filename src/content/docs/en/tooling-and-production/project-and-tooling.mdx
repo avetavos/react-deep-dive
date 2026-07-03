@@ -1,0 +1,109 @@
+---
+title: 'Project & Tooling'
+description: 'Starting a React project today — Vite for SPAs, a framework for routing and SSR, why Create React App is gone, and the dev tools that make React pleasant.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Create React App is deprecated
+
+For years the default answer to "how do I start a React app?" was Create React App (CRA). That era is over: the React team **officially deprecated CRA in 2025**. Installing it now prints a warning pointing you to current options. Do not start new projects with it, and consider migrating existing ones.
+
+The replacement is a fork in the road: a **build tool** for a client-side SPA, or a **framework** for anything that needs routing, server rendering, or Server Components.
+
+## Vite for a single-page app
+
+For a client-rendered SPA, **Vite** is the standard: instant dev server, Fast Refresh, and a fast production build.
+
+```bash
+npm create vite@latest my-app -- --template react-ts
+cd my-app
+npm install
+npm run dev
+```
+
+The `react-ts` template gives you React + TypeScript preconfigured. That's the whole setup — no config to write.
+
+## A framework for routing, SSR, and RSC
+
+The moment you need real routing, server-side rendering, data loading, or **React Server Components**, reach for a framework instead of assembling it yourself. The current recommendations from the React docs:
+
+```bash
+npx create-next-app@latest        # Next.js — App Router, RSC, SSR
+npx create-react-router@latest    # React Router (framework mode) — routing + SSR
+```
+
+<Mermaid title="Choosing how to start" code={chooseDiagram} />
+
+export const chooseDiagram = `flowchart TB
+  q{"Need routing / SSR /\nServer Components?"}
+  q -->|no, client SPA| vite["Vite\n(build tool)"]
+  q -->|yes| fw["Framework:\nNext.js or React Router"]
+  cra["Create React App"] -->|deprecated| x["do not use"]`;
+
+The framework owns concerns a build tool leaves to you: nested routes, data fetching on the server, streaming, and the RSC boundary (covered in the React 19 module). For a dashboard-style SPA behind a login, Vite is plenty; for a content site or anything SEO- or server-data-heavy, a framework earns its weight.
+
+## The dev experience
+
+Whatever you choose, these make React development pleasant:
+
+- **React DevTools** (browser extension) — inspect the component tree, props, state, and hooks; the Profiler shows why and how often components render (essential for the performance module).
+- **Fast Refresh** — edit a component and see the change instantly, *preserving* component state. Built into Vite and the frameworks.
+- **The modern JSX transform** — you no longer need `import React from 'react'` at the top of every file just to use JSX; the compiler injects the runtime import. (You still import hooks and APIs you use.)
+- **Strict Mode** — wrap your app in `<StrictMode>` in development to surface impure renders and effect bugs (the double-invoke you met in Foundations).
+
+<Callout title="The one-line takeaway">
+**Create React App is deprecated** — start new projects with **Vite** (`npm create vite@latest -- --template react-ts`) for a client SPA, or a **framework** (Next.js / React Router) when you need routing, SSR, or Server Components. Lean on **React DevTools**, **Fast Refresh**, the automatic JSX transform, and **Strict Mode** for a fast, safe dev loop.
+</Callout>
+
+export const quizProject = [
+  {
+    q: 'What does the React team recommend for a new client-side SPA?',
+    options: [
+      'Create React App',
+      'Vite (e.g. `npm create vite@latest -- --template react-ts`)',
+      'A raw Webpack config',
+      'Editing a CDN script tag',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you choose a framework (Next.js / React Router) over Vite?',
+    options: [
+      'Never — Vite covers everything',
+      'When you need routing, server-side rendering, or Server Components',
+      'Only for small apps',
+      'Only when using JavaScript, not TypeScript',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does Fast Refresh do?',
+    options: [
+      'Reloads the whole page and resets state',
+      'Applies component edits instantly while preserving component state',
+      'Speeds up the production build only',
+      'Runs your tests',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why don’t you usually write `import React from "react"` at the top of every file anymore?',
+    options: [
+      'React was removed',
+      'The modern JSX transform injects the runtime import automatically',
+      'JSX no longer needs React',
+      'It is imported globally via a script tag',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/project-and-tooling" questions={quizProject} />
+
+<ProgressTracker client:visible id="tooling-and-production/project-and-tooling" />

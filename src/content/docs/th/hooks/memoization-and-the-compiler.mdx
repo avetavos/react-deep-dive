@@ -1,0 +1,116 @@
+---
+title: 'Memoization & the Compiler'
+description: 'useMemo, useCallback และ React.memo — cache อะไรและช่วยเมื่อไร — และ React Compiler ที่ auto-memoize จนคุณแทบไม่ต้องทำเอง'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ปัญหาที่ memoization แก้
+
+ทุก render จะรัน component ใหม่ ซึ่งสร้าง value ทุกตัวข้างในใหม่หมด — รวมถึง object, array และ function พวกนี้เป็น **reference ใหม่ทุกครั้ง** แม้เนื้อหาจะเหมือนเดิม ปกติแล้วไม่เป็นไร แต่มันเป็นปัญหาใน 2 กรณี:
+
+1. **การคำนวณที่แพง** รันทุก render ทั้งที่ input ไม่เปลี่ยน
+2. **reference ใหม่** (function หรือ object) ที่ส่งให้ memoized child ทำลาย memoization ของ child ทำให้ re-render โดยไม่จำเป็น
+
+tool memoization สามตัวจัดการคนละส่วน:
+
+| Tool | cache | ใช้เมื่อ |
+|------|--------|----------|
+| `useMemo(fn, deps)` | **value** (ผลของ `fn`) | การคำนวณแพง หรือต้องการ object/array reference ที่ stable |
+| `useCallback(fn, deps)` | **function** (reference ที่ stable) | ส่ง callback ให้ memoized child (คือ `useMemo` สำหรับ function) |
+| `React.memo(Component)` | **render ของ component** | component re-render ด้วย props เดิมและการ render มัน costly |
+
+```jsx
+// Expensive calc, cached until inputs change:
+const visibleTodos = useMemo(() => getFilteredTodos(todos, filter), [todos, filter]);
+
+// Stable function reference so a memoized child does not re-render:
+const handleSelect = useCallback((id) => setSelected(id), []);
+
+// Skip re-render when props are shallowly equal:
+const Row = React.memo(function Row({ item }) { /* ... */ });
+```
+
+## เมื่อ memoization ช่วย — และเมื่อมันทำร้าย
+
+memoization ไม่ฟรี: มันเสีย memory และเสียการเทียบทุก render ใส่ไว้ทุกที่ "เผื่อไว้" ทำให้ code รกและอาจติดลบสุทธิ มันช่วยจริงเมื่อ:
+
+- การคำนวณที่ cache นั้นแพงแบบวัดได้ **หรือ**
+- ต้องการ reference ที่ stable เพื่อกัน `React.memo` child (หรือ effect dependency) ไม่ให้รันใหม่
+
+สำหรับค่าที่ถูก — string concat, `.filter` เล็ก ๆ — คำนวณตอน render ดีกว่าและชัดกว่า อย่าหยิบ `useMemo` มาใช้แบบอัตโนมัติ
+
+<Mermaid title="referential equality คือเหตุผลที่ callback ทำลาย memoized child" code={refDiagram} />
+
+export const refDiagram = `flowchart TB
+  render["parent re-renders"] --> newfn["new function reference\ncreated each render"]
+  newfn --> child["memoized child sees\na 'changed' prop"]
+  child --> rerender["child re-renders needlessly"]
+  fix["useCallback → stable reference"] --> skip["memoized child skips re-render"]`;
+
+## React Compiler เปลี่ยนสมการ
+
+React มี **compiler** ที่ memoize component และ value ของคุณอัตโนมัติตอน build — มันแทรกสิ่งที่เทียบเท่า `useMemo`/`useCallback`/`memo` ให้ตรงจุดที่ช่วยจริง โดยวิเคราะห์ code ของคุณ จุดประสงค์ทั้งหมดคือ **คุณไม่ควรต้อง memoize เอง**
+
+แนวทางปฏิบัติสำหรับ project React 19+:
+
+- **เปิด compiler:** เขียน code ตรงไปตรงมา อย่าโปรย `useMemo`/`useCallback` — compiler จัดการ memoization ให้ ถูกต้องกว่าและละเอียดกว่าการจูนมือส่วนใหญ่ หน้าที่คุณคือทำให้ component pure (compiler พึ่ง Rules of Hooks และ purity เพื่อทำงานอย่างปลอดภัย)
+- **ไม่เปิด compiler:** tool มือด้านบนยังใช้ได้ — หยิบมาเฉพาะที่ bottleneck จริงที่วัดได้
+
+ทิศทางชัดเจน: manual memoization กำลังกลายเป็น optimization ทางเลือกสุดท้าย ไม่ใช่นิสัยเริ่มต้น ทำให้ component pure แล้วให้ compiler จัดการงานจดจำให้
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`useMemo` cache **value**, `useCallback` cache **function reference** และ `React.memo` ข้าม **re-render ของ child** เมื่อ props ไม่เปลี่ยน — ทั้งหมดเพื่อสู้กับงานที่ไม่จำเป็นจาก reference ใหม่ทุก render ใช้เฉพาะที่ bottleneck จริง ไม่ใช่แบบอัตโนมัติ และด้วย **React Compiler** คุณแทบเลิก memoize เอง: มันแทรก memoization ที่จุดที่ช่วยให้ หน้าที่คุณจึงเหลือแค่ทำให้ component pure และเขียน code ตรง ๆ
+</Callout>
+
+export const quizMemo = [
+  {
+    q: 'useCallback ทำอะไร?',
+    options: [
+      'cache ผลของการคำนวณที่แพง',
+      'คืน function reference ที่ stable ข้าม render (useMemo สำหรับ function)',
+      'กัน component ไม่ให้ render เลย',
+      'รัน side effect',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการส่ง inline function ให้ React.memo child ถึงทำลาย memoization?',
+    options: [
+      'inline function ช้า',
+      'มีการสร้าง function reference ใหม่ทุก render, memoized child จึงเห็น prop ที่เปลี่ยนและ re-render',
+      'memo ไม่รับ function',
+      'มัน throw error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'แนวทางเมื่อเปิด React Compiler คืออะไร?',
+    options: [
+      'ใส่ useMemo และ useCallback ทุกที่เพื่อช่วยมัน',
+      'เขียน code ตรง ๆ และ pure แล้วให้ compiler auto-memoize — แทบไม่ต้อง memoize เอง',
+      'เลิกใช้ hooks',
+      'ปิด StrictMode',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไร manual memoization คุ้มจริง (ตอนไม่มี compiler)?',
+    options: [
+      'ทุก value เสมอ',
+      'ที่ bottleneck จริงที่วัดได้ — การคำนวณที่แพง หรือ reference ที่ stable ซึ่ง memoized child/effect ต้องการ',
+      'เฉพาะ string',
+      'ไม่เคย',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/memoization-and-the-compiler" questions={quizMemo} />
+
+<ProgressTracker client:visible id="hooks/memoization-and-the-compiler" />

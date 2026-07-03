@@ -1,0 +1,130 @@
+---
+title: 'State Snapshot & Purity'
+description: 'State as a per-render snapshot, why you treat it as immutable, why render must be pure, and what StrictMode’s double-render is protecting you from.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## State is a snapshot, not a live variable
+
+This is the single most misunderstood thing in React. When you read a state variable, you are reading its value **for this render** — a snapshot frozen at the moment the component was called. It does not change mid-render, even after you call the setter.
+
+```jsx
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  function handleClick() {
+    setCount(count + 1);
+    setCount(count + 1);
+    setCount(count + 1);
+    // count is 0 for this whole render. All three read the SAME snapshot (0),
+    // so this sets state to 0 + 1 = 1, three times. Result: 1, not 3.
+  }
+
+  return <button onClick={handleClick}>{count}</button>;
+}
+```
+
+To update based on the *latest* pending value, pass an **updater function** — React runs them in order against the evolving value:
+
+```jsx
+setCount((c) => c + 1);
+setCount((c) => c + 1);
+setCount((c) => c + 1);
+// Each receives the previous pending value: 0→1→2→3. Result: 3.
+```
+
+The mental model: a re-render is a fresh call of your function with a new snapshot. The old render's variables are gone; the new render sees the new values.
+
+## Treat state as immutable
+
+Because state is a snapshot React compares by identity, you must **never mutate it**. Create new objects/arrays instead:
+
+```jsx
+// ❌ Mutation — same array reference, React may not re-render, and it's a bug.
+todos.push(newTodo);
+setTodos(todos);
+
+// ✅ New reference — React sees a change and re-renders.
+setTodos([...todos, newTodo]);
+```
+
+Mutating state breaks React's ability to detect changes (it compares references) and corrupts the snapshot model. Always produce a new value.
+
+## Render must be pure
+
+A component's render — everything it does while computing its returned JSX — must be **pure**: given the same props and state, it returns the same output and causes no side effects. During render you must not:
+
+- mutate props, state, or any pre-existing variable/object;
+- write to the DOM, make network requests, or start timers;
+- read or write anything outside the function that could change.
+
+<Mermaid title="Pure render in, side effects out" code={pureDiagram} />
+
+export const pureDiagram = `flowchart LR
+  inputs["props + state\n(snapshot)"] --> render["render (pure):\ncompute JSX only"]
+  render --> out["same inputs → same JSX"]
+  render -. NOT here .-> se["side effects:\nDOM, network, timers"]
+  se --> eff["→ event handlers & effects"]`;
+
+Side effects belong in **event handlers** (things that happen on interaction) and **effects** (`useEffect`, for synchronizing with external systems) — never in the render body. This purity is what lets React call your component whenever it likes.
+
+## StrictMode double-renders on purpose
+
+In development, React's `<StrictMode>` deliberately **calls your component function twice** (and runs effects setup→cleanup→setup). This is not a bug — it's a detector. If your render is pure, calling it twice produces identical output and nothing breaks. If you accidentally mutate something or rely on a side effect during render, the double-invocation surfaces the bug immediately, in development, instead of as a mysterious glitch in production.
+
+<Callout title="The one-line takeaway">
+A state variable is a **snapshot for the current render** — calling the setter doesn't change it mid-render, so use an **updater function** (`setX(x => ...)`) when the next value depends on the previous. Treat state as **immutable** (make new objects/arrays; React compares by reference). And keep **render pure** — no mutations or side effects during render; those go in event handlers and effects. StrictMode's double-render exists to catch violations of exactly this.
+</Callout>
+
+export const quizPurity = [
+  {
+    q: 'Inside one event handler, `setCount(count + 1)` is called three times with count = 0. What is the result?',
+    options: [
+      '3 — each call adds one',
+      '1 — all three read the same snapshot (0), so it sets state to 1 three times',
+      '0 — nothing happens',
+      'An error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you correctly increment state three times in one handler?',
+    options: [
+      'Call setCount(count + 1) three times',
+      'Use the updater form: setCount(c => c + 1) three times',
+      'Mutate count directly',
+      'Use a for loop over the DOM',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why must you not mutate state (e.g. `todos.push(x); setTodos(todos)`)?',
+    options: [
+      'Mutation is slower',
+      'React detects changes by reference; mutating keeps the same reference so React may not re-render, and it breaks the snapshot model',
+      'Arrays cannot be state',
+      'It is allowed and fine',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is StrictMode’s double-render for?',
+    options: [
+      'To make the app run twice as fast',
+      'To surface impure renders and effect bugs in development by invoking components/effects twice',
+      'To disable hooks',
+      'To render on the server',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/state-snapshot-and-purity" questions={quizPurity} />
+
+<ProgressTracker client:visible id="foundations/state-snapshot-and-purity" />

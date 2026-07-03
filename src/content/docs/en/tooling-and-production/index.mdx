@@ -1,0 +1,79 @@
+---
+title: 'Tooling, Testing & Production'
+description: 'The current React toolchain — Vite and frameworks (not Create React App), Testing Library, TypeScript with React 19, and the production ecosystem you actually reach for.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## From code to shipped app
+
+You understand how React renders and how hooks work. This module is about everything around the code: how you start a project today, how you test components, how you type them, and what you reach for in production.
+
+The headline currency point: **Create React App is deprecated** (officially sunset in 2025). Current React starts with **Vite** for SPAs or a **framework** (Next.js, React Router) for anything needing routing, SSR, or Server Components.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Project & tooling | Vite vs frameworks, DevTools, Fast Refresh — and why not CRA |
+| Testing | React Testing Library on Vitest, testing behavior not internals |
+| TypeScript with React | Typing props, hooks, events — and `ref` as a prop in React 19 |
+| Production & ecosystem | Code-splitting and the libraries you'll actually use |
+
+## The shape of a modern React setup
+
+<Mermaid title="What sits around your components in a real project" code={stackDiagram} />
+
+export const stackDiagram = `flowchart TB
+  build["Build tool\n(Vite) or framework\n(Next.js / React Router)"] --> app["Your React app"]
+  ts["TypeScript"] --> app
+  test["Testing Library + Vitest"] --> app
+  eco["Ecosystem:\nrouting, data, forms, state"] --> app`;
+
+None of these are React itself — React is deliberately a *library*, not a framework, so you assemble the rest. Knowing the standard choices saves you from reinventing them.
+
+<Callout title="The one-line takeaway">
+React is a library; the toolchain around it is your choice, but the choices have converged. Start with **Vite** (SPA) or a **framework** (Next.js / React Router) — **not the deprecated Create React App** — test with **React Testing Library**, type with **TypeScript**, and reach for well-established libraries for routing, data, forms, and state.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the current status of Create React App?',
+    options: [
+      'It is the recommended way to start a React app',
+      'It is deprecated — use Vite or a framework instead',
+      'It is required for TypeScript',
+      'It is the fastest build tool',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How should you start a modern React single-page app?',
+    options: [
+      'Create React App',
+      'Vite (or a framework like Next.js / React Router for routing/SSR)',
+      'A plain HTML file only',
+      'Webpack config from scratch',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why do you assemble a toolchain around React yourself?',
+    options: [
+      'React forbids using libraries',
+      'React is a library, not a framework — routing, data, and testing are separate, converged choices',
+      'Because React has no ecosystem',
+      'To make the app slower',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="tooling-and-production/index" />

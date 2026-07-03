@@ -1,0 +1,78 @@
+---
+title: 'Concurrent React & Suspense'
+description: 'Why React can interrupt and prioritize rendering — urgent vs non-urgent updates, Suspense for loading UI, error boundaries, and the use() hook.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Not all updates are equally urgent
+
+Older React rendered every update synchronously and to completion — once it started, it could not stop, so a big re-render would block the browser and freeze typing. **Concurrent React** changes that: rendering is *interruptible*. React can start rendering an update, pause it to handle something more urgent, and resume later.
+
+The insight is that some updates are **urgent** (typing into an input must feel instant) and some are **non-urgent** (re-filtering a huge list, loading a new page). Concurrent features let you tell React which is which, so the urgent work is never blocked by the heavy work.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Transitions | `useTransition` and `useDeferredValue` — keep the UI responsive |
+| Suspense & lazy | Declarative loading UI and code-splitting with `React.lazy` |
+| Error boundaries | Catching render errors, and pairing with Suspense |
+| use() & data fetching | The React 19 `use()` hook and render-as-you-fetch |
+
+## The one mental model
+
+<Mermaid title="Urgent updates interrupt non-urgent ones" code={concDiagram} />
+
+export const concDiagram = `flowchart TB
+  urgent["Urgent update\n(keystroke)"] --> render1["render immediately\n(never blocked)"]
+  nonurgent["Non-urgent update\n(filter big list)"] --> render2["render in the background\n(interruptible)"]
+  urgent -.interrupts.-> render2`;
+
+You mark the heavy update as non-urgent (a *transition*), and React renders it in the background where a keystroke can interrupt it. **Suspense** then handles the case where part of the tree isn't ready yet (it's loading data or code), showing a fallback declaratively instead of you juggling loading booleans.
+
+<Callout title="The mental shift">
+Stop thinking of rendering as one blocking, all-or-nothing pass. Concurrent React makes rendering **interruptible and prioritized** — the browser stays responsive because urgent updates jump the queue. You don't schedule any of this by hand; you *label* updates (transition) and *boundaries* (Suspense), and React does the scheduling.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does "concurrent" rendering allow that older synchronous rendering did not?',
+    options: [
+      'Running React on multiple CPU threads',
+      'Interrupting an in-progress render to handle a more urgent update, then resuming',
+      'Skipping the DOM entirely',
+      'Rendering without components',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you tell React which updates are non-urgent?',
+    options: [
+      'You cannot — React guesses',
+      'You label them as transitions (e.g. with useTransition); React schedules them as interruptible background work',
+      'You put them in a setTimeout',
+      'You mark them urgent',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does Suspense handle?',
+    options: [
+      'Network retries',
+      'Showing a declarative fallback while part of the tree is not ready (loading data or code)',
+      'Global state',
+      'Routing',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/index" />

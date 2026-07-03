@@ -1,0 +1,129 @@
+---
+title: 'Lifting State & Composition'
+description: 'lifting state ขึ้นไปที่ common ancestor, one-way data flow, ปัญหา prop drilling และ composition ในฐานะทางแก้แรกก่อนจะไปหา Context'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Lifting state up
+
+เมื่อสอง component ต้องใช้ state ก้อนเดียวกัน state นั้นจะอยู่ใน component ใด component หนึ่งไม่ได้ — มันต้องย้าย **ขึ้น** ไปที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props นี่คือ *lifting state up* และเป็นคำตอบเริ่มต้นของ "สอง component นี้ต้อง sync กัน"
+
+```jsx
+// The parent owns the state; both children read/update it through props.
+function TemperatureApp() {
+  const [celsius, setCelsius] = useState(0);
+  return (
+    <>
+      <CelsiusInput value={celsius} onChange={setCelsius} />
+      <FahrenheitLabel celsius={celsius} />
+    </>
+  );
+}
+```
+
+state มี **single source of truth** (คือ parent) และข้อมูลไหลทางเดียว: ลงมาเป็น props และย้อนขึ้นผ่าน callback สอง input ไม่มีทางขัดแย้งกันเพราะมีค่าเดียว
+
+## ปัญหา prop drilling
+
+lifting ทำงานได้สวยงามจนกระทั่ง ancestor อยู่ *ไกล* เหนือ consumer มาก ตอนนั้น props ต้องร้อยผ่านทุก component ตรงกลางที่ไม่ได้สนใจมันเลย:
+
+```jsx
+// theme is only used by Button, but every layer must pass it through.
+<App theme={theme}>
+  <Page theme={theme}>
+    <Sidebar theme={theme}>
+      <Button theme={theme} />   {/* finally used here */}
+    </Sidebar>
+  </Page>
+</App>
+```
+
+ทุก component ตรงกลางได้ prop ที่มันแค่ส่งต่อ นี่คือ **prop drilling** — รก และเป็นฝันร้ายตอน refactor สัญชาตญาณคือกระโดดไป Context ทันที แต่มีทางแก้ที่ง่ายกว่าให้ลองก่อน
+
+## Composition: ส่ง JSX เป็น props
+
+ก่อนไป Context ให้ลอง **composition** ก่อน แทนที่จะ drill ค่าผ่าน component ให้ส่ง JSX ที่ *render แล้ว* เข้าไปเป็น `children` (หรือ prop ที่ตั้งชื่อ) เพื่อให้ component ตรงกลางไม่เห็นค่านั้นเลย
+
+```jsx
+// Sidebar doesn't know about `theme` — it just renders whatever children it's given.
+function Sidebar({ children }) {
+  return <aside className="sidebar">{children}</aside>;
+}
+
+// The Button is created where `theme` is in scope, then handed to Sidebar as content.
+<Page>
+  <Sidebar>
+    <Button theme={theme} />   {/* theme is bound here, not drilled */}
+  </Sidebar>
+</Page>
+```
+
+<Mermaid title="drilling ร้อย props ผ่านไปเรื่อย ๆ ส่วน composition ส่งมอบ content ที่ render แล้ว" code={compDiagram} />
+
+export const compDiagram = `flowchart TB
+  subgraph drill["Prop drilling"]
+    a1["App theme"] --> p1["Page theme"] --> s1["Sidebar theme"] --> b1["Button ใช้ theme"]
+  end
+  subgraph comp["Composition"]
+    a2["App: render Button ตรงนี้"] --> s2["Sidebar: render children"]
+    a2 -.ส่ง JSX.-> s2
+  end`;
+
+คุณยังส่ง JSX ผ่าน prop ที่ตั้งชื่อได้ด้วย (`<Layout sidebar={<Nav />} main={<Feed />} />`) component ตรงกลางจะกลายเป็น container ทั่วไป ("render อะไรก็ตามที่ถูกส่งมา") ซึ่ง reuse ได้ดีกว่า *และ* กำจัด drilling ไปด้วย Context เอาไว้ใช้ตอนที่แม้แต่ composition ก็เอื้อมไม่ถึง — ข้อมูลแบบ cross-cutting จริง ๆ ที่ถูกใช้กระจัดกระจายหลายที่
+
+<Callout title="สรุปหนึ่งบรรทัด">
+เมื่อสอง component แชร์ state ให้ **lift** มันขึ้นไปที่ common ancestor ที่ใกล้ที่สุด — source of truth เดียว, ข้อมูลลง, callback ขึ้น เมื่อ props ต้องผ่านหลายชั้นที่ไม่สนใจ (**prop drilling**) ให้ลอง **composition ก่อน**: ส่ง JSX ที่ render แล้วเป็น `children` หรือ prop เพื่อให้ component ตรงกลางยัง generic และไม่เห็นค่านั้น ใช้ Context เฉพาะเมื่อ composition เอื้อมไปถึง consumer ไม่ได้
+</Callout>
+
+export const quizLift = [
+  {
+    q: 'เมื่อสอง component พี่น้องต้องใช้ state เดียวกัน มันควรอยู่ที่ไหน?',
+    options: [
+      'ทำซ้ำไว้ในทั้งสองพี่น้อง',
+      'lift ขึ้นไปที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props',
+      'ใน global variable',
+      'ใน DOM',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'prop drilling คืออะไร?',
+    options: [
+      'การส่ง props ผ่าน component ตรงกลางหลายตัวที่แค่ส่งต่อ เพื่อไปถึง consumer ที่อยู่ลึก',
+      'การ mutate props',
+      'การใช้ hook มากเกินไป',
+      'การ render บน server',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'ทางแก้ prop drilling ด้วย composition คืออะไร?',
+    options: [
+      'ใส่ค่าไว้ใน global variable',
+      'ส่ง JSX ที่ render แล้วเป็น children/props เพื่อให้ component ตรงกลางไม่เห็นค่านั้น',
+      'ทำซ้ำ state ทุกที่',
+      'ใช้ Context ทันทีเสมอ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน one-way data flow ข้อมูลไหลอย่างไร?',
+    options: [
+      'ขึ้นเป็น props, ลงเป็น callback',
+      'ลงเป็น props, ย้อนขึ้นผ่าน callback',
+      'ข้างกันระหว่างพี่น้องโดยตรง',
+      'แบบสุ่ม',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/lifting-and-composition" questions={quizLift} />
+
+<ProgressTracker client:visible id="state-and-data/lifting-and-composition" />

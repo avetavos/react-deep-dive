@@ -1,0 +1,124 @@
+---
+title: 'Production & Ecosystem'
+description: 'ship React — production build, code-splitting ด้วย lazy, Strict Mode เทียบ production และ library ที่ยอมรับกันแล้วที่คุณจะหยิบมาใช้: routing, data, form และ state'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## dev build เทียบ production build
+
+React มีสอง build **development** build ใหญ่และช้ากว่าโดยตั้งใจ — มันรวม warning ที่ช่วยได้, prop-type check และ Strict Mode double-invoke ส่วน **production** build ตัดทั้งหมดนั้นออกเพื่อความเร็วและขนาด build tool ของคุณ (Vite / framework) สลับให้อัตโนมัติเมื่อคุณรัน production build:
+
+```bash
+npm run build   # produces the optimized production bundle
+```
+
+อย่า ship development build เด็ดขาด — มันช้าและใหญ่กว่าอย่างมีนัยสำคัญ และจำไว้ว่า `<StrictMode>` double-invoke เฉพาะใน development; ใน production มันไม่ทำอะไรเลย ปล่อยไว้จึงไม่มีต้นทุน
+
+## code-splitting ด้วย lazy
+
+bundle ใหญ่ก้อนเดียวหมายถึง user download code ของหน้าที่อาจไม่เคยเข้า **`React.lazy`** + **`<Suspense>`** แยก component เป็น chunk ของตัวเองที่โหลด on demand:
+
+```jsx
+import { lazy, Suspense } from 'react';
+
+const Dashboard = lazy(() => import('./Dashboard')); // separate chunk
+
+function App() {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Dashboard />   {/* downloaded only when this renders */}
+    </Suspense>
+  );
+}
+```
+
+แยกที่ route boundary ก่อน (แต่ละหน้าเป็น chunk) — นั่นคือการ split ที่คุ้มค่าที่สุด และ framework มักทำให้คุณอยู่แล้ว
+
+## ecosystem: หยิบอะไรมาใช้
+
+React ตั้งใจให้เล็ก app จริงจึงประกอบ library ที่ยอมรับกันแล้วไม่กี่ตัว ตัวเลือกปัจจุบันที่ลงตัว:
+
+| ต้องการ | หยิบ |
+|------|-----------|
+| **Routing** (SPA) | React Router — หรือ router ใน framework (Next.js) |
+| **Server state / data fetching** | TanStack Query (React Query) หรือ RTK Query |
+| **Form** | React Hook Form (+ schema validator อย่าง Zod) |
+| **Client state** | Zustand หรือ Redux Toolkit (หรือ Jotai) — เกินกว่าที่ Context จัดการได้สบาย |
+| **Styling** | CSS Modules, Tailwind หรือ CSS-in-JS library |
+| **Error monitoring** | Sentry (พร้อม error boundary ที่ root ของ app) |
+
+<Mermaid title="React บวกชิ้นส่วนที่ app จริงประกอบขึ้น" code={ecoDiagram} />
+
+export const ecoDiagram = `flowchart TB
+  react["React (view layer)"]
+  react --> route["Routing:\nReact Router / framework"]
+  react --> data["Server state:\nTanStack Query"]
+  react --> forms["Forms:\nReact Hook Form"]
+  react --> state["Client state:\nZustand / Redux Toolkit"]`;
+
+ความต่างสำคัญที่ช่วยประหยัดความเจ็บปวดมาก: **server state** (data จาก API — TanStack Query) และ **client state** (local UI state — useState/Context/Zustand) เป็นคนละปัญหา การพยายามเก็บ server data ใน client store (loading flag เอง, cache invalidation, refetch) คือการคิดใหม่แบบคลาสสิกที่ data library แก้ให้คุณแล้ว
+
+## production checklist
+
+- build ด้วย **production** bundle; ตรวจว่าไม่ใช่ dev build
+- **code-split** ที่ route ด้วย `lazy` + `Suspense`
+- วาง **error boundary** ที่ root ของ app (และรอบ subtree ที่เสี่ยง) แล้วต่อเข้ากับ monitoring
+- เปิด **`<StrictMode>`** ไว้ — เป็น dev-only guard ที่ไม่มีต้นทุนใน production
+- แยก **server state** (data library) ออกจาก **client state** (local/store)
+
+<Callout title="The one-line takeaway">
+ship **production build** (อย่า ship dev build), **code-split** ที่ route ด้วย `lazy` + `Suspense` และวาง **error boundary** ที่ root ต่อเข้า monitoring React เป็น view layer — ประกอบ ecosystem ที่ลงตัวสำหรับส่วนที่เหลือ: **React Router** (routing), **TanStack Query** (server state), **React Hook Form** (form), **Zustand/Redux Toolkit** (client state) — และแยก server state กับ client state เป็นคนละเรื่อง
+</Callout>
+
+export const quizProd = [
+  {
+    q: 'ความต่างระหว่าง development และ production build ของ React คืออะไร?',
+    options: [
+      'เหมือนกัน',
+      'dev ใหญ่/ช้ากว่าพร้อม warning และ Strict Mode double-invoke; production ตัดทิ้งเพื่อความเร็วและขนาด',
+      'production มี warning มากกว่า',
+      'dev render component ไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'code-split component ให้โหลด on demand อย่างไร?',
+    options: [
+      'แค่แยกเป็นไฟล์ต่างหาก',
+      '`React.lazy(() => import(...))` render ภายใน `<Suspense>` boundary',
+      'ครอบด้วย useMemo',
+      'ใช้ bundle ที่ใหญ่ขึ้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมต้องแยก server state กับ client state?',
+    options: [
+      'มันเป็นสิ่งเดียวกัน',
+      'server state (data จาก API) ต้องการ caching/refetch/invalidation ที่ data library (TanStack Query) จัดการ; เก็บไว้ใน client store คือการคิดใหม่แบบแย่ ๆ',
+      'client state เก็บไม่ได้',
+      'เพื่อลดขนาด bundle อย่างเดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ปล่อย `<StrictMode>` ไว้ใน production มีต้นทุนเท่าไร?',
+    options: [
+      'ทำให้ render นานเป็นสองเท่าสำหรับ user',
+      'ไม่มี — StrictMode double-invoke เฉพาะใน development; ใน production ไม่ทำอะไรเลย',
+      'ปิด hooks',
+      'ส่ง warning เกินไปให้ user',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/production-and-ecosystem" questions={quizProd} />
+
+<ProgressTracker client:visible id="tooling-and-production/production-and-ecosystem" />

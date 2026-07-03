@@ -1,0 +1,82 @@
+---
+title: 'Hooks In Depth'
+description: 'What hooks are, why they exist, and how they let a plain function have state and lifecycle without becoming a class — the foundation for everything in this module.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## What hooks are
+
+A **hook** is a function whose name starts with `use` that lets a component "hook into" React features — state, lifecycle, context — while staying an ordinary function. Before hooks, only class components could hold state; hooks brought that power to functions without the class boilerplate and without breaking the `UI = f(state)` model.
+
+The trick is that React associates each hook call with a slot in the component's private memory, matched **by call order**. That single design decision explains the Rules of Hooks, and it's why hooks feel magical until you see the mechanism.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| useState & updates | State, batching, updater functions, lazy init, immutability |
+| useEffect & effects | Synchronizing with external systems — and when you don't need it |
+| useRef & the DOM | Mutable values, DOM refs, and ref-as-a-prop in React 19 |
+| Memoization & the compiler | useMemo/useCallback/memo — and how the React Compiler changes the game |
+| Rules & custom hooks | Why the rules exist, and extracting reusable stateful logic |
+
+## The one thing to hold onto
+
+<Mermaid title="Hooks are matched to memory slots by call order" code={slotDiagram} />
+
+export const slotDiagram = `flowchart LR
+  render["component renders"] --> h1["useState → slot 1"]
+  render --> h2["useState → slot 2"]
+  render --> h3["useEffect → slot 3"]
+  h1 --> note["order must be identical\nevery render"]
+  h2 --> note
+  h3 --> note`;
+
+React does not know the *names* of your hooks — it knows the *order* you called them in. On every render, the first `useState` maps to slot 1, the second to slot 2, and so on. This is why you must never call a hook conditionally: skip one and every later hook shifts to the wrong slot. Keep that picture and the entire module clicks.
+
+<Callout title="The mental shift">
+A class component keeps state in `this`. A function component has no `this` and is called fresh every render — so where does its state live? In React's memory, indexed by call order. A hook is just a *function call that reads and writes one of those slots*. Once you see hooks as ordered slot-access, the rules stop being arbitrary.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is a hook?',
+    options: [
+      'A class method',
+      'A function (named use*) that lets a component use React features like state and lifecycle while staying a function',
+      'A CSS utility',
+      'A type of component',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does React associate a hook call with the right piece of state?',
+    options: [
+      'By the hook\'s variable name',
+      'By call order — the first hook maps to slot 1, the second to slot 2, and so on',
+      'By a random id',
+      'By the DOM node',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why can hooks give a plain function state and lifecycle?',
+    options: [
+      'Because functions secretly become classes',
+      'Because React stores each component\'s state in its own memory, indexed by hook call order',
+      'Because state is stored in the DOM',
+      'Because of global variables',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="hooks/index" />

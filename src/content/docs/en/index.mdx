@@ -1,0 +1,60 @@
+---
+title: React Deep Dive
+description: Master React from first principles — the UI-as-a-function-of-state model, JSX, reconciliation, hooks in depth, state management, concurrent features and Suspense, React 19 Actions and Server Components, the React Compiler, performance, and production — for React 19.
+template: splash
+hero:
+  tagline: A standalone, intermediate→advanced course on React 19. From the rendering model and reconciliation to hooks in depth, state and data flow, transitions and Suspense, Server Components and Actions, the React Compiler, and performance — taught through annotated code that shows exactly what React does and why.
+  actions:
+    - text: Start here
+      link: /react/en/foundations/
+      icon: right-arrow
+      variant: primary
+    - text: Jump to Hooks
+      link: /react/en/hooks/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll learn
+
+<CardGrid>
+  <Card title="Foundations & Mental Model" icon="rocket">
+    UI as a function of state, JSX & elements, reconciliation, and why render must be pure. [Start →](/react/en/foundations/)
+  </Card>
+  <Card title="Hooks In Depth" icon="seti:react">
+    useState, useEffect (and when not to), useRef, memoization & the compiler, and custom hooks. [Learn →](/react/en/hooks/)
+  </Card>
+  <Card title="State Management & Data Flow" icon="seti:plan">
+    Lifting state, composition, Context, useReducer, and external stores. [Manage →](/react/en/state-and-data/)
+  </Card>
+  <Card title="Concurrent React & Suspense" icon="random">
+    Transitions, useDeferredValue, Suspense & lazy, error boundaries, and the use() hook. [Go concurrent →](/react/en/concurrent-and-suspense/)
+  </Card>
+  <Card title="React 19: Actions, RSC & Forms" icon="approve-check">
+    Server Components, Actions & useActionState, useOptimistic & forms, and the React Compiler. [Level up →](/react/en/react-19/)
+  </Card>
+  <Card title="Performance & Patterns" icon="seti:config">
+    Rendering performance, memoization in practice, composition patterns, and escape hatches. [Optimize →](/react/en/performance-and-patterns/)
+  </Card>
+  <Card title="Tooling, Testing & Production" icon="puzzle">
+    Vite & frameworks, testing with RTL, TypeScript with React, and the production ecosystem. [Ship →](/react/en/tooling-and-production/)
+  </Card>
+</CardGrid>
+
+## How this course works
+
+<CardGrid>
+  <Card title="The model first, then the code" icon="rocket">
+    Every topic starts from a model — UI = f(state), how reconciliation decides what changes, why effects synchronize with the outside world — so React stops feeling like magic and starts feeling inevitable.
+  </Card>
+  <Card title="React 19, verified" icon="seti:react">
+    Written against React 19 and checked against the official docs — Actions, `use()`, `useActionState`/`useOptimistic`, ref-as-prop, and the React Compiler are covered as they exist today, not as they were three years ago.
+  </Card>
+  <Card title="Design, not just syntax" icon="approve-check">
+    Not "here's useEffect" but "here's why you probably don't need it, and what to do instead." You'll reason about renders, dependencies, and performance with confidence.
+  </Card>
+  <Card title="Diagrams that explain" icon="puzzle">
+    The render/commit phases, reconciliation, state-as-a-snapshot, effect timing, and Suspense as theme-aware Mermaid diagrams. Bilingual (English / ไทย) with saved quiz progress.
+  </Card>
+</CardGrid>

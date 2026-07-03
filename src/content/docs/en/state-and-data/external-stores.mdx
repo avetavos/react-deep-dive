@@ -1,0 +1,133 @@
+---
+title: 'External Stores'
+description: 'When built-in state is not enough, external stores like Zustand and Redux, and useSyncExternalStore — why it exists and what tearing is.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## When to leave React's built-in state
+
+`useState`, `useReducer`, and Context handle most apps. You reach for an **external store** (Zustand, Jotai, Redux Toolkit, XState) when you hit their limits:
+
+- State is read/written by **many components in scattered places**, and Context's "re-render every consumer" behavior is too coarse.
+- You want **fine-grained subscriptions** — a component that re-renders only when *its slice* of the store changes, not on every store update.
+- The state has **complex logic or lives outside the React tree** (a cache, a websocket connection, a state machine) that should exist independently of any component.
+
+An external store keeps state *outside* React and lets components subscribe to just the parts they use.
+
+```jsx
+// Zustand — the store lives outside React; components select a slice.
+import { create } from "zustand";
+
+const useCartStore = create((set) => ({
+  items: [],
+  add: (item) => set((s) => ({ items: [...s.items, item] })),
+}));
+
+function CartCount() {
+  // Re-renders only when items.length changes — a fine-grained subscription.
+  const count = useCartStore((s) => s.items.length);
+  return <span>{count}</span>;
+}
+```
+
+## useSyncExternalStore: subscribing safely
+
+How does a store safely feed data into React? Historically you'd wire up `useEffect` + `useState`, but that has a subtle bug under **concurrent rendering**: React can render in the background, and an external value can change *mid-render*, so different components in the same render read different values. That inconsistency is called **tearing** — part of the UI shows the old value, part shows the new.
+
+React provides **`useSyncExternalStore`** to subscribe to any external store without tearing. Store libraries use it under the hood, but you can use it directly:
+
+```jsx
+import { useSyncExternalStore } from "react";
+
+// subscribe: register a callback, return an unsubscribe fn.
+// getSnapshot: return the current value (must be consistent within a render).
+function useOnlineStatus() {
+  return useSyncExternalStore(
+    (callback) => {
+      window.addEventListener("online", callback);
+      window.addEventListener("offline", callback);
+      return () => {
+        window.removeEventListener("online", callback);
+        window.removeEventListener("offline", callback);
+      };
+    },
+    () => navigator.onLine,          // client snapshot
+    () => true                       // server snapshot (for SSR)
+  );
+}
+```
+
+<Mermaid title="useSyncExternalStore keeps React consistent with an outside source" code={ssesDiagram} />
+
+export const ssesDiagram = `flowchart LR
+  store["External store\n(outside React)"] -->|getSnapshot| hook["useSyncExternalStore"]
+  store -->|subscribe/notify| hook
+  hook --> react["React reads one\nconsistent snapshot per render\n(no tearing)"]`;
+
+## Choosing a home for state
+
+| Need | Use |
+|------|-----|
+| Used by one component | Local `useState` / `useReducer` |
+| Shared by a few nearby components | Lift state to a common ancestor |
+| Broadly shared, changes rarely | Context (+ `useReducer`) |
+| Scattered access, fine-grained subscriptions, or lives outside React | External store (via `useSyncExternalStore`) |
+
+The honest summary: reach for a store when you *feel the pain*, not preemptively. Many teams add Redux on day one and never needed it. Start low on the ladder; climb when the app tells you to.
+
+<Callout title="The one-line takeaway">
+Reach for an **external store** (Zustand, Redux, Jotai) when state is accessed in scattered places, needs **fine-grained subscriptions**, or lives outside the React tree. Stores subscribe to React via **`useSyncExternalStore`**, which exists to prevent **tearing** — inconsistent reads when an external value changes mid-render under concurrent rendering. Choose the lowest rung that works; add a store only when you feel the pain.
+</Callout>
+
+export const quizStore = [
+  {
+    q: 'When is an external store the right choice?',
+    options: [
+      'For every React app from day one',
+      'When state is accessed in many scattered places, needs fine-grained subscriptions, or lives outside the React tree',
+      'Only for styling state',
+      'Never — Context covers everything',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is "tearing"?',
+    options: [
+      'A CSS layout bug',
+      'Inconsistent reads where different components in the same render see different values of an external source',
+      'A memory leak',
+      'A type error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does useSyncExternalStore do?',
+    options: [
+      'Fetches data from a server',
+      'Subscribes React to an external store safely, giving one consistent snapshot per render (no tearing)',
+      'Replaces useState',
+      'Runs an effect after paint',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What are the two main arguments to useSyncExternalStore?',
+    options: [
+      'state and setState',
+      'subscribe (register a change callback) and getSnapshot (return the current value)',
+      'props and children',
+      'reducer and initialState',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/external-stores" questions={quizStore} />
+
+<ProgressTracker client:visible id="state-and-data/external-stores" />

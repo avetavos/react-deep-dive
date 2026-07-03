@@ -1,0 +1,130 @@
+---
+title: 'Error Boundaries'
+description: 'Catching render errors with an error boundary, what they do and do not catch, and pairing them with Suspense for loading-plus-error UI.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## A crash in one component shouldn't blank the whole app
+
+If a component throws during render, React — by design — unmounts the *entire* tree rather than show a corrupt UI. An **error boundary** is a component that catches such errors in its subtree, so a failure in one widget shows a fallback there instead of taking down the whole page.
+
+Error boundaries are still written as **class components**, because they rely on two lifecycle methods with no hook equivalent:
+
+```jsx
+import { Component } from "react";
+
+class ErrorBoundary extends Component {
+  state = { error: null };
+
+  // Render phase: return new state to show a fallback on the next render.
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  // Commit phase: side effect — log the error to your reporting service.
+  componentDidCatch(error, info) {
+    reportError(error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) return this.props.fallback;
+    return this.props.children;
+  }
+}
+```
+
+In app code most people use the tiny **`react-error-boundary`** library, which wraps this and adds a reset mechanism — but the mechanics are exactly the above.
+
+```jsx
+<ErrorBoundary fallback={<p>Something went wrong.</p>}>
+  <Widget />   {/* if Widget throws while rendering, the fallback shows here */}
+</ErrorBoundary>
+```
+
+## What they catch — and what they don't
+
+This is the part people get wrong. Error boundaries catch errors that happen **during rendering** (and in lifecycle methods and constructors) of the components *below* them. They do **not** catch:
+
+- **Event handlers** — an error in an `onClick` is just a normal JS error; use `try/catch`.
+- **Asynchronous code** — a rejected promise or a `setTimeout` callback runs outside React's render, so no boundary sees it.
+- **Errors in the boundary itself** — only errors *below* it.
+- **Server-side rendering errors** — handled separately.
+
+<Mermaid title="What an error boundary catches" code={ebDiagram} />
+
+export const ebDiagram = `flowchart TB
+  eb["Error Boundary"] --> child["child renders"]
+  child -->|throws during render| caught["caught → show fallback"]
+  handler["onClick throws"] -.NOT caught.-> handler2["use try/catch"]
+  async["promise rejects / setTimeout"] -.NOT caught.-> async2["handle it yourself"]`;
+
+## Pairing with Suspense
+
+Suspense and error boundaries are complementary: Suspense handles the *loading* state (a child is waiting), an error boundary handles the *failure* state (a child threw — including a rejected promise read by `use()`). Together they give you the three states of async UI declaratively:
+
+```jsx
+<ErrorBoundary fallback={<Error />}>
+  <Suspense fallback={<Spinner />}>
+    <Profile />   {/* loading → Spinner, error → Error, success → Profile */}
+  </Suspense>
+</ErrorBoundary>
+```
+
+When `use()` reads a promise that *rejects*, React propagates it to the nearest error boundary — so the same boundary that handles render crashes also handles data-fetch failures.
+
+<Callout title="The one-line takeaway">
+An **error boundary** (a class component using `getDerivedStateFromError` + `componentDidCatch`, or the `react-error-boundary` library) catches errors thrown **during render** in its children and shows a fallback instead of unmounting the whole app. It does **not** catch errors in event handlers, async callbacks, or itself — handle those with `try/catch`. Wrap a `<Suspense>` in an error boundary to get loading, error, and success states declaratively.
+</Callout>
+
+export const quizEb = [
+  {
+    q: 'What does an error boundary catch?',
+    options: [
+      'Every error anywhere in the app',
+      'Errors thrown during rendering (and lifecycle) of the components below it',
+      'Only network errors',
+      'Only syntax errors',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which of these does an error boundary NOT catch?',
+    options: [
+      'A component throwing during render',
+      'An error inside an onClick event handler (use try/catch instead)',
+      'An error in a child\'s constructor',
+      'An error in a lifecycle method',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why are error boundaries still written as class components?',
+    options: [
+      'Classes are faster',
+      'They rely on getDerivedStateFromError and componentDidCatch, which have no hook equivalent',
+      'Hooks cannot render anything',
+      'It is only a style preference',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do Suspense and error boundaries work together?',
+    options: [
+      'They do the same job',
+      'Suspense handles the loading state; an error boundary handles the failure state (including a rejected promise read by use())',
+      'You can only use one at a time',
+      'Error boundaries replace Suspense',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/error-boundaries" questions={quizEb} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/error-boundaries" />

@@ -1,0 +1,120 @@
+---
+title: 'Why React & the Model'
+description: 'Declarative vs imperative UI, components as functions of props and state, and why the UI = f(state) model changes how you build.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Imperative vs declarative
+
+Consider a counter. The **imperative** version tells the browser *how* to update, step by step:
+
+```js
+// Imperative: you manage the DOM and keep it in sync by hand.
+let count = 0;
+const label = document.querySelector("#count");
+document.querySelector("#inc").addEventListener("click", () => {
+  count += 1;
+  label.textContent = count; // you must remember to do this, everywhere
+});
+```
+
+The bug surface is the *"remember to update"* part: every place that changes `count` must also update every piece of UI that depends on it. Miss one and the screen lies.
+
+The **declarative** version describes *what* the UI is for a given state, and never touches the DOM:
+
+```jsx
+// Declarative: describe the UI for the current state; React syncs the DOM.
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(count + 1)}>{count}</button>;
+}
+```
+
+There is no "update the label" step. You change `count`, and because the UI is *described* in terms of `count`, React re-renders and the screen is correct by construction. The class of "I forgot to update X" bugs disappears.
+
+## A component is a function of its inputs
+
+A React component is a function that takes **props** (inputs from its parent) and uses **state** (its own memory), and returns a description of UI.
+
+```jsx
+// props flow in; state lives inside; the return describes the UI.
+function Greeting({ name }) {          // name is a prop
+  const [count, setCount] = useState(0); // count is state
+  return (
+    <div>
+      <p>Hello, {name}</p>
+      <button onClick={() => setCount(count + 1)}>Clicked {count} times</button>
+    </div>
+  );
+}
+```
+
+<Mermaid title="A component maps inputs to a UI description" code={compDiagram} />
+
+export const compDiagram = `flowchart LR
+  props["props (from parent)"] --> comp["Component function"]
+  state["state (own memory)"] --> comp
+  comp --> ui["returns: UI description\n(elements)"]
+  ui --> react["React renders it"]`;
+
+Two rules fall out of "component is a function":
+
+- **Props are read-only.** A component must never modify its own props — they belong to the parent. Data flows *down*.
+- **Same inputs, same output.** Given the same props and state, a component should render the same thing. That's the purity requirement (a whole lesson later), and it's what lets React re-run components freely.
+
+## Why the model matters
+
+Everything else in React is downstream of `UI = f(state)`:
+
+- **Hooks** exist to give function components state and lifecycle *without* breaking the "just a function" model.
+- **Reconciliation** exists to turn "here's the new UI description" into "here's the minimal DOM change."
+- **Concurrent features** (transitions, Suspense) exist because a pure `f(state)` can be computed, paused, and restarted safely.
+
+You are not learning a pile of APIs; you are learning one equation and its consequences.
+
+<Callout title="The one-line takeaway">
+React is **declarative**: you describe what the UI should be for the current state (`UI = f(state)`) instead of imperatively mutating the DOM. A component is a **function of its props and state** — props flow down and are read-only, and the same inputs must produce the same output. Every React feature is a consequence of taking that model seriously.
+</Callout>
+
+export const quizWhy = [
+  {
+    q: 'What is the main problem with imperative DOM updates that React solves?',
+    options: [
+      'They are too fast',
+      'Every place that changes data must remember to update every dependent UI element — miss one and the screen is wrong',
+      'They cannot use CSS',
+      'They require TypeScript',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What are the inputs to a React component?',
+    options: [
+      'Only the DOM',
+      'props (from the parent) and its own state',
+      'Global variables only',
+      'The URL',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is true about props?',
+    options: [
+      'A component can freely modify its own props',
+      'Props are read-only — data flows down and belongs to the parent',
+      'Props are the same as state',
+      'Props can only be strings',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/why-react-and-the-model" questions={quizWhy} />
+
+<ProgressTracker client:visible id="foundations/why-react-and-the-model" />

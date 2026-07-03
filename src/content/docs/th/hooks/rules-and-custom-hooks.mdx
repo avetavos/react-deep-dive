@@ -1,0 +1,129 @@
+---
+title: 'Rules & Custom Hooks'
+description: 'ทำไม Rules of Hooks ถึงมี (call order), lint plugin ที่บังคับใช้มัน และการแยก custom hook มา reuse stateful logic'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## สองกฎ
+
+Rules of Hooks มีแค่สองข้อ:
+
+1. **เรียก hook ที่ top level เท่านั้น** — ห้ามเรียกใน condition, loop หรือ nested function
+2. **เรียก hook จาก React function เท่านั้น** — component หรือ hook อื่น ไม่ใช่ function ธรรมดา
+
+```jsx
+function Profile({ userId }) {
+  const [user, setUser] = useState(null);  // ✅ top level
+
+  if (!userId) {
+    const [error, setError] = useState(null); // ❌ conditional — breaks the rules
+  }
+
+  for (const id of ids) {
+    useEffect(() => { /* ... */ });           // ❌ in a loop — breaks the rules
+  }
+}
+```
+
+## ทำไมกฎข้อแรกถึงมี
+
+จำจาก intro ของโมดูล: React จับคู่ hook แต่ละตัวกับ memory slot **ตามลำดับการเรียก** ไม่ใช่ตามชื่อ `useState` ตัวแรกคือ slot 1, ตัวที่สองคือ slot 2 ทุก render
+
+<Mermaid title="hook แบบมีเงื่อนไขทำให้ slot ที่เหลือทั้งหมดเลื่อน" code={ruleDiagram} />
+
+export const ruleDiagram = `flowchart TB
+  r1["Render 1: useState, useState, useEffect\nslots 1, 2, 3"] --> ok["consistent"]
+  r2["Render 2: (condition false)\nuseState, useEffect\nslots 1, 2"] --> bad["useEffect now reads slot 2\n— the state of the wrong hook"]`;
+
+ถ้าคุณเรียก hook แบบมีเงื่อนไข พอถึง render ที่เงื่อนไขต่างออกไป *จำนวนและลำดับ* ของการเรียก hook จะเปลี่ยน — และ hook ทุกตัวหลังตัวที่มีเงื่อนไขจะอ่าน slot ผิด state รั่วข้าม hook วุ่นวายตามมา การเรียก hook แบบไม่มีเงื่อนไข ในลำดับเดิมทุก render คือสิ่งที่ทำให้การ map slot คงที่ นั่นคือเหตุผลทั้งหมดของกฎ
+
+บังคับใช้อัตโนมัติด้วย lint rule ทางการ (**eslint-plugin-react-hooks**) — มันจับ hook แบบมีเงื่อนไขและ effect dependency ที่ขาดก่อน ship
+
+## Custom hooks: การแชร์ stateful logic
+
+**custom hook** คือ function ที่ชื่อขึ้นต้นด้วย `use` และเรียก hook อื่น เท่านั้นเอง — ไม่มี API พิเศษ มันให้คุณแยกและ reuse *stateful logic* (ไม่ใช่ UI) ข้าม component
+
+```jsx
+// A custom hook: reusable logic, its own state, calls built-in hooks.
+function useOnlineStatus() {
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
+  }, []);
+  return isOnline;
+}
+
+// Any component can now use it:
+function StatusBar() {
+  const isOnline = useOnlineStatus();
+  return <span>{isOnline ? '✅ Online' : '❌ Offline'}</span>;
+}
+```
+
+สิ่งสำคัญที่ต้องเข้าใจ: custom hook แชร์ **logic ไม่ใช่ state** ทุก component ที่เรียก `useOnlineStatus()` ได้ state *ของตัวเองอิสระ* — hook เป็นสูตรที่รันใหม่ต่อ component ไม่ใช่ store ที่แชร์กัน (สำหรับ state ที่แชร์ข้าม component ให้ lift state up หรือใช้ context/external store — โมดูลถัดไป)
+
+เมื่อไรควรแยก custom hook: เมื่อสอง component ต้องการ stateful behavior เดียวกัน หรือเมื่อ logic ของ component ซับซ้อนพอที่การตั้งชื่อ (`useForm`, `useDebouncedValue`, `useFetch`) ทำให้ component ชัดขึ้น
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Rules of Hooks — **เรียก hook ที่ top level เท่านั้น เรียกจาก React function เท่านั้น** — มีเพราะ React จับคู่ hook กับ memory slot **ตามลำดับการเรียก** hook แบบมีเงื่อนไขทำให้ slot ที่เหลือทั้งหมดเลื่อนไปอ่าน state ผิด บังคับใช้ด้วย `eslint-plugin-react-hooks` **custom hook** คือแค่ function `use*` ที่เรียก hook มันแชร์ **logic ไม่ใช่ state** — ผู้เรียกแต่ละคนได้ state ของตัวเองอิสระ
+</Callout>
+
+export const quizRules = [
+  {
+    q: 'Rules of Hooks สองข้อคืออะไร?',
+    options: [
+      'เรียก hook ที่ไหนก็ได้; จาก function ใดก็ได้',
+      'เรียก hook ที่ top level เท่านั้น และจาก React component หรือ hook อื่นเท่านั้น',
+      'เรียก hook ใน useEffect เท่านั้น; ตั้งชื่อด้วย use',
+      'เรียก hook ใน loop; return มันออกมา',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมเรียก hook แบบมีเงื่อนไขไม่ได้?',
+    options: [
+      'เป็นความชอบด้านสไตล์',
+      'React จับคู่ hook กับ memory slot ตามลำดับการเรียก; การเรียกแบบมีเงื่อนไขทำให้ hook ที่เหลือเลื่อนไป slot ผิด',
+      'condition ช้าเกินไป',
+      'hook อยู่ใน function ไม่ได้เลย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'custom hook คืออะไร?',
+    options: [
+      'class ที่ extends React.Component',
+      'function ชื่อ use* ที่เรียก hook อื่นเพื่อรวม stateful logic ที่ reuse ได้',
+      'CSS module',
+      'React API พิเศษที่ต้อง import',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'สอง component เรียก `useCounter()` ทั้งคู่ พวกมันแชร์อะไร?',
+    options: [
+      'state เดียวกันที่แชร์กัน — เปลี่ยนอันหนึ่งกระทบอีกอัน',
+      'แค่ logic — แต่ละ component ได้ state ของตัวเองอิสระ',
+      'ไม่มีอะไร; custom hook ถือ state ไม่ได้',
+      'global variable',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/rules-and-custom-hooks" questions={quizRules} />
+
+<ProgressTracker client:visible id="hooks/rules-and-custom-hooks" />

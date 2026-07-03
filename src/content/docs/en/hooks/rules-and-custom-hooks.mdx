@@ -1,0 +1,129 @@
+---
+title: 'Rules & Custom Hooks'
+description: 'Why the Rules of Hooks exist (call order), the lint plugin that enforces them, and extracting custom hooks to share stateful logic.'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The two rules
+
+There are only two Rules of Hooks:
+
+1. **Only call hooks at the top level** — never inside conditions, loops, or nested functions.
+2. **Only call hooks from React functions** — components or other hooks, not plain functions.
+
+```jsx
+function Profile({ userId }) {
+  const [user, setUser] = useState(null);  // ✅ top level
+
+  if (!userId) {
+    const [error, setError] = useState(null); // ❌ conditional — breaks the rules
+  }
+
+  for (const id of ids) {
+    useEffect(() => { /* ... */ });           // ❌ in a loop — breaks the rules
+  }
+}
+```
+
+## Why the first rule exists
+
+Remember from the module intro: React matches each hook call to a memory slot **by call order**, not by name. The first `useState` is slot 1, the second is slot 2, every render.
+
+<Mermaid title="A conditional hook shifts every later slot" code={ruleDiagram} />
+
+export const ruleDiagram = `flowchart TB
+  r1["Render 1: useState, useState, useEffect\nslots 1, 2, 3"] --> ok["consistent"]
+  r2["Render 2: (condition false)\nuseState, useEffect\nslots 1, 2"] --> bad["useEffect now reads slot 2\n— the state of the wrong hook"]`;
+
+If you call a hook conditionally, then on a render where the condition differs, the *count and order* of hook calls changes — and every hook after the conditional one reads the wrong slot. State bleeds between hooks; chaos follows. Calling hooks unconditionally, in the same order every render, is what keeps the slot mapping stable. That's the entire reason for the rule.
+
+Enforce it automatically with the official lint rules (**eslint-plugin-react-hooks**) — they catch conditional hooks and missing effect dependencies before they ship.
+
+## Custom hooks: sharing stateful logic
+
+A **custom hook** is simply a function whose name starts with `use` and which calls other hooks. That's it — there's no special API. It lets you extract and reuse *stateful logic* (not UI) across components.
+
+```jsx
+// A custom hook: reusable logic, its own state, calls built-in hooks.
+function useOnlineStatus() {
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
+  }, []);
+  return isOnline;
+}
+
+// Any component can now use it:
+function StatusBar() {
+  const isOnline = useOnlineStatus();
+  return <span>{isOnline ? '✅ Online' : '❌ Offline'}</span>;
+}
+```
+
+The crucial thing to understand: custom hooks share **logic, not state**. Each component that calls `useOnlineStatus()` gets its *own independent* state — the hook is a recipe that's run fresh per component, not a shared store. (For shared state across components, you lift state up or use context/an external store — the next module.)
+
+When to extract a custom hook: when two components need the same stateful behavior, or when a component's logic gets complex enough that naming it (`useForm`, `useDebouncedValue`, `useFetch`) makes the component clearer.
+
+<Callout title="The one-line takeaway">
+The Rules of Hooks — **call hooks only at the top level, only from React functions** — exist because React matches hooks to memory slots **by call order**; a conditional hook shifts every later slot to the wrong state. Enforce them with `eslint-plugin-react-hooks`. A **custom hook** is just a `use*` function that calls hooks; it shares **logic, not state** — each caller gets its own independent state.
+</Callout>
+
+export const quizRules = [
+  {
+    q: 'What are the two Rules of Hooks?',
+    options: [
+      'Call hooks anywhere; from any function',
+      'Call hooks only at the top level, and only from React components or other hooks',
+      'Call hooks in useEffect only; name them with use',
+      'Call hooks inside loops; return them',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why can you not call a hook conditionally?',
+    options: [
+      'It is a style preference',
+      'React matches hooks to memory slots by call order; a conditional call shifts later hooks to the wrong slot',
+      'Conditions are too slow',
+      'Hooks cannot be inside functions at all',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a custom hook?',
+    options: [
+      'A class that extends React.Component',
+      'A function named use* that calls other hooks to package reusable stateful logic',
+      'A CSS module',
+      'A special React API you import',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Two components both call `useCounter()`. What do they share?',
+    options: [
+      'The same shared state — changes in one affect the other',
+      'Only the logic — each component gets its own independent state',
+      'Nothing; custom hooks cannot hold state',
+      'A global variable',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/rules-and-custom-hooks" questions={quizRules} />
+
+<ProgressTracker client:visible id="hooks/rules-and-custom-hooks" />

@@ -1,0 +1,79 @@
+---
+title: 'Performance & Patterns'
+description: 'งาน performance ของ React ส่วนใหญ่คือการ render ให้น้อยลงและ render ให้เล็กลง — พร้อม composition pattern และ escape hatch ที่ทำให้ component reuse ได้และเร็ว'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Performance คือปัญหาเรื่อง rendering
+
+React เร็วอยู่แล้วโดย default ปัญหา performance จริง ๆ เกือบทั้งหมดมาจากสองอย่าง: **render บ่อยเกินไป** (component re-render ทั้งที่สิ่งที่มันแสดงไม่ได้เปลี่ยน) หรือ **render มากเกินไป** (render ครั้งเดียวทำงานหนัก) วิธีแก้เป็นเชิงโครงสร้าง — เก็บ state ให้อยู่ต่ำ, หยุดการ propagate ของ re-render ตรงจุดที่ไม่สำคัญ และหยิบ memoization มาใช้ก็ต่อเมื่อ profiler บอกว่าจำเป็น
+
+โมดูลนี้ยังครอบคลุม **pattern** ที่ทำให้ component composable ด้วย — เพราะ component tree ที่ compose มาดีมักจะเป็น tree ที่เร็ว
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Rendering performance | ทำไม component ถึง re-render และจะ render ให้น้อยลงอย่างไร |
+| Memoization in practice | `useMemo` / `useCallback` / `React.memo` — และ compiler |
+| Composition patterns | compound component, render props, controlled vs uncontrolled |
+| Refs, portals & escape hatches | เมื่อไรควรก้าวออกนอก declarative model |
+
+## กฎข้อเดียวของการ optimize
+
+<Mermaid title="วัดผลก่อน memoize" code={ruleDiagram} />
+
+export const ruleDiagram = `flowchart LR
+  slow["รู้สึกว่าช้า"] --> profile["profile มัน\n(React DevTools)"]
+  profile --> find["หาสาเหตุจริง\n(render บ่อยไป หรือทำงานหนักไป)"]
+  find --> fix["แก้สาเหตุนั้นให้ตรงจุด"]
+  fix -. เลี่ยง .-> guess["โปรย memo ไปทั่ว\nด้วยการเดา"]`;
+
+ความผิดพลาดที่พบบ่อยที่สุดคือ memoize แบบรีเฟล็กซ์ — ห่อทุกอย่างด้วย `useMemo`/`useCallback` ทั้งที่ยังไม่รู้ว่าช่วยไหม memoization มีต้นทุนของมันเอง (memory, การเปรียบเทียบ, ความซับซ้อน) และ **React Compiler** ตอนนี้ทำแทนให้เกือบหมดแล้ว profile ก่อน, แก้สาเหตุจริง แล้วปล่อยให้ compiler จัดการที่เหลือ
+
+<Callout title="การเปลี่ยนมุมมอง">
+คุณไม่ได้ทำให้ React เร็วด้วยการเพิ่ม memoization แต่ทำให้เร็วด้วยการ **render ให้น้อยลง** เก็บ state ให้ local ที่สุดเพื่อให้ re-render เล็ก, จัดโครงสร้าง component ให้ส่วนที่ไม่เกี่ยวกันไม่ re-render พร้อมกัน และเพิ่ม memoization เองเฉพาะจุดที่ profiler พิสูจน์ว่าได้ผลจริงและวัดได้
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'สองสาเหตุหลักของปัญหา performance ใน React คืออะไร?',
+    options: [
+      'CSS ช้าและรูปใหญ่',
+      'render บ่อยเกินไป (re-render ทั้งที่ไม่มีอะไรเปลี่ยน) และ render มากเกินไป (ทำงานหนักต่อ render)',
+      'component มากไปและ hook น้อยไป',
+      'การใช้ TypeScript',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ก่อนเพิ่ม memoization ควรทำอะไร?',
+    options: [
+      'ห่อทุก component ด้วย React.memo',
+      'profile เพื่อหาสาเหตุจริง แล้วแก้สาเหตุนั้นให้ตรงจุด',
+      'เขียนใหม่เป็น class component',
+      'เอา state ออกให้หมด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรที่ทำ manual memoization แทนคุณมากขึ้นเรื่อย ๆ?',
+    options: [
+      'bundler',
+      'React Compiler (auto-memoization)',
+      'StrictMode',
+      'garbage collector',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="performance-and-patterns/index" />

@@ -1,0 +1,128 @@
+---
+title: 'Transitions'
+description: 'useTransition to mark updates non-urgent and keep input responsive, useDeferredValue to defer expensive re-renders, and when to reach for each.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The problem: a slow update blocks a fast one
+
+Imagine a search box that filters a huge list. Every keystroke updates two things: the input value (must feel instant) and the filtered results (expensive to compute). If both are urgent, the expensive filter blocks the keystroke, and typing stutters.
+
+Transitions let you split them: the keystroke stays urgent, the filtering becomes a low-priority *transition* that React can interrupt when the next keystroke arrives.
+
+## useTransition: mark an update as non-urgent
+
+`useTransition` returns `[isPending, startTransition]`. Wrap the non-urgent state update in `startTransition`, and use `isPending` to show a subtle "updating" hint.
+
+```jsx
+function SearchResults({ allItems }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState(allItems);
+  const [isPending, startTransition] = useTransition();
+
+  function handleChange(e) {
+    setQuery(e.target.value);          // urgent — the input updates instantly
+    startTransition(() => {
+      // non-urgent — React renders this in the background, interruptible.
+      setResults(filterExpensive(allItems, e.target.value));
+    });
+  }
+
+  return (
+    <>
+      <input value={query} onChange={handleChange} />
+      {isPending && <span>updating…</span>}
+      <List items={results} />
+    </>
+  );
+}
+```
+
+The keystroke is never blocked: if you type again before the filter finishes, React throws away the in-progress filter render and starts the new one. `isPending` is `true` while the transition renders.
+
+<Mermaid title="The urgent update lands first; the transition renders after" code={transDiagram} />
+
+export const transDiagram = `flowchart LR
+  key["keystroke"] --> urgent["setQuery (urgent)\ninput updates now"]
+  key --> trans["startTransition(setResults)\n(non-urgent)"]
+  trans --> bg["renders in background\ninterruptible by next keystroke"]`;
+
+## useDeferredValue: defer a value instead of an update
+
+`useDeferredValue` is the same idea from the other direction. Instead of wrapping the *update*, you wrap the *value* you read: it returns a version of the value that "lags behind" during urgent work, so the expensive part re-renders off the deferred (stale-for-a-moment) value.
+
+```jsx
+function SearchResults({ allItems, query }) {
+  const deferredQuery = useDeferredValue(query);
+  // The list renders against deferredQuery. While the user types, deferredQuery
+  // stays a step behind, so the expensive list render happens in the background.
+  const results = filterExpensive(allItems, deferredQuery);
+
+  const isStale = query !== deferredQuery;
+  return <List items={results} style={{ opacity: isStale ? 0.6 : 1 }} />;
+}
+```
+
+## Which one?
+
+- Use **`useTransition`** when *you own the state update* and can wrap it in `startTransition` — you have the setter at the call site.
+- Use **`useDeferredValue`** when the value comes from *outside your control* (a prop, or state you can't wrap) — you defer reading it instead.
+
+Both keep urgent input responsive by letting the expensive re-render happen in interruptible background work. Neither makes the expensive work faster — they change its *priority*, not its cost. (For genuinely huge lists, you still want virtualization.)
+
+<Callout title="The one-line takeaway">
+Transitions keep the UI responsive by marking heavy updates **non-urgent** so a keystroke can interrupt them. Reach for **`useTransition`** (`[isPending, startTransition]`) when you control the state update and can wrap it; reach for **`useDeferredValue`** when you only have a value (a prop) and want to defer reading it. Both change *priority*, not cost — they don't make slow work fast.
+</Callout>
+
+export const quizTrans = [
+  {
+    q: 'What does wrapping a state update in `startTransition` do?',
+    options: [
+      'Makes it run on a Web Worker',
+      'Marks it non-urgent, so React renders it in interruptible background work and a keystroke can interrupt it',
+      'Delays it by 300ms',
+      'Cancels it',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does `useTransition` return?',
+    options: [
+      'A single boolean',
+      'An `[isPending, startTransition]` pair',
+      'The deferred value',
+      'A ref',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is `useDeferredValue` the better fit over `useTransition`?',
+    options: [
+      'Always',
+      'When the value comes from outside your control (a prop) so you cannot wrap the update — you defer reading the value instead',
+      'When you want to make filtering faster',
+      'When there is no state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Do transitions make the expensive work faster?',
+    options: [
+      'Yes, they optimize the computation',
+      'No — they change the update\'s priority (interruptible, non-blocking), not its cost',
+      'Yes, they cache results',
+      'Only in production',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/transitions" questions={quizTrans} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/transitions" />

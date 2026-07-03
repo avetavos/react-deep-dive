@@ -1,0 +1,136 @@
+---
+title: 'useReducer Patterns'
+description: 'useReducer for complex state transitions, reducer purity, and the context + reducer pattern for app-wide state without a library.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## From many setStates to one reducer
+
+`useState` is perfect for independent pieces of state. But when several values change *together* in response to the same events — and the next state depends on the current state and an action — a **reducer** consolidates that logic into one pure function.
+
+```jsx
+// The reducer is a pure function: (state, action) => nextState.
+function tasksReducer(state, action) {
+  switch (action.type) {
+    case "added":
+      return [...state, { id: action.id, text: action.text, done: false }];
+    case "toggled":
+      return state.map((t) => (t.id === action.id ? { ...t, done: !t.done } : t));
+    case "deleted":
+      return state.filter((t) => t.id !== action.id);
+    default:
+      throw new Error("unknown action: " + action.type);
+  }
+}
+
+function TaskApp() {
+  const [tasks, dispatch] = useReducer(tasksReducer, []);
+  // You describe WHAT happened (an action); the reducer decides the next state.
+  return <button onClick={() => dispatch({ type: "added", id: 1, text: "Learn" })}>Add</button>;
+}
+```
+
+`useReducer` returns the current state and a `dispatch` function. You don't compute the next state at the call site — you **dispatch an action** describing what happened, and the reducer computes the result in one place.
+
+## Why prefer a reducer
+
+<Mermaid title="Scattered setState vs one reducer" code={reducerDiagram} />
+
+export const reducerDiagram = `flowchart TB
+  subgraph a["Many setState"]
+    e1["event"] --> s1["setX"]
+    e1 --> s2["setY"]
+    e1 --> s3["setZ (logic scattered)"]
+  end
+  subgraph b["One reducer"]
+    e2["event"] --> d["dispatch(action)"] --> r["reducer: all transition logic here"]
+  end`;
+
+Reach for `useReducer` over `useState` when:
+
+- **State transitions are complex** — many fields update together, or the next value depends on the previous in non-trivial ways.
+- **You want the logic in one testable place** — a reducer is a plain function you can unit-test with no React at all: `reducer(state, action)` in, `nextState` out.
+- **Actions document intent** — `dispatch({ type: "checkout_failed" })` reads better than a pile of setters, and gives you a log of *what happened*.
+
+Reducer purity is the same rule as render: given the same state and action, return the same next state, with **no side effects** and **no mutation** (return new objects/arrays).
+
+## Context + reducer: app state without a library
+
+Combine the two tools from this module and you get lightweight app-wide state management with zero dependencies: a reducer holds the logic, and Context delivers the state and `dispatch` down the tree.
+
+```jsx
+const TasksContext = createContext(null);
+const TasksDispatchContext = createContext(null);   // split: state vs dispatch
+
+function TasksProvider({ children }) {
+  const [tasks, dispatch] = useReducer(tasksReducer, []);
+  return (
+    <TasksContext value={tasks}>
+      <TasksDispatchContext value={dispatch}>{children}</TasksDispatchContext>
+    </TasksContext>
+  );
+}
+
+// Anywhere below: read state and dispatch actions.
+function useTasks() { return useContext(TasksContext); }
+function useTasksDispatch() { return useContext(TasksDispatchContext); }
+```
+
+Splitting state and dispatch into two contexts means components that only *dispatch* (never read the list) don't re-render when the list changes — `dispatch` is stable for the component's lifetime. This pattern covers a surprising amount of "I need Redux" cases without any library.
+
+<Callout title="The one-line takeaway">
+`useReducer` moves complex, together-changing state into one **pure reducer** `(state, action) => nextState`; you `dispatch` actions that describe *what happened* instead of computing next state at the call site — which centralizes logic and makes it unit-testable. Pair it with Context (state in one provider, `dispatch` in another) for **app-wide state with no library** — and the stable `dispatch` context means dispatch-only components don't re-render.
+</Callout>
+
+export const quizReducer = [
+  {
+    q: 'What is a reducer?',
+    options: [
+      'A hook that fetches data',
+      'A pure function (state, action) => nextState that centralizes state-transition logic',
+      'A way to mutate the DOM',
+      'A CSS utility',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you prefer useReducer over useState?',
+    options: [
+      'Always',
+      'When state transitions are complex, many fields change together, or you want the logic in one testable place',
+      'Only for a single boolean',
+      'Never',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In the context + reducer pattern, why split state and dispatch into two contexts?',
+    options: [
+      'It looks cleaner only',
+      'So dispatch-only components (which never read the state) do not re-render when the state changes',
+      'It is required by React',
+      'To make dispatch async',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What must a reducer NOT do?',
+    options: [
+      'Return a new state object',
+      'Mutate its arguments or perform side effects — it must be pure',
+      'Use a switch statement',
+      'Handle multiple action types',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-and-data/usereducer-patterns" questions={quizReducer} />
+
+<ProgressTracker client:visible id="state-and-data/usereducer-patterns" />

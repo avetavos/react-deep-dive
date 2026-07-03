@@ -1,0 +1,126 @@
+---
+title: 'use() & Data Fetching'
+description: 'The React 19 use() hook — reading a promise or context, how it integrates with Suspense, render-as-you-fetch, and why you usually reach for a framework or data library.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The React 19 `use()` API
+
+`use()` is a React 19 API that **reads the value of a resource** during render — most importantly a **promise** or a **context**. When you pass it a promise, the component **suspends** while the promise is pending (showing the nearest Suspense fallback) and returns the resolved value once it settles.
+
+```jsx
+import { use, Suspense } from "react";
+
+function Message({ messagePromise }) {
+  const text = use(messagePromise);   // suspends until the promise resolves
+  return <p>{text}</p>;
+}
+
+function Container({ messagePromise }) {
+  return (
+    <Suspense fallback={<p>Loading…</p>}>
+      <Message messagePromise={messagePromise} />
+    </Suspense>
+  );
+}
+```
+
+`use()` breaks one rule you learned for other hooks: it **can be called conditionally** — inside an `if`, or in a loop. That's allowed precisely because it isn't tied to the fixed hook slots the way `useState`/`useEffect` are.
+
+## The critical rule: cache the promise
+
+`use()` does *not* start the fetch, and it does not cache anything. It reads a promise you give it — so that promise **must be stable across renders**. Creating a promise inside the component body means a new promise every render, which suspends forever (or refetches endlessly).
+
+```jsx
+// ❌ New promise every render — refetches / never settles.
+function Bad({ id }) {
+  const data = use(fetch(`/api/${id}`).then(r => r.json()));
+  // ...
+}
+
+// ✅ The promise is created outside and passed in (cached by the caller/framework).
+function Good({ dataPromise }) {
+  const data = use(dataPromise);
+  // ...
+}
+```
+
+This is why raw `use()` is almost always paired with a **cache** — either a framework's data layer or a manual `Map` cache — that returns the *same* promise instance for the same request.
+
+## Render-as-you-fetch
+
+The pattern `use()` enables is **render-as-you-fetch**: kick off the request *before or as* you render (e.g. in a route loader, or on hover), pass the promise down, and let the component read it via `use()` inside a Suspense boundary. Contrast the three approaches:
+
+<Mermaid title="Fetch-on-render vs render-as-you-fetch" code={fetchDiagram} />
+
+export const fetchDiagram = `flowchart TB
+  subgraph old["fetch-on-render (useEffect)"]
+    r1["render"] --> e1["effect runs"] --> f1["then fetch starts"] --> r2["re-render with data"]
+  end
+  subgraph new["render-as-you-fetch (use + Suspense)"]
+    start["start fetch early\n(loader / event)"] --> pass["pass promise down"]
+    pass --> read["use(promise) suspends\n→ Suspense fallback → data"]
+  end`;
+
+`use()` also reads **context**, and unlike `useContext` it can be called conditionally — handy for reading context inside a branch.
+
+## You usually won't write this by hand
+
+Here's the honest part. Raw `use()` + Suspense + a hand-rolled promise cache is powerful but low-level. In real apps you almost always get render-as-you-fetch through a **framework** (a router/loader that fetches per route and provides the cache) or a **data library** like TanStack Query (which manages caching, revalidation, and Suspense integration for you). Learn `use()` to understand the mechanism; reach for a library to ship it.
+
+<Callout title="The one-line takeaway">
+`use()` (React 19) reads a resource during render — pass it a **promise** and the component **suspends** until it resolves (pairing with Suspense for loading and an error boundary for rejection); it can also read context, and unlike other hooks it can be called **conditionally**. The catch: `use()` doesn't fetch or cache — the promise must be **stable across renders**, which is why you use a framework or a data library (TanStack Query) to provide the cache in practice.
+</Callout>
+
+export const quizUse = [
+  {
+    q: 'What happens when you pass a pending promise to `use()`?',
+    options: [
+      'It returns null immediately',
+      'The component suspends until the promise resolves (showing the nearest Suspense fallback), then returns the resolved value',
+      'It throws an error',
+      'It blocks the main thread',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How is `use()` different from hooks like `useState`?',
+    options: [
+      'It cannot read values',
+      'It can be called conditionally (inside an if or loop)',
+      'It runs only on the server',
+      'It does not need React',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why must the promise passed to `use()` be cached / stable across renders?',
+    options: [
+      'For TypeScript',
+      'Because a new promise each render would suspend forever or refetch endlessly — use() reads the promise, it does not cache it',
+      'To reduce bundle size',
+      'It does not need to be stable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In practice, how do most apps do render-as-you-fetch?',
+    options: [
+      'By writing raw use() + a manual cache everywhere',
+      'Through a framework router/loader or a data library (e.g. TanStack Query) that provides caching and Suspense integration',
+      'With useEffect only',
+      'They do not fetch data',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="concurrent-and-suspense/use-and-data-fetching" questions={quizUse} />
+
+<ProgressTracker client:visible id="concurrent-and-suspense/use-and-data-fetching" />

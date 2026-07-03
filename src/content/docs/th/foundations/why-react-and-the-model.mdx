@@ -1,0 +1,120 @@
+---
+title: 'Why React & the Model'
+description: 'UI แบบ declarative เทียบกับ imperative, component ในฐานะฟังก์ชันของ props และ state และทำไม model UI = f(state) ถึงเปลี่ยนวิธีที่คุณสร้างของ'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Imperative เทียบกับ declarative
+
+ลองนึกถึง counter เวอร์ชัน **imperative** บอก browser ว่าจะ update *อย่างไร* ทีละขั้น:
+
+```js
+// Imperative: you manage the DOM and keep it in sync by hand.
+let count = 0;
+const label = document.querySelector("#count");
+document.querySelector("#inc").addEventListener("click", () => {
+  count += 1;
+  label.textContent = count; // you must remember to do this, everywhere
+});
+```
+
+จุดที่เกิด bug คือส่วน *"ต้องจำว่าต้อง update"* — ทุกที่ที่เปลี่ยน `count` ก็ต้อง update ทุกจุดของ UI ที่ขึ้นกับมันด้วย พลาดจุดเดียวหน้าจอก็โกหกทันที
+
+เวอร์ชัน **declarative** อธิบายว่า UI *เป็นอะไร* สำหรับ state หนึ่ง ๆ และไม่แตะ DOM เลย:
+
+```jsx
+// Declarative: describe the UI for the current state; React syncs the DOM.
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(count + 1)}>{count}</button>;
+}
+```
+
+ไม่มีขั้น "update label" คุณแค่เปลี่ยน `count` และเพราะ UI ถูก *อธิบาย* ในรูปของ `count` React จึง re-render และหน้าจอถูกต้องโดยอัตโนมัติ bug ประเภท "ลืม update X" หายไปทั้งกลุ่ม
+
+## component คือฟังก์ชันของ input ของมัน
+
+React component คือฟังก์ชันที่รับ **props** (input จาก parent) และใช้ **state** (ความจำของตัวเอง) แล้ว return คำอธิบายของ UI
+
+```jsx
+// props flow in; state lives inside; the return describes the UI.
+function Greeting({ name }) {          // name is a prop
+  const [count, setCount] = useState(0); // count is state
+  return (
+    <div>
+      <p>Hello, {name}</p>
+      <button onClick={() => setCount(count + 1)}>Clicked {count} times</button>
+    </div>
+  );
+}
+```
+
+<Mermaid title="component แปลง input เป็นคำอธิบาย UI" code={compDiagram} />
+
+export const compDiagram = `flowchart LR
+  props["props (from parent)"] --> comp["Component function"]
+  state["state (own memory)"] --> comp
+  comp --> ui["returns: UI description\n(elements)"]
+  ui --> react["React renders it"]`;
+
+สองกฎที่ตามมาจาก "component คือฟังก์ชัน":
+
+- **props เป็น read-only** component ต้องไม่แก้ props ของตัวเอง — มันเป็นของ parent ข้อมูลไหล *ลง*
+- **input เดียวกัน output เดียวกัน** เมื่อ props และ state เท่าเดิม component ควร render สิ่งเดิม นั่นคือข้อกำหนดเรื่อง purity (มีบทเรียนเต็ม ๆ ทีหลัง) และเป็นสิ่งที่ทำให้ React รัน component ซ้ำได้อย่างอิสระ
+
+## ทำไม model ถึงสำคัญ
+
+ทุกอย่างที่เหลือใน React เป็นผลพวงของ `UI = f(state)`:
+
+- **hooks** มีไว้เพื่อให้ function component มี state และ lifecycle *โดยไม่* ทำลาย model "เป็นแค่ฟังก์ชัน"
+- **reconciliation** มีไว้เพื่อแปลง "นี่คือคำอธิบาย UI ใหม่" ให้เป็น "นี่คือการแก้ DOM น้อยที่สุด"
+- **concurrent features** (transitions, Suspense) มีอยู่ได้เพราะ `f(state)` ที่ pure สามารถถูกคำนวณ หยุด และ restart ได้อย่างปลอดภัย
+
+คุณไม่ได้กำลังเรียน API กองใหญ่ คุณกำลังเรียนสมการเดียวและผลของมัน
+
+<Callout title="สรุปหนึ่งบรรทัด">
+React เป็น **declarative**: คุณอธิบายว่า UI ควรเป็นอะไรสำหรับ state ปัจจุบัน (`UI = f(state)`) แทนที่จะ mutate DOM แบบ imperative component คือ **ฟังก์ชันของ props และ state** — props ไหลลงและ read-only และ input เดียวกันต้องได้ output เดียวกัน ทุก feature ของ React เป็นผลของการเอา model นี้มาคิดจริงจัง
+</Callout>
+
+export const quizWhy = [
+  {
+    q: 'ปัญหาหลักของการ update DOM แบบ imperative ที่ React แก้ให้คืออะไร?',
+    options: [
+      'มันเร็วเกินไป',
+      'ทุกที่ที่เปลี่ยนข้อมูลต้องจำ update ทุก UI element ที่ขึ้นกับมัน — พลาดจุดเดียวหน้าจอก็ผิด',
+      'มันใช้ CSS ไม่ได้',
+      'มันต้องใช้ TypeScript',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'input ของ React component คืออะไร?',
+    options: [
+      'แค่ DOM',
+      'props (จาก parent) และ state ของตัวมันเอง',
+      'global variable เท่านั้น',
+      'URL',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อใดจริงเกี่ยวกับ props?',
+    options: [
+      'component แก้ props ของตัวเองได้อย่างอิสระ',
+      'props เป็น read-only — ข้อมูลไหลลงและเป็นของ parent',
+      'props เหมือนกับ state',
+      'props เป็น string ได้อย่างเดียว',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/why-react-and-the-model" questions={quizWhy} />
+
+<ProgressTracker client:visible id="foundations/why-react-and-the-model" />

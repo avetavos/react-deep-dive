@@ -1,0 +1,136 @@
+---
+title: 'useEffect & Effects'
+description: 'What effects are actually for — synchronizing with external systems — dependencies and cleanup, and the modern rule that you probably do not need an effect.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## What an effect is for
+
+`useEffect` is the most misunderstood hook. It is not a general "run code after render" bucket. Its one job is to **synchronize your component with an external system** — something outside React's control: a network connection, a browser API, a third-party widget, a subscription, a timer.
+
+```jsx
+useEffect(() => {
+  const connection = createConnection(roomId);  // set up external system
+  connection.connect();
+  return () => connection.disconnect();          // clean it up
+}, [roomId]);                                     // re-sync when roomId changes
+```
+
+Read that as: "keep the connection in sync with `roomId`." When `roomId` changes, React runs the cleanup for the old value, then the effect for the new one. When the component unmounts, it runs the final cleanup.
+
+## Dependencies and cleanup
+
+The **dependency array** lists every reactive value (prop, state, or derived value) the effect reads. React re-runs the effect whenever one of them changes.
+
+- **`[dep1, dep2]`** — re-run when these change.
+- **`[]`** — run once on mount, cleanup on unmount.
+- **omitted** — run after *every* render (rarely what you want).
+
+The **cleanup function** you return must undo whatever the effect set up — disconnect, clear the timer, remove the listener. Skipping cleanup is the #1 source of bugs: duplicate connections, leaks, and listeners firing after unmount.
+
+<Mermaid title="An effect synchronizes, and cleans up" code={effectDiagram} />
+
+export const effectDiagram = `flowchart LR
+  dep["dependency changes"] --> cleanup["run cleanup for old value"]
+  cleanup --> setup["run effect for new value"]
+  unmount["component unmounts"] --> final["run final cleanup"]`;
+
+Do not fight the linter that fills the dependency array. If a dependency is inconvenient, the fix is almost never to lie about the array — it's to restructure (move the value inside the effect, use an updater, or memoize).
+
+## You probably do not need an effect
+
+This is the most important lesson in the whole module. Effects are for external systems. If you're using an effect to **transform data for rendering** or to **respond to a user event**, you almost certainly don't need one — and using one makes the code slower and buggier.
+
+**Don't sync derived state with an effect. Compute it during render.**
+
+```jsx
+// 🔴 Avoid: redundant state + an effect to keep it in sync.
+const [fullName, setFullName] = useState('');
+useEffect(() => {
+  setFullName(firstName + ' ' + lastName);
+}, [firstName, lastName]);
+
+// ✅ Good: derive it during render — no state, no effect.
+const fullName = firstName + ' ' + lastName;
+```
+
+For an *expensive* derivation, wrap it in `useMemo` — still no effect, no extra state:
+
+```jsx
+// ✅ Cached derivation, no effect.
+const visibleTodos = useMemo(() => getFilteredTodos(todos, filter), [todos, filter]);
+```
+
+**Don't use an effect to handle a user event.** Logic that should run because the user did something belongs in the **event handler**, where you know exactly what happened.
+
+```jsx
+// 🔴 Avoid: reacting to a state change with an effect to send analytics.
+useEffect(() => {
+  if (submitted) post('/analytics', { event: 'submit' });
+}, [submitted]);
+
+// ✅ Good: do it in the handler that caused the submit.
+function handleSubmit() {
+  setSubmitted(true);
+  post('/analytics', { event: 'submit' });
+}
+```
+
+The quick test: *"Is this synchronizing with something outside React?"* If yes, effect. If it's deriving data or reacting to an interaction, no effect.
+
+<Callout title="The one-line takeaway">
+`useEffect` exists to **synchronize with external systems** (connections, subscriptions, browser APIs) — list every reactive value it reads in the **dependency array**, and always return a **cleanup** that undoes the setup. But most of the time you **don't need an effect**: derive values during render (or with `useMemo`), and put event-driven logic in **event handlers**. Reach for an effect only when you're syncing with something outside React.
+</Callout>
+
+export const quizEffect = [
+  {
+    q: 'What is the one job of useEffect?',
+    options: [
+      'To run any code after every render',
+      'To synchronize a component with an external system (connection, subscription, browser API)',
+      'To transform data for rendering',
+      'To replace event handlers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'You need `fullName` from `firstName` and `lastName`. What is the right approach?',
+    options: [
+      'Store fullName in state and sync it with a useEffect',
+      'Derive it during render: const fullName = firstName + " " + lastName',
+      'Put it in a ref',
+      'Compute it in a cleanup function',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What must a cleanup function do?',
+    options: [
+      'Return the new state',
+      'Undo whatever the effect set up (disconnect, clear timer, remove listener)',
+      'Re-run the component',
+      'Nothing — cleanup is optional decoration',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Logic that should run because the user clicked submit belongs where?',
+    options: [
+      'In a useEffect watching a "submitted" state',
+      'In the event handler that caused the submit',
+      'In the render body',
+      'In useMemo',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/useeffect-and-effects" questions={quizEffect} />
+
+<ProgressTracker client:visible id="hooks/useeffect-and-effects" />

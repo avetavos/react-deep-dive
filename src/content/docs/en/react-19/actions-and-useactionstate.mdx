@@ -1,0 +1,156 @@
+---
+title: 'Actions & useActionState'
+description: 'Async form actions with built-in pending, error, and result state — how useActionState collapses the useState-plus-try-catch-plus-loading pattern into one call.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The pattern React 19 deletes
+
+Before Actions, submitting a form meant hand-wiring three pieces of state and remembering to update all of them:
+
+```jsx
+// The old way — lots of manual bookkeeping.
+function ChangeName() {
+  const [name, setName] = useState('');
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setIsPending(true);
+    setError(null);
+    try {
+      await updateName(name);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsPending(false); // must not forget this
+    }
+  }
+  // ...form wired to handleSubmit
+}
+```
+
+Every async form in the app repeats this: a loading flag, an error slot, a `try/catch/finally`. It's boilerplate, and forgetting the `finally` leaves a spinner stuck forever.
+
+## Actions: async functions passed to a form
+
+An **Action** is just an async function you hand to a `<form>` via the `action` prop. React calls it on submit, passes it the `FormData`, and manages the pending state and form reset for you:
+
+```jsx
+<form action={async (formData) => {
+  await updateName(formData.get('name'));
+}}>
+  <input name="name" />
+  <button type="submit">Update</button>
+</form>
+```
+
+No `onSubmit`, no `preventDefault`, no manual `FormData` assembly. But you still want *pending* and *error* state to show the user what's happening — that's what `useActionState` adds.
+
+## useActionState: pending, error, and result in one call
+
+`useActionState(action, initialState)` wraps your action and returns a **three-element tuple**: the current state, a wrapped action to pass to the form, and a pending boolean.
+
+```jsx
+import { useActionState } from 'react';
+
+function ChangeName() {
+  const [error, submitAction, isPending] = useActionState(
+    async (previousState, formData) => {
+      const error = await updateName(formData.get('name'));
+      if (error) {
+        return error;        // returned value becomes the new state
+      }
+      redirect('/profile');
+      return null;           // success: clear the error
+    },
+    null,                    // initial state
+  );
+
+  return (
+    <form action={submitAction}>
+      <input type="text" name="name" />
+      <button type="submit" disabled={isPending}>Update</button>
+      {error && <p>{error}</p>}
+    </form>
+  );
+}
+```
+
+Read the shape carefully — it's the part people get wrong:
+
+- The **action** receives `(previousState, formData)` and returns the **next state**.
+- `useActionState` returns `[state, formAction, isPending]` — `state` is whatever your action last returned, `formAction` is what you pass to `<form action={...}>`, and `isPending` is managed for you.
+
+<Mermaid title="The Action lifecycle" code={actionDiagram} />
+
+export const actionDiagram = `sequenceDiagram
+  participant U as User
+  participant F as form action
+  participant A as your async action
+  U->>F: submit
+  F->>F: isPending = true
+  F->>A: action(prevState, formData)
+  A-->>F: returns next state
+  F->>F: isPending = false, state updated
+  F->>U: re-render with new state`;
+
+The whole three-piece dance — loading flag, error slot, try/catch/finally — collapses into one hook that can't forget to reset the spinner.
+
+<Callout title="The one-line takeaway">
+An **Action** is an async function passed to `<form action={fn}>`; React calls it with the `FormData` and handles submission for you. **`useActionState(action, initialState)`** wraps it and returns **`[state, formAction, isPending]`** — the action receives `(previousState, formData)` and returns the next state, and pending is tracked automatically. This replaces the old `useState`-for-data + `useState`-for-loading + `try/catch/finally` boilerplate with a single call.
+</Callout>
+
+export const quizActions = [
+  {
+    q: 'What is a React 19 "Action"?',
+    options: [
+      'A Redux action object',
+      'An async function passed to a form via the action prop; React calls it on submit with the FormData',
+      'A CSS transition',
+      'A router redirect',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does `useActionState(action, initialState)` return?',
+    options: [
+      'Just the pending boolean',
+      'A tuple: [state, formAction, isPending]',
+      'The FormData object',
+      'A promise',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What arguments does the action passed to useActionState receive?',
+    options: [
+      '(event)',
+      '(previousState, formData) — and it returns the next state',
+      '(props, context)',
+      'None',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What boilerplate does useActionState replace?',
+    options: [
+      'JSX itself',
+      'The manual loading flag + error state + try/catch/finally around an async submit',
+      'The import statements',
+      'The component function',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="react-19/actions-and-useactionstate" questions={quizActions} />
+
+<ProgressTracker client:visible id="react-19/actions-and-useactionstate" />

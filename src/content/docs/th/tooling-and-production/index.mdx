@@ -1,0 +1,79 @@
+---
+title: 'Tooling, Testing & Production'
+description: 'toolchain ของ React ปัจจุบัน — Vite และ framework (ไม่ใช่ Create React App), Testing Library, TypeScript กับ React 19 และ ecosystem ตอน production ที่ใช้จริง'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## จาก code สู่ app ที่ ship จริง
+
+คุณเข้าใจแล้วว่า React render อย่างไรและ hooks ทำงานอย่างไร โมดูลนี้ว่าด้วยทุกอย่างรอบ ๆ code: เริ่มโปรเจกต์วันนี้อย่างไร, test component อย่างไร, type มันอย่างไร และใช้อะไรตอน production
+
+จุดสำคัญเรื่อง currency: **Create React App ถูก deprecated แล้ว** (sunset อย่างเป็นทางการในปี 2025) React ปัจจุบันเริ่มด้วย **Vite** สำหรับ SPA หรือ **framework** (Next.js, React Router) สำหรับอะไรก็ตามที่ต้องการ routing, SSR หรือ Server Components
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Project & tooling | Vite เทียบกับ framework, DevTools, Fast Refresh — และทำไมไม่ใช้ CRA |
+| Testing | React Testing Library บน Vitest, test behavior ไม่ใช่ internal |
+| TypeScript with React | type props, hooks, event — และ `ref` เป็น prop ใน React 19 |
+| Production & ecosystem | code-splitting และ library ที่คุณจะใช้จริง |
+
+## หน้าตาของ React setup สมัยใหม่
+
+<Mermaid title="สิ่งที่อยู่รอบ ๆ component ในโปรเจกต์จริง" code={stackDiagram} />
+
+export const stackDiagram = `flowchart TB
+  build["Build tool\n(Vite) or framework\n(Next.js / React Router)"] --> app["React app ของคุณ"]
+  ts["TypeScript"] --> app
+  test["Testing Library + Vitest"] --> app
+  eco["Ecosystem:\nrouting, data, forms, state"] --> app`;
+
+ไม่มีอันไหนเป็นตัว React เอง — React ตั้งใจเป็น *library* ไม่ใช่ framework คุณจึงประกอบส่วนที่เหลือเอง การรู้ตัวเลือกมาตรฐานช่วยให้ไม่ต้องคิดใหม่เอง
+
+<Callout title="The one-line takeaway">
+React คือ library; toolchain รอบ ๆ เป็นทางเลือกของคุณ แต่ตัวเลือกลงตัวแล้ว เริ่มด้วย **Vite** (SPA) หรือ **framework** (Next.js / React Router) — **ไม่ใช่ Create React App ที่ deprecated แล้ว** — test ด้วย **React Testing Library**, type ด้วย **TypeScript** และหยิบ library ที่ยอมรับกันแล้วมาใช้สำหรับ routing, data, form และ state
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'สถานะปัจจุบันของ Create React App คืออะไร?',
+    options: [
+      'เป็นวิธีที่แนะนำในการเริ่ม React app',
+      'ถูก deprecated แล้ว — ให้ใช้ Vite หรือ framework แทน',
+      'จำเป็นสำหรับ TypeScript',
+      'เป็น build tool ที่เร็วที่สุด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรเริ่ม React single-page app สมัยใหม่อย่างไร?',
+    options: [
+      'Create React App',
+      'Vite (หรือ framework อย่าง Next.js / React Router สำหรับ routing/SSR)',
+      'ไฟล์ HTML ธรรมดาอย่างเดียว',
+      'เขียน Webpack config เองตั้งแต่ต้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมต้องประกอบ toolchain รอบ React เอง?',
+    options: [
+      'React ห้ามใช้ library',
+      'React เป็น library ไม่ใช่ framework — routing, data, testing เป็นตัวเลือกแยกที่ลงตัวแล้ว',
+      'เพราะ React ไม่มี ecosystem',
+      'เพื่อให้ app ช้าลง',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="tooling-and-production/index" />

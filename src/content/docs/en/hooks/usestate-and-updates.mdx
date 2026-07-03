@@ -1,0 +1,140 @@
+---
+title: 'useState & Updates'
+description: 'How useState works — batching, updater functions, lazy initialization, and keeping object and array state immutable.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The basics, precisely
+
+`useState` returns a pair: the current value for this render, and a setter that schedules a re-render with a new value.
+
+```jsx
+const [count, setCount] = useState(0);
+// count  → the value for THIS render (a snapshot)
+// setCount(next) → schedule a re-render where count is `next`
+```
+
+Calling the setter does not change `count` immediately — it asks React to render again. In the next render, `useState(0)` returns the updated value. (The Foundations "state is a snapshot" lesson is the mental model; this lesson is the mechanics.)
+
+## Batching: multiple setStates, one render
+
+React **batches** state updates that happen in the same event. Several setter calls in one handler produce a single re-render, not one per call.
+
+```jsx
+function handleClick() {
+  setCount(c => c + 1);
+  setFlag(true);
+  setName("Ada");
+  // → ONE re-render, with all three updates applied. React batches them.
+}
+```
+
+Since React 18 this batching also covers updates inside promises, timeouts, and native event handlers — batching is automatic everywhere. Fewer renders, consistent UI.
+
+## Updater functions vs values
+
+Pass a **value** when the next state doesn't depend on the previous. Pass an **updater function** when it does — React applies updaters in order against the latest pending value.
+
+```jsx
+setCount(count + 1);      // value: uses the snapshot; three of these still add 1 total
+setCount(c => c + 1);     // updater: uses the pending value; three of these add 3
+```
+
+<Mermaid title="Updater functions apply against the evolving value" code={updaterDiagram} />
+
+export const updaterDiagram = `flowchart LR
+  start["pending = 0"] --> u1["c => c + 1\n→ 1"]
+  u1 --> u2["c => c + 1\n→ 2"]
+  u2 --> u3["c => c + 1\n→ 3"]
+  u3 --> done["next render: count = 3"]`;
+
+Rule of thumb: if you call the same setter more than once in a handler, or the new value is derived from the old, use the updater form.
+
+## Lazy initialization
+
+The argument to `useState` is only used on the **first** render, but React still evaluates it every render (then ignores it). If computing the initial value is expensive, pass a **function** — React calls it only once.
+
+```jsx
+// ❌ createInitialTodos() runs on EVERY render (result discarded after the first).
+const [todos, setTodos] = useState(createInitialTodos());
+
+// ✅ Lazy: the function runs only on the first render.
+const [todos, setTodos] = useState(() => createInitialTodos());
+```
+
+## State must stay immutable
+
+React decides whether to re-render by comparing the **reference**. Mutating an object or array in place keeps the same reference, so React may skip the update — and it corrupts the snapshot model. Always produce a new value.
+
+```jsx
+// ❌ Mutation — same reference, unreliable render.
+user.name = "Ada";
+setUser(user);
+
+// ✅ New object.
+setUser({ ...user, name: "Ada" });
+
+// ✅ New arrays for add / remove / update.
+setItems([...items, newItem]);                        // add
+setItems(items.filter(i => i.id !== id));             // remove
+setItems(items.map(i => i.id === id ? { ...i, done: true } : i)); // update
+```
+
+For deeply nested state, spreading gets tedious — that's a signal to flatten the shape, use an updater library like Immer, or reach for `useReducer` (a later lesson).
+
+<Callout title="The one-line takeaway">
+`useState` gives you a snapshot value plus a setter that **schedules a re-render**. React **batches** multiple updates in one event into a single render. Use an **updater function** (`setX(x => ...)`) when the next value depends on the previous; use **lazy init** (`useState(() => ...)`) for expensive initial values; and always update state **immutably** — new objects/arrays, never in-place mutation.
+</Callout>
+
+export const quizUseState = [
+  {
+    q: 'What does calling a useState setter do?',
+    options: [
+      'Changes the state variable immediately, in place',
+      'Schedules a re-render; the new value appears in the next render',
+      'Mutates the DOM directly',
+      'Nothing until you call it again',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you use the updater form `setX(x => ...)`?',
+    options: [
+      'Never — it is deprecated',
+      'When the next value depends on the previous one (or you call the setter multiple times in one handler)',
+      'Only inside useEffect',
+      'Only for strings',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why pass a function to useState (`useState(() => expensive())`)?',
+    options: [
+      'To make it async',
+      'So the expensive initializer runs only on the first render, not every render',
+      'It is required syntax',
+      'To avoid re-renders',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why must you update object/array state immutably?',
+    options: [
+      'Immutability is just a style preference',
+      'React compares by reference; mutating keeps the same reference so React may skip the re-render',
+      'Objects cannot be state',
+      'It makes state read-only forever',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/usestate-and-updates" questions={quizUseState} />
+
+<ProgressTracker client:visible id="hooks/usestate-and-updates" />

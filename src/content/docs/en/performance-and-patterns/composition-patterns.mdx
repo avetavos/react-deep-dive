@@ -1,0 +1,147 @@
+---
+title: 'Composition Patterns'
+description: 'The reusable-component patterns — composition with children, compound components, render props (and why hooks replaced them), and controlled vs uncontrolled.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Composition is the base pattern
+
+React's answer to reuse is not inheritance — it is **composition**. Instead of extending a component, you pass content and behavior *into* it. The simplest form is the `children` prop: a component accepts arbitrary JSX and decides where to place it.
+
+```jsx
+// A generic Card that doesn't know or care what's inside it.
+function Card({ title, children }) {
+  return (
+    <section className="card">
+      <h3>{title}</h3>
+      <div className="card-body">{children}</div>
+    </section>
+  );
+}
+
+<Card title="Profile">
+  <Avatar user={user} />
+  <p>{user.bio}</p>
+</Card>
+```
+
+You can pass JSX through *any* prop, not just `children` — `<Layout sidebar={<Nav />} main={<Feed />} />` is composition too. This is how you avoid deep prop-drilling and rigid inheritance trees.
+
+## Compound components
+
+When several components need to work together and **share state**, the *compound component* pattern exposes a family of pieces that coordinate through a shared (usually context-based) state — while the consumer arranges them freely.
+
+```jsx
+// The consumer composes the pieces; Tabs shares state via context internally.
+<Tabs defaultValue="a">
+  <TabList>
+    <Tab value="a">First</Tab>
+    <Tab value="b">Second</Tab>
+  </TabList>
+  <TabPanel value="a">Panel A</TabPanel>
+  <TabPanel value="b">Panel B</TabPanel>
+</Tabs>
+```
+
+Internally, `Tabs` provides the active value + a setter via context; `Tab` and `TabPanel` read it with `useContext`. The consumer gets a clean, declarative API and full control over layout, without threading props through every piece. This is how libraries like Radix and Headless UI structure their components.
+
+<Mermaid title="Compound components share state through context" code={compoundDiagram} />
+
+export const compoundDiagram = `flowchart TB
+  tabs["Tabs (provides value + setValue via context)"] --> list["TabList"]
+  list --> tab["Tab (reads context, calls setValue)"]
+  tabs --> panel["TabPanel (reads context, shows if active)"]`;
+
+## Render props, and why hooks replaced most of them
+
+A **render prop** is a prop whose value is a function that returns JSX — letting a component share *logic* while the caller controls *rendering*.
+
+```jsx
+// Render prop: MouseTracker owns the logic, the caller renders.
+<MouseTracker render={({ x, y }) => <p>Cursor at {x}, {y}</p>} />
+```
+
+Render props were the classic way to share stateful logic before hooks. Today, a **custom hook** does the same thing more directly — no wrapper component, no nesting:
+
+```jsx
+// The modern equivalent: a custom hook.
+function Component() {
+  const { x, y } = useMousePosition();   // logic shared via a hook
+  return <p>Cursor at {x}, {y}</p>;      // caller renders normally
+}
+```
+
+You will still *see* render props (some libraries use them, and `children`-as-a-function is one), but for sharing your own logic, reach for a custom hook first.
+
+## Controlled vs uncontrolled
+
+A form input is **controlled** when React state is its single source of truth (`value` + `onChange`), and **uncontrolled** when the DOM holds the value and you read it via a ref (or, in React 19, from the form's `FormData` on submit).
+
+```jsx
+// Controlled: state drives the input; you can validate/transform on every keystroke.
+const [name, setName] = useState("");
+<input value={name} onChange={(e) => setName(e.target.value)} />
+
+// Uncontrolled: the DOM owns the value; read it when you need it.
+const ref = useRef(null);
+<input defaultValue="Ada" ref={ref} />   // ref.current.value on submit
+```
+
+Use **controlled** when you need to react to or constrain input as it changes; **uncontrolled** for simple forms where you only care about the final value (less state, less re-rendering).
+
+<Callout title="The one-line takeaway">
+React reuses through **composition**, not inheritance: pass JSX via `children` or any prop. **Compound components** let a family of pieces share state through context while the consumer arranges them freely. **Render props** share logic but have mostly been replaced by **custom hooks**. And inputs are **controlled** (state is the source of truth) or **uncontrolled** (the DOM is) — pick controlled when you must react to changes, uncontrolled for simple final-value forms.
+</Callout>
+
+export const quizComposition = [
+  {
+    q: 'What is React\'s primary mechanism for reuse?',
+    options: [
+      'Class inheritance',
+      'Composition — passing content and behavior into components (e.g. via children)',
+      'Global mixins',
+      'Copy-pasting components',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do compound components (like `<Tabs><Tab/></Tabs>`) usually share state?',
+    options: [
+      'Global variables',
+      'Through a shared context provided by the parent, read by the pieces with useContext',
+      'By prop-drilling through every level',
+      'They cannot share state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What modern feature replaced most render-prop usage for sharing logic?',
+    options: [
+      'Higher-order components',
+      'Custom hooks',
+      'Context only',
+      'Class components',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is a controlled input the right choice?',
+    options: [
+      'When you only need the final value on submit',
+      'When you need to react to or constrain the input on every change (validation, formatting)',
+      'Never — uncontrolled is always better',
+      'Only for checkboxes',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/composition-patterns" questions={quizComposition} />
+
+<ProgressTracker client:visible id="performance-and-patterns/composition-patterns" />

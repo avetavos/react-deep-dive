@@ -1,0 +1,83 @@
+---
+title: 'Foundations & Mental Model'
+description: 'The one idea React is built on — UI as a function of state — plus JSX, reconciliation, and why render must be pure. The lens for everything that follows.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The idea in one sentence
+
+**React renders your UI as a function of state: `UI = f(state)`.** You don't manually update the DOM when data changes — you describe what the UI *should look like* for the current state, and React figures out the minimal DOM changes to get there.
+
+Every advanced topic — hooks, reconciliation, Suspense, the compiler — is a consequence of taking that one equation seriously. Get the model right and the rest follows.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Why React & the model | Declarative vs imperative, and `UI = f(state)` |
+| JSX & elements | What JSX compiles to, and what an element really is |
+| Rendering & reconciliation | The render/commit phases, the virtual tree, and keys |
+| State snapshot & purity | State as a snapshot, immutability, and why render is pure |
+
+## The lens for the whole course
+
+Two ideas explain almost everything React does:
+
+<Mermaid title="The two ideas everything builds on" code={lensDiagram} />
+
+export const lensDiagram = `flowchart TB
+  f["UI = f(state)\n(you describe, React updates)"] --> render["Re-render on state change\n(compute the new tree)"]
+  pure["Render is pure\n(no side effects, same input same output)"] --> render
+  render --> recon["Reconciliation\n(diff old vs new, patch the DOM)"]`;
+
+- Because **UI is a function of state**, a change to state triggers a *re-render* — React re-runs your component to compute what the UI should now be.
+- Because **render is pure**, React is free to call it whenever, batch it, restart it, or run it twice (StrictMode) — which is exactly what makes concurrent features possible.
+
+Hold those two and React stops surprising you.
+
+<Callout title="The mental shift">
+Coming from jQuery-style code you think in **mutations**: "when the user clicks, find the element and change it." React asks you to think in **snapshots**: "for this state, the UI looks like this." You never touch the DOM; you change state and re-describe the UI. That inversion — from *how to update* to *what it should be* — is the entire point.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the core equation React is built on?',
+    options: [
+      'DOM = f(HTML)',
+      'UI = f(state) — the UI is a function of the current state',
+      'state = f(DOM)',
+      'render = f(effects)',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In React, how do you update what the user sees?',
+    options: [
+      'Find the DOM node and mutate it directly',
+      'Change state and let React re-render and patch the DOM',
+      'Call document.write',
+      'Manually diff the virtual DOM yourself',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does React require render to be pure?',
+    options: [
+      'To make the code shorter',
+      'So React can call it freely — batch, restart, or double-invoke it — which enables concurrent features',
+      'Because JavaScript requires it',
+      'To avoid using hooks',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="foundations/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="foundations/index" />

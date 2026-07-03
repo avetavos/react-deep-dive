@@ -1,0 +1,124 @@
+---
+title: 'Memoization in Practice'
+description: 'useMemo, useCallback และ React.memo — แต่ละตัว cache อะไร, pitfall เรื่อง referential equality ที่ทำให้พัง และทำไม React Compiler ทำให้ส่วนใหญ่ไม่จำเป็นอีกต่อไป'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## สามเครื่องมือ สามหน้าที่
+
+memoization คือการ cache ผลลัพธ์ระหว่าง render เพื่อให้ React ข้ามการคำนวณหรือ re-render ได้ มีสามเครื่องมือ และแต่ละตัวทำหน้าที่ต่างกัน:
+
+- **`useMemo(fn, deps)`** — cache *ค่าที่ return* ของการคำนวณที่หนัก คำนวณใหม่เฉพาะเมื่อ dependency เปลี่ยน
+- **`useCallback(fn, deps)`** — cache *identity ของ function* คืน reference เดิมข้าม render จนกว่า dependency จะเปลี่ยน
+- **`React.memo(Component)`** — ห่อ *component* ให้ข้าม re-render เมื่อ props shallow-equal
+
+```jsx
+// useMemo: ข้ามการ sort list ใหญ่ใหม่ ยกเว้น list หรือ order เปลี่ยน
+const sorted = useMemo(() => items.slice().sort(compare), [items]);
+
+// useCallback: คง onSelect ให้เสถียร เพื่อไม่ให้ memoized child re-render
+const onSelect = useCallback((id) => setSelected(id), []);
+
+// React.memo: ข้าม re-render เมื่อ props ไม่เปลี่ยน
+const Row = React.memo(function Row({ item, onSelect }) { /* ... */ });
+```
+
+## ทำไม `useCallback` กับ `React.memo` เป็นคู่กัน
+
+`React.memo` เทียบ props ด้วย **shallow equality** (`===` ต่อ prop) primitive เทียบด้วยค่า แต่ object, array และ function เทียบด้วย **reference** — และ component สร้างตัวใหม่เอี่ยมทุก render
+
+<Mermaid title="reference ใหม่ทำลาย React.memo" code={refDiagram} />
+
+export const refDiagram = `flowchart TB
+  parent["Parent re-render"] --> inline["สร้าง onClick ใหม่, object style ใหม่"]
+  inline --> memo["React.memo(Child) เทียบ props"]
+  memo --> fail["reference ใหม่ != reference เก่า\n→ shallow-equal fail → Child re-render อยู่ดี"]`;
+
+```jsx
+// ❌ function และ object ใหม่ทุก render — React.memo(Child) ข้ามไม่ได้เลย
+<Child onClick={() => doThing()} style={{ color: "red" }} />
+
+// ✅ reference เสถียร — ตอนนี้ React.memo(Child) ข้ามได้จริง
+const onClick = useCallback(() => doThing(), []);
+const style = useMemo(() => ({ color: "red" }), []);
+<Child onClick={onClick} style={style} />
+```
+
+นี่คือหัวใจ: `React.memo` คุ้มก็ต่อเมื่อ *ทุก* prop เสถียรเชิง reference ซึ่งมักหมายถึงต้อง memoize props ที่เป็น object/array/function ด้วย `useMemo`/`useCallback` พลาด prop เดียว memo ก็ไม่ทำอะไรเลย
+
+## React Compiler เปลี่ยนสมการ
+
+การคง reference ให้เสถียรด้วยมือน่าเบื่อและพลาดง่าย **React Compiler** (ตัว optimize ตอน build ของ React) วิเคราะห์ component ของคุณและ memoize ค่ากับ component ให้อัตโนมัติในจุดที่ปลอดภัย — เหมือนใส่ `useMemo`/`useCallback`/`memo` ให้ทั่วโดยที่คุณไม่ต้องเขียน
+
+พอเปิด compiler บน codebase แล้ว แนวทางจะพลิก:
+
+- **อย่า** เขียน `useMemo`/`useCallback` เองโดย default — compiler จัดการ common case ให้
+- **จง** เขียน component ให้ pure และทำตาม Rules of Hooks — นั่นคือสิ่งที่ให้ compiler optimize ได้อย่างปลอดภัย
+- **สงวน** manual memoization ไว้สำหรับกรณีหายากที่ compiler จัดการไม่ได้ หรือ profiler ยังชี้อยู่
+
+## เมื่อ manual memoization ช่วยได้จริง (วันนี้)
+
+จนกว่า compiler จะแพร่หลาย hand-memoization ยังคุ้มสำหรับบางกรณีเฉพาะ:
+
+- การคำนวณที่ **หนักจริง** (sort/filter หลายพัน item, คณิตหนัก ๆ) → `useMemo`
+- ค่า/function ที่ส่งให้ **memoized child** หรือเป็น **effect dependency** ซึ่ง reference ใหม่จะทำให้เกิด render หรือ effect รันเกิน → `useCallback`/`useMemo`
+- **subtree ขนาดใหญ่ที่ถูกข้ามบ่อย** → `React.memo`
+
+นอกเหนือจากนั้น memoize มักมีต้นทุน (memory + การเทียบ + ความรก) มากกว่าที่ประหยัด วัดผล
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`useMemo` cache ค่า, `useCallback` cache identity ของ function และ `React.memo` ข้าม re-render เมื่อ props shallow-equal — สองตัวหลังเป็น **คู่กัน** เพราะ object/array/function แบบ inline ใหม่ทำลาย `React.memo` แต่ **React Compiler** ตอนนี้ auto-memoize ให้แล้ว ดังนั้น default สมัยใหม่คือเขียน component ให้ clean และ pure แล้วสงวน manual memoization ไว้สำหรับไม่กี่กรณีที่ profiler ยังชี้
+</Callout>
+
+export const quizMemo = [
+  {
+    q: '`useCallback` cache อะไร?',
+    options: [
+      'ค่าที่ return ของการคำนวณ',
+      'identity ของ function (reference เดิมข้าม render) จนกว่า dependency จะเปลี่ยน',
+      'output ที่ render ของ component',
+      'DOM node',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการส่ง `style={{ color: "red" }}` แบบ inline ให้ `React.memo` child ถึงทำลาย memo?',
+    options: [
+      'inline style ใช้ไม่ได้',
+      'object ใหม่ถูกสร้างทุก render ดังนั้น shallow comparison (reference) fail และ child re-render อยู่ดี',
+      'React.memo ไม่สนใจ prop style',
+      'ไม่ทำลาย — memo ยังข้ามได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อเปิด React Compiler แล้ว default ที่แนะนำคืออะไร?',
+    options: [
+      'ห่อทุกอย่างด้วย useMemo และ useCallback เอง',
+      'เขียน component ให้ clean และ pure แล้วปล่อยให้ compiler auto-memoize; สงวน manual memoization ไว้สำหรับ edge case',
+      'เลิกใช้ hook',
+      'ปิด memoization ทั้งหมด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อไหนคือการใช้ `useMemo` ที่ดีจริงในวันนี้?',
+    options: [
+      'memoize การต่อ string ง่าย ๆ',
+      'cache การคำนวณที่หนักอย่างการ sort item หลายพันตัว',
+      'ห่อทุกค่าที่ render',
+      'ใช้แทน state',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="performance-and-patterns/memoization-in-practice" questions={quizMemo} />
+
+<ProgressTracker client:visible id="performance-and-patterns/memoization-in-practice" />

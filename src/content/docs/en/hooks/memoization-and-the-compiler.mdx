@@ -1,0 +1,116 @@
+---
+title: 'Memoization & the Compiler'
+description: 'useMemo, useCallback, and React.memo — what they cache and when they help — and how the React Compiler auto-memoizes so you rarely need them by hand.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The problem memoization solves
+
+Every render re-runs your component, which re-creates every value inside it — including objects, arrays, and functions. Those are **new references each time**, even if their contents are identical. Usually that's fine. It becomes a problem in two cases:
+
+1. An **expensive calculation** runs on every render when its inputs didn't change.
+2. A **new reference** (a function or object) passed to a memoized child breaks that child's memoization, causing needless re-renders.
+
+The three memoization tools each address a piece of this:
+
+| Tool | Caches | Use when |
+|------|--------|----------|
+| `useMemo(fn, deps)` | a **value** (the result of `fn`) | a calculation is expensive, or you need a stable object/array reference |
+| `useCallback(fn, deps)` | a **function** (a stable reference) | you pass a callback to a memoized child (it's `useMemo` for functions) |
+| `React.memo(Component)` | a **component's render** | a component re-renders with the same props and rendering it is costly |
+
+```jsx
+// Expensive calc, cached until inputs change:
+const visibleTodos = useMemo(() => getFilteredTodos(todos, filter), [todos, filter]);
+
+// Stable function reference so a memoized child does not re-render:
+const handleSelect = useCallback((id) => setSelected(id), []);
+
+// Skip re-render when props are shallowly equal:
+const Row = React.memo(function Row({ item }) { /* ... */ });
+```
+
+## When memoization helps — and when it hurts
+
+Memoization is not free: it costs memory and a comparison on every render. Applied everywhere "just in case," it makes code noisier and can be a net negative. It genuinely helps when:
+
+- the cached calculation is measurably expensive, **or**
+- you need a stable reference to keep a `React.memo` child (or an effect dependency) from re-running.
+
+For cheap values — a string concat, a small `.filter` — computing during render is fine and clearer. Don't reach for `useMemo` reflexively.
+
+<Mermaid title="Referential equality is why callbacks break memoized children" code={refDiagram} />
+
+export const refDiagram = `flowchart TB
+  render["parent re-renders"] --> newfn["new function reference\ncreated each render"]
+  newfn --> child["memoized child sees\na 'changed' prop"]
+  child --> rerender["child re-renders needlessly"]
+  fix["useCallback → stable reference"] --> skip["memoized child skips re-render"]`;
+
+## The React Compiler changes the calculus
+
+React ships a **compiler** that automatically memoizes your components and values at build time — it inserts the equivalent of `useMemo`/`useCallback`/`memo` for you, precisely where they help, by analyzing your code. Its whole point is that **you should not need to memoize by hand**.
+
+The practical guidance for React 19+ projects:
+
+- **With the compiler enabled:** write plain, straightforward code. Don't scatter `useMemo`/`useCallback` — the compiler handles memoization for you, more correctly and more granularly than most hand-tuning. Your job is to keep components pure (the compiler relies on the Rules of Hooks and purity to be safe).
+- **Without the compiler:** the manual tools above still apply — reach for them only at real, measured bottlenecks.
+
+The direction of travel is clear: manual memoization is becoming an optimization of last resort rather than a default habit. Keep your components pure and let the compiler do the bookkeeping.
+
+<Callout title="The one-line takeaway">
+`useMemo` caches a **value**, `useCallback` caches a **function reference**, and `React.memo` skips a **child's re-render** when props are unchanged — all to fight needless work caused by new references each render. Use them only at real bottlenecks, not reflexively. And with the **React Compiler**, you mostly stop hand-memoizing at all: it auto-inserts memoization where it helps, so your job becomes keeping components pure and writing plain code.
+</Callout>
+
+export const quizMemo = [
+  {
+    q: 'What does useCallback do?',
+    options: [
+      'Caches the result of an expensive calculation',
+      'Returns a stable function reference across renders (useMemo for functions)',
+      'Prevents a component from ever rendering',
+      'Runs a side effect',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why can passing an inline function to a React.memo child defeat the memoization?',
+    options: [
+      'Inline functions are slow',
+      'A new function reference is created each render, so the memoized child sees a changed prop and re-renders',
+      'memo does not accept functions',
+      'It throws an error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the guidance when the React Compiler is enabled?',
+    options: [
+      'Add useMemo and useCallback everywhere to help it',
+      'Write plain, pure code and let the compiler auto-memoize — manual memoization is rarely needed',
+      'Stop using hooks',
+      'Disable StrictMode',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is manual memoization genuinely worth it (without the compiler)?',
+    options: [
+      'On every value, always',
+      'At real, measured bottlenecks — an expensive calc, or a stable reference a memoized child/effect needs',
+      'Only for strings',
+      'Never',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="hooks/memoization-and-the-compiler" questions={quizMemo} />
+
+<ProgressTracker client:visible id="hooks/memoization-and-the-compiler" />
