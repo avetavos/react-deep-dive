@@ -14,7 +14,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ลองนึกถึง search box ที่ filter list ยักษ์ ทุก keystroke อัปเดตสองอย่าง: ค่าใน input (ต้องรู้สึกทันที) และผลลัพธ์ที่ filter แล้ว (คำนวณแพง) ถ้าทั้งคู่ urgent การ filter ที่แพงจะ block keystroke และพิมพ์จะสะดุด
 
-Transitions ให้คุณแยกมันออก: keystroke ยัง urgent ส่วนการ filter กลายเป็น *transition* priority ต่ำที่ React interrupt ได้เมื่อ keystroke ถัดไปมา
+Transitions ให้คุณแยกสองอย่างนี้ออก: keystroke ยัง urgent ส่วนการ filter กลายเป็น *transition* priority ต่ำที่ React interrupt ได้เมื่อ keystroke ถัดไปมา
 
 ## useTransition: mark update เป็น non-urgent
 
@@ -55,7 +55,7 @@ export const transDiagram = `flowchart LR
 
 ## useDeferredValue: defer ที่ค่า แทนที่จะ defer ที่ update
 
-`useDeferredValue` คือแนวคิดเดียวกันจากอีกด้าน แทนที่จะครอบ *update* คุณครอบ *ค่า* ที่คุณอ่าน: มันคืนค่าเวอร์ชันที่ "ตามหลัง" ระหว่างงาน urgent ดังนั้นส่วนที่แพงจะ re-render จากค่า deferred (ที่เก่าไปนิดชั่วขณะ)
+`useDeferredValue` คือแนวคิดเดียวกันจากอีกด้าน แทนที่จะครอบ *update* คุณครอบ *ค่า* ที่คุณอ่าน: hook คืนค่าเวอร์ชันที่ "ตามหลัง" ระหว่างงาน urgent ดังนั้นส่วนที่แพงจะ re-render จากค่า deferred (ที่เก่าไปนิดชั่วขณะ)
 
 ```jsx
 function SearchResults({ allItems, query }) {
@@ -71,13 +71,13 @@ function SearchResults({ allItems, query }) {
 
 ## อันไหนดี?
 
-- ใช้ **`useTransition`** เมื่อ *คุณเป็นเจ้าของ state update* และครอบมันใน `startTransition` ได้ — คุณมี setter อยู่ตรงจุดที่เรียก
-- ใช้ **`useDeferredValue`** เมื่อค่ามาจาก *นอกการควบคุมของคุณ* (เป็น prop หรือ state ที่ครอบไม่ได้) — คุณ defer การอ่านมันแทน
+- ใช้ **`useTransition`** เมื่อ *คุณเป็นเจ้าของ state update* และครอบ update นั้นใน `startTransition` ได้ — คุณมี setter อยู่ตรงจุดที่เรียก
+- ใช้ **`useDeferredValue`** เมื่อค่ามาจาก *นอกการควบคุมของคุณ* (เป็น prop หรือ state ที่ครอบไม่ได้) — คุณ defer การอ่านค่านั้นแทน
 
-ทั้งคู่ทำให้ input urgent ยัง responsive โดยปล่อยให้การ re-render ที่แพงเกิดเป็นงานเบื้องหลังที่ interrupt ได้ ทั้งคู่ *ไม่ได้* ทำให้งานที่แพงเร็วขึ้น — มันเปลี่ยน *priority* ไม่ใช่ *cost* (สำหรับ list ที่ใหญ่จริง ๆ คุณยังต้องใช้ virtualization)
+ทั้งคู่ทำให้ input urgent ยัง responsive โดยปล่อยให้การ re-render ที่แพงเกิดเป็นงานเบื้องหลังที่ interrupt ได้ ทั้งคู่ *ไม่ได้* ทำให้งานที่แพงเร็วขึ้น — เปลี่ยนแค่ *priority* ไม่ใช่ *cost* (สำหรับ list ที่ใหญ่จริง ๆ คุณยังต้องใช้ virtualization)
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Transitions ทำให้ UI responsive โดย mark update ที่หนักเป็น **non-urgent** เพื่อให้ keystroke แทรกได้ ใช้ **`useTransition`** (`[isPending, startTransition]`) เมื่อคุณควบคุม state update และครอบมันได้; ใช้ **`useDeferredValue`** เมื่อคุณมีแค่ค่า (เป็น prop) และอยาก defer การอ่านมัน ทั้งคู่เปลี่ยน *priority* ไม่ใช่ *cost* — มันไม่ได้ทำให้งานช้ากลายเป็นเร็ว
+Transitions ทำให้ UI responsive โดย mark update ที่หนักเป็น **non-urgent** เพื่อให้ keystroke แทรกได้ ใช้ **`useTransition`** (`[isPending, startTransition]`) เมื่อคุณควบคุม state update และครอบ update นั้นได้; ใช้ **`useDeferredValue`** เมื่อคุณมีแค่ค่า (เป็น prop) และอยาก defer การอ่านค่านั้น ทั้งคู่เปลี่ยน *priority* ไม่ใช่ *cost* — ไม่ได้ทำให้งานช้ากลายเป็นเร็ว
 </Callout>
 
 export const quizTrans = [
@@ -85,9 +85,9 @@ export const quizTrans = [
     q: 'การครอบ state update ไว้ใน `startTransition` ทำอะไร?',
     options: [
       'ทำให้รันบน Web Worker',
-      'mark ว่า non-urgent ดังนั้น React render มันเป็นงานเบื้องหลังที่ interrupt ได้ และ keystroke แทรกได้',
+      'mark ว่า non-urgent ดังนั้น React render เป็นงานเบื้องหลังที่ interrupt ได้ และ keystroke แทรกได้',
       'หน่วง 300ms',
-      'ยกเลิกมัน',
+      'ยกเลิก update นั้น',
     ],
     answer: 1,
   },
@@ -114,9 +114,9 @@ export const quizTrans = [
   {
     q: 'transition ทำให้งานที่แพงเร็วขึ้นไหม?',
     options: [
-      'ใช่ มัน optimize การคำนวณ',
-      'ไม่ — มันเปลี่ยน priority ของ update (interrupt ได้, non-blocking) ไม่ใช่ cost',
-      'ใช่ มัน cache ผลลัพธ์',
+      'ใช่ ช่วย optimize การคำนวณ',
+      'ไม่ — เปลี่ยนแค่ priority ของ update (interrupt ได้, non-blocking) ไม่ใช่ cost',
+      'ใช่ ช่วย cache ผลลัพธ์',
       'เฉพาะตอน production',
     ],
     answer: 1,

@@ -82,7 +82,7 @@ function useTasks() { return useContext(TasksContext); }
 function useTasksDispatch() { return useContext(TasksDispatchContext); }
 ```
 
-การ split state กับ dispatch เป็นสอง context ทำให้ component ที่ *dispatch* อย่างเดียว (ไม่เคยอ่าน list) ไม่ re-render เมื่อ list เปลี่ยน — `dispatch` มัน stable ตลอดอายุของ component pattern นี้ครอบคลุมเคส "ฉันต้องใช้ Redux" ได้มากอย่างน่าประหลาดโดยไม่ต้องใช้ library ใด ๆ
+การ split state กับ dispatch เป็นสอง context ทำให้ component ที่ *dispatch* อย่างเดียว (ไม่เคยอ่าน list) ไม่ re-render เมื่อ list เปลี่ยน — `dispatch` stable ตลอดอายุของ component pattern นี้ครอบคลุมเคส "ฉันต้องใช้ Redux" ได้มากอย่างน่าประหลาดโดยไม่ต้องใช้ library ใด ๆ
 
 <Callout title="สรุปหนึ่งบรรทัด">
 `useReducer` ย้าย state ที่ซับซ้อนและเปลี่ยนพร้อมกันเข้าไปใน **pure reducer** เดียว `(state, action) => nextState` คุณ `dispatch` action ที่อธิบาย *สิ่งที่เกิดขึ้น* แทนการคำนวณ next state ที่จุดเรียก — ซึ่งรวมศูนย์ตรรกะและทำให้ unit-test ได้ จับคู่กับ Context (state ใน provider หนึ่ง, `dispatch` ในอีกอัน) เพื่อได้ **app-wide state โดยไม่ต้องใช้ library** — และ context ของ `dispatch` ที่ stable ทำให้ component ที่ dispatch อย่างเดียวไม่ re-render
@@ -123,7 +123,7 @@ export const quizReducer = [
     q: 'reducer ต้อง NOT ทำอะไร?',
     options: [
       'คืน state object ใหม่',
-      'mutate argument ของมันหรือทำ side effect — มันต้อง pure',
+      'mutate argument ของตัวเองหรือทำ side effect — reducer ต้อง pure',
       'ใช้ switch statement',
       'จัดการหลาย action type',
     ],

@@ -29,7 +29,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 สองแนวคิดอธิบายเกือบทุกอย่างที่ React ทำ:
 
-<Mermaid title="สองแนวคิดที่ทุกอย่างสร้างขึ้นบนมัน" code={lensDiagram} />
+<Mermaid title="สองแนวคิดที่เป็นรากฐานของทุกอย่าง" code={lensDiagram} />
 
 export const lensDiagram = `flowchart TB
   f["UI = f(state)\n(you describe, React updates)"] --> render["Re-render on state change\n(compute the new tree)"]
@@ -37,12 +37,12 @@ export const lensDiagram = `flowchart TB
   render --> recon["Reconciliation\n(diff old vs new, patch the DOM)"]`;
 
 - เพราะ **UI เป็นฟังก์ชันของ state** การเปลี่ยน state จึง trigger การ *re-render* — React รัน component ของคุณใหม่เพื่อคำนวณว่า UI ตอนนี้ควรเป็นอะไร
-- เพราะ **render เป็น pure** React จึงเรียกมันเมื่อไรก็ได้ batch มันได้ restart มันได้ หรือรันซ้ำสองครั้ง (StrictMode) — ซึ่งเป็นสิ่งที่ทำให้ concurrent features เกิดขึ้นได้
+- เพราะ **render เป็น pure** React จึงเรียก component ของคุณเมื่อไรก็ได้ batch ได้ restart ได้ หรือรันซ้ำสองครั้ง (StrictMode) — นั่นคือสิ่งที่ทำให้ concurrent features เกิดขึ้นได้
 
 จับสองอย่างนี้ไว้ แล้ว React จะเลิกทำให้คุณประหลาดใจ
 
 <Callout title="การเปลี่ยนมุมมอง">
-ถ้ามาจาก code สไตล์ jQuery คุณจะคิดเป็น **mutation**: "พอ user คลิก ก็ไปหา element แล้วเปลี่ยนมัน" React ขอให้คุณคิดเป็น **snapshot** แทน: "สำหรับ state นี้ UI หน้าตาแบบนี้" คุณไม่แตะ DOM เลย คุณแค่เปลี่ยน state แล้วอธิบาย UI ใหม่ การพลิกมุมนี้ — จาก *จะ update อย่างไร* ไปเป็น *มันควรเป็นอะไร* — คือหัวใจทั้งหมด
+ถ้ามาจาก code สไตล์ jQuery คุณจะคิดเป็น **mutation**: "พอ user คลิก ก็ไปหา element แล้วแก้ element นั้น" React ขอให้คุณคิดเป็น **snapshot** แทน: "สำหรับ state นี้ UI หน้าตาแบบนี้" คุณไม่แตะ DOM เลย คุณแค่เปลี่ยน state แล้วอธิบาย UI ใหม่ การพลิกมุมนี้ — จาก *จะ update อย่างไร* ไปเป็น *UI ควรเป็นอะไร* — คือหัวใจทั้งหมด
 </Callout>
 
 export const quizIndex = [
@@ -59,7 +59,7 @@ export const quizIndex = [
   {
     q: 'ใน React คุณ update สิ่งที่ user เห็นอย่างไร?',
     options: [
-      'หา DOM node แล้ว mutate มันโดยตรง',
+      'หา DOM node แล้ว mutate โดยตรง',
       'เปลี่ยน state แล้วให้ React re-render และ patch DOM',
       'เรียก document.write',
       'diff virtual DOM ด้วยตัวเอง',
@@ -70,7 +70,7 @@ export const quizIndex = [
     q: 'ทำไม React ถึงต้องการให้ render เป็น pure?',
     options: [
       'เพื่อให้ code สั้นลง',
-      'เพื่อให้ React เรียกมันได้อย่างอิสระ — batch, restart หรือเรียกซ้ำสองครั้ง — ซึ่งทำให้ concurrent features เป็นไปได้',
+      'เพื่อให้ React เรียก component ได้อย่างอิสระ — batch, restart หรือเรียกซ้ำสองครั้ง — ซึ่งทำให้ concurrent features เป็นไปได้',
       'เพราะ JavaScript บังคับ',
       'เพื่อเลี่ยงการใช้ hooks',
     ],

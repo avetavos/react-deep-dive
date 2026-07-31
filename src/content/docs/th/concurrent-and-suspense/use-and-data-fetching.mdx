@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## `use()` API ของ React 19
 
-`use()` เป็น API ของ React 19 ที่ **อ่านค่าของ resource** ระหว่าง render — ที่สำคัญที่สุดคือ **promise** หรือ **context** เมื่อคุณส่ง promise เข้าไป component จะ **suspend** ระหว่างที่ promise ยัง pending (แสดง Suspense fallback ที่ใกล้ที่สุด) และคืนค่าที่ resolve แล้วเมื่อมัน settle
+`use()` เป็น API ของ React 19 ที่ **อ่านค่าของ resource** ระหว่าง render — ที่สำคัญที่สุดคือ **promise** หรือ **context** เมื่อคุณส่ง promise เข้าไป component จะ **suspend** ระหว่างที่ promise ยัง pending (แสดง Suspense fallback ที่ใกล้ที่สุด) และคืนค่าที่ resolve แล้วเมื่อ promise settle
 
 ```jsx
 import { use, Suspense } from "react";
@@ -31,11 +31,11 @@ function Container({ messagePromise }) {
 }
 ```
 
-`use()` แหกกฎข้อหนึ่งที่คุณเรียนกับ hook อื่น: มัน **เรียกแบบมีเงื่อนไขได้** — ใน `if` หรือใน loop ที่เป็นแบบนั้นได้เพราะมันไม่ได้ผูกกับ hook slot ตายตัวแบบ `useState`/`useEffect`
+`use()` แหกกฎข้อหนึ่งที่คุณเรียนกับ hook อื่น: คุณ **เรียกแบบมีเงื่อนไขได้** — ใน `if` หรือใน loop ที่เป็นแบบนั้นได้เพราะไม่ได้ผูกกับ hook slot ตายตัวแบบ `useState`/`useEffect`
 
 ## กฎสำคัญ: cache promise ไว้
 
-`use()` *ไม่* เริ่ม fetch และไม่ cache อะไรเลย มันอ่าน promise ที่คุณให้ — ดังนั้น promise นั้น **ต้องเสถียรข้าม render** การสร้าง promise ใน body ของ component หมายถึง promise ใหม่ทุก render ซึ่งจะ suspend ตลอดกาล (หรือ refetch ไม่หยุด)
+`use()` *ไม่* เริ่ม fetch และไม่ cache อะไรเลย แค่อ่าน promise ที่คุณให้ — ดังนั้น promise นั้น **ต้องเสถียรข้าม render** การสร้าง promise ใน body ของ component หมายถึง promise ใหม่ทุก render ซึ่งจะ suspend ตลอดกาล (หรือ refetch ไม่หยุด)
 
 ```jsx
 // ❌ promise ใหม่ทุก render — refetch / ไม่ settle
@@ -55,7 +55,7 @@ function Good({ dataPromise }) {
 
 ## Render-as-you-fetch
 
-pattern ที่ `use()` เปิดทางให้คือ **render-as-you-fetch**: เริ่ม request *ก่อนหรือขณะ* ที่คุณ render (เช่นใน route loader หรือตอน hover) ส่ง promise ลงไป แล้วปล่อยให้ component อ่านมันผ่าน `use()` ใน Suspense boundary เทียบสามแนวทาง:
+pattern ที่ `use()` เปิดทางให้คือ **render-as-you-fetch**: เริ่ม request *ก่อนหรือขณะ* ที่คุณ render (เช่นใน route loader หรือตอน hover) ส่ง promise ลงไป แล้วปล่อยให้ component อ่าน promise นั้นผ่าน `use()` ใน Suspense boundary เทียบสามแนวทาง:
 
 <Mermaid title="fetch-on-render vs render-as-you-fetch" code={fetchDiagram} />
 
@@ -75,7 +75,7 @@ export const fetchDiagram = `flowchart TB
 นี่คือส่วนที่ต้องซื่อสัตย์ `use()` ดิบ ๆ + Suspense + promise cache ที่เขียนเองนั้นทรงพลังแต่ระดับต่ำ ในแอปจริงคุณเกือบทุกครั้งจะได้ render-as-you-fetch ผ่าน **framework** (router/loader ที่ fetch ต่อ route และให้ cache) หรือ **data library** อย่าง TanStack Query (ที่จัดการ caching, revalidation และ Suspense integration ให้) เรียน `use()` เพื่อเข้าใจกลไก; ใช้ library เพื่อ ship จริง
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`use()` (React 19) อ่าน resource ระหว่าง render — ส่ง **promise** เข้าไปแล้ว component จะ **suspend** จนกว่ามัน resolve (จับคู่กับ Suspense สำหรับ loading และ error boundary สำหรับ rejection); มันอ่าน context ได้ด้วย และต่างจาก hook อื่นตรงที่เรียกแบบ **มีเงื่อนไข** ได้ ข้อควรระวัง: `use()` ไม่ fetch และไม่ cache — promise ต้อง **เสถียรข้าม render** ซึ่งเป็นเหตุผลที่ใช้ framework หรือ data library (TanStack Query) จัดการ cache ในทางปฏิบัติ
+`use()` (React 19) อ่าน resource ระหว่าง render — ส่ง **promise** เข้าไปแล้ว component จะ **suspend** จนกว่า resolve (จับคู่กับ Suspense สำหรับ loading และ error boundary สำหรับ rejection); `use()` อ่าน context ได้ด้วย และต่างจาก hook อื่นตรงที่เรียกแบบ **มีเงื่อนไข** ได้ ข้อควรระวัง: `use()` ไม่ fetch และไม่ cache — promise ต้อง **เสถียรข้าม render** นั่นคือเหตุผลที่ใช้ framework หรือ data library (TanStack Query) จัดการ cache ในทางปฏิบัติ
 </Callout>
 
 export const quizUse = [
@@ -84,18 +84,18 @@ export const quizUse = [
     options: [
       'คืน null ทันที',
       'component suspend จนกว่า promise จะ resolve (แสดง Suspense fallback ที่ใกล้ที่สุด) แล้วคืนค่าที่ resolve แล้ว',
-      'มัน throw error',
-      'มัน block main thread',
+      'throw error',
+      'block main thread',
     ],
     answer: 1,
   },
   {
     q: '`use()` ต่างจาก hook อย่าง `useState` อย่างไร?',
     options: [
-      'มันอ่านค่าไม่ได้',
-      'มันเรียกแบบมีเงื่อนไขได้ (ใน if หรือ loop)',
-      'มันรันบน server เท่านั้น',
-      'มันไม่ต้องใช้ React',
+      'อ่านค่าไม่ได้',
+      'เรียกแบบมีเงื่อนไขได้ (ใน if หรือ loop)',
+      'รันบน server เท่านั้น',
+      'ไม่ต้องใช้ React',
     ],
     answer: 1,
   },
@@ -105,7 +105,7 @@ export const quizUse = [
       'เพื่อ TypeScript',
       'เพราะ promise ใหม่ทุก render จะ suspend ตลอดกาลหรือ refetch ไม่หยุด — use() อ่าน promise ไม่ได้ cache ให้',
       'เพื่อลด bundle size',
-      'มันไม่ต้องเสถียร',
+      'ไม่ต้องเสถียร',
     ],
     answer: 1,
   },

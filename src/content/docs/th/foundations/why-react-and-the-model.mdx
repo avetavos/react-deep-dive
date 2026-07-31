@@ -24,7 +24,7 @@ document.querySelector("#inc").addEventListener("click", () => {
 });
 ```
 
-จุดที่เกิด bug คือส่วน *"ต้องจำว่าต้อง update"* — ทุกที่ที่เปลี่ยน `count` ก็ต้อง update ทุกจุดของ UI ที่ขึ้นกับมันด้วย พลาดจุดเดียวหน้าจอก็โกหกทันที
+จุดที่เกิด bug คือส่วน *"ต้องจำว่าต้อง update"* — ทุกที่ที่เปลี่ยน `count` ก็ต้อง update ทุกจุดของ UI ที่ขึ้นกับค่านั้นด้วย พลาดจุดเดียวหน้าจอก็โกหกทันที
 
 เวอร์ชัน **declarative** อธิบายว่า UI *เป็นอะไร* สำหรับ state หนึ่ง ๆ และไม่แตะ DOM เลย:
 
@@ -38,7 +38,7 @@ function Counter() {
 
 ไม่มีขั้น "update label" คุณแค่เปลี่ยน `count` และเพราะ UI ถูก *อธิบาย* ในรูปของ `count` React จึง re-render และหน้าจอถูกต้องโดยอัตโนมัติ bug ประเภท "ลืม update X" หายไปทั้งกลุ่ม
 
-## component คือฟังก์ชันของ input ของมัน
+## component คือฟังก์ชันของ input ของตัวเอง
 
 React component คือฟังก์ชันที่รับ **props** (input จาก parent) และใช้ **state** (ความจำของตัวเอง) แล้ว return คำอธิบายของ UI
 
@@ -65,7 +65,7 @@ export const compDiagram = `flowchart LR
 
 สองกฎที่ตามมาจาก "component คือฟังก์ชัน":
 
-- **props เป็น read-only** component ต้องไม่แก้ props ของตัวเอง — มันเป็นของ parent ข้อมูลไหล *ลง*
+- **props เป็น read-only** component ต้องไม่แก้ props ของตัวเอง — เป็นของ parent ข้อมูลไหล *ลง*
 - **input เดียวกัน output เดียวกัน** เมื่อ props และ state เท่าเดิม component ควร render สิ่งเดิม นั่นคือข้อกำหนดเรื่อง purity (มีบทเรียนเต็ม ๆ ทีหลัง) และเป็นสิ่งที่ทำให้ React รัน component ซ้ำได้อย่างอิสระ
 
 ## ทำไม model ถึงสำคัญ
@@ -76,7 +76,7 @@ export const compDiagram = `flowchart LR
 - **reconciliation** มีไว้เพื่อแปลง "นี่คือคำอธิบาย UI ใหม่" ให้เป็น "นี่คือการแก้ DOM น้อยที่สุด"
 - **concurrent features** (transitions, Suspense) มีอยู่ได้เพราะ `f(state)` ที่ pure สามารถถูกคำนวณ หยุด และ restart ได้อย่างปลอดภัย
 
-คุณไม่ได้กำลังเรียน API กองใหญ่ คุณกำลังเรียนสมการเดียวและผลของมัน
+คุณไม่ได้กำลังเรียน API กองใหญ่ คุณกำลังเรียนสมการเดียวและผลของตัวเอง
 
 <Callout title="สรุปหนึ่งบรรทัด">
 React เป็น **declarative**: คุณอธิบายว่า UI ควรเป็นอะไรสำหรับ state ปัจจุบัน (`UI = f(state)`) แทนที่จะ mutate DOM แบบ imperative component คือ **ฟังก์ชันของ props และ state** — props ไหลลงและ read-only และ input เดียวกันต้องได้ output เดียวกัน ทุก feature ของ React เป็นผลของการเอา model นี้มาคิดจริงจัง
@@ -86,10 +86,10 @@ export const quizWhy = [
   {
     q: 'ปัญหาหลักของการ update DOM แบบ imperative ที่ React แก้ให้คืออะไร?',
     options: [
-      'มันเร็วเกินไป',
-      'ทุกที่ที่เปลี่ยนข้อมูลต้องจำ update ทุก UI element ที่ขึ้นกับมัน — พลาดจุดเดียวหน้าจอก็ผิด',
-      'มันใช้ CSS ไม่ได้',
-      'มันต้องใช้ TypeScript',
+      'เร็วเกินไป',
+      'ทุกที่ที่เปลี่ยนข้อมูลต้องจำ update ทุก UI element ที่ขึ้นกับข้อมูลนั้น — พลาดจุดเดียวหน้าจอก็ผิด',
+      'ใช้ CSS ไม่ได้',
+      'ต้องใช้ TypeScript',
     ],
     answer: 1,
   },
@@ -97,7 +97,7 @@ export const quizWhy = [
     q: 'input ของ React component คืออะไร?',
     options: [
       'แค่ DOM',
-      'props (จาก parent) และ state ของตัวมันเอง',
+      'props (จาก parent) และ state ของตัวเอง',
       'global variable เท่านั้น',
       'URL',
     ],

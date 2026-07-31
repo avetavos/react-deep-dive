@@ -29,7 +29,7 @@ export default async function ProductPage({ id }) {
 }
 ```
 
-ไม่มี `'use client'` ตรงนี้ มันจึงเป็น Server Component มัน await data แล้ว return JSX; client เห็นแค่ markup ที่ render แล้วเท่านั้น
+ไม่มี `'use client'` ตรงนี้ component นี้จึงเป็น Server Component: await data แล้ว return JSX; client เห็นแค่ markup ที่ render แล้วเท่านั้น
 
 ## server/client boundary: `'use client'`
 
@@ -46,7 +46,7 @@ export default function AddToCart({ productId }) {
 }
 ```
 
-`'use client'` มาร์ค **boundary**: ไฟล์นั้นและทุกอย่างที่มัน import จะกลายเป็น client code Server Component สามารถ *render* Client Component ได้ (server page ใส่ปุ่ม interactive ได้) แต่ทิศทางกลับกันไม่ได้แบบเดียวกัน — ทิศของ boundary สำคัญ
+`'use client'` มาร์ค **boundary**: ไฟล์นั้นและทุกอย่างที่ไฟล์นั้น import จะกลายเป็น client code Server Component สามารถ *render* Client Component ได้ (server page ใส่ปุ่ม interactive ได้) แต่ทิศทางกลับกันไม่ได้แบบเดียวกัน — ทิศของ boundary สำคัญ
 
 <Mermaid title="server/client boundary" code={boundaryDiagram} />
 
@@ -86,10 +86,10 @@ export const quizRsc = [
   {
     q: 'อะไรคือจุดเด่นของ React Server Component?',
     options: [
-      'มันรันใน Web Worker',
-      'มันรันบน server และไม่ส่ง code ไป client — browser ได้ผลลัพธ์ที่ render แล้ว',
-      'มันคือ JSX ที่เร็วกว่า',
-      'มันต้องใช้ useEffect เพื่อ fetch data',
+      'รันใน Web Worker',
+      'รันบน server และไม่ส่ง code ไป client — browser ได้ผลลัพธ์ที่ render แล้ว',
+      'เป็น JSX ที่เร็วกว่า',
+      'ต้องใช้ useEffect เพื่อ fetch data',
     ],
     answer: 1,
   },
@@ -97,8 +97,8 @@ export const quizRsc = [
     q: 'Server Component fetch data อย่างไร?',
     options: [
       'ด้วย useEffect และ useState เท่านั้น',
-      'ตรง ๆ — มันเป็น async และ await data (เช่น DB call) บน server ได้',
-      'มัน fetch data ไม่ได้',
+      'ตรง ๆ — เป็น async และ await data (เช่น DB call) บน server ได้',
+      'fetch data ไม่ได้',
       'ผ่าน client-only API',
     ],
     answer: 1,

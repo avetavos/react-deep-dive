@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## effect มีไว้ทำอะไร
 
-`useEffect` เป็น hook ที่คนเข้าใจผิดมากที่สุด มันไม่ใช่ถังรวม "รัน code หลัง render" งานเดียวของมันคือ **sync component ของคุณกับ external system** — สิ่งที่อยู่นอกการควบคุมของ React: network connection, browser API, third-party widget, subscription, timer
+`useEffect` เป็น hook ที่คนเข้าใจผิดมากที่สุด ไม่ใช่ถังรวม "รัน code หลัง render" งานเดียวของตัวเองคือ **sync component ของคุณกับ external system** — สิ่งที่อยู่นอกการควบคุมของ React: network connection, browser API, third-party widget, subscription, timer
 
 ```jsx
 useEffect(() => {
@@ -22,7 +22,7 @@ useEffect(() => {
 }, [roomId]);                                     // re-sync when roomId changes
 ```
 
-อ่านว่า: "ทำให้ connection sync กับ `roomId`" เมื่อ `roomId` เปลี่ยน React รัน cleanup ของค่าเก่า แล้วรัน effect ของค่าใหม่ เมื่อ component unmount มันรัน cleanup ครั้งสุดท้าย
+อ่านว่า: "ทำให้ connection sync กับ `roomId`" เมื่อ `roomId` เปลี่ยน React รัน cleanup ของค่าเก่า แล้วรัน effect ของค่าใหม่ เมื่อ component unmount React รัน cleanup ครั้งสุดท้าย
 
 ## Dependency และ cleanup
 
@@ -45,7 +45,7 @@ export const effectDiagram = `flowchart LR
 
 ## คุณอาจไม่ต้องใช้ effect
 
-นี่คือบทเรียนสำคัญที่สุดในทั้งโมดูล effect มีไว้สำหรับ external system ถ้าคุณใช้ effect เพื่อ **transform data สำหรับ render** หรือเพื่อ **ตอบสนอง user event** คุณแทบจะแน่นอนว่าไม่ต้องใช้มัน — และการใช้มันทำให้ code ช้าลงและมีบั๊กมากขึ้น
+นี่คือบทเรียนสำคัญที่สุดในทั้งโมดูล effect มีไว้สำหรับ external system ถ้าคุณใช้ effect เพื่อ **transform data สำหรับ render** หรือเพื่อ **ตอบสนอง user event** คุณแทบจะแน่นอนว่าไม่ต้องใช้ effect — และการฝืนใช้ทำให้ code ช้าลงและมีบั๊กมากขึ้น
 
 **อย่า sync derived state ด้วย effect ให้คำนวณตอน render**
 
@@ -85,7 +85,7 @@ function handleSubmit() {
 เทสต์เร็ว ๆ: *"นี่กำลัง sync กับสิ่งที่อยู่นอก React หรือเปล่า?"* ถ้าใช่ ใช้ effect ถ้าเป็นการ derive data หรือตอบสนอง interaction ไม่ต้องใช้ effect
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`useEffect` มีไว้ **sync กับ external system** (connection, subscription, browser API) — ระบุ reactive value ทุกตัวที่มันอ่านใน **dependency array** และ return **cleanup** ที่ undo การ setup เสมอ แต่ส่วนใหญ่คุณ **ไม่ต้องใช้ effect**: derive ค่าตอน render (หรือด้วย `useMemo`) และเอา logic ที่ขับด้วย event ไปไว้ใน **event handler** หยิบ effect มาใช้เฉพาะตอน sync กับสิ่งที่อยู่นอก React
+`useEffect` มีไว้ **sync กับ external system** (connection, subscription, browser API) — ระบุ reactive value ทุกตัวที่อ่านใน **dependency array** และ return **cleanup** ที่ undo การ setup เสมอ แต่ส่วนใหญ่คุณ **ไม่ต้องใช้ effect**: derive ค่าตอน render (หรือด้วย `useMemo`) และเอา logic ที่ขับด้วย event ไปไว้ใน **event handler** หยิบ effect มาใช้เฉพาะตอน sync กับสิ่งที่อยู่นอก React
 </Callout>
 
 export const quizEffect = [

@@ -1,6 +1,6 @@
 ---
 title: 'External Stores'
-description: 'เมื่อ built-in state ไม่พอ, external store อย่าง Zustand และ Redux และ useSyncExternalStore — ทำไมมันถึงมีอยู่ และ tearing คืออะไร'
+description: 'เมื่อ built-in state ไม่พอ, external store อย่าง Zustand และ Redux และ useSyncExternalStore — ทำไมถึงมีอยู่ และ tearing คืออะไร'
 sidebar:
   order: 5
 ---
@@ -12,13 +12,13 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## เมื่อไรควรออกจาก built-in state ของ React
 
-`useState`, `useReducer` และ Context รับมือแอปส่วนใหญ่ได้ คุณจะไปหา **external store** (Zustand, Jotai, Redux Toolkit, XState) เมื่อชนขีดจำกัดของพวกมัน:
+`useState`, `useReducer` และ Context รับมือแอปส่วนใหญ่ได้ คุณจะไปหา **external store** (Zustand, Jotai, Redux Toolkit, XState) เมื่อชนขีดจำกัดของเครื่องมือพวกนี้:
 
 - state ถูกอ่าน/เขียนโดย **หลาย component ในที่กระจัดกระจาย** และพฤติกรรม "re-render ทุก consumer" ของ Context หยาบเกินไป
 - คุณอยากได้ **fine-grained subscription** — component ที่ re-render เฉพาะเมื่อ *slice ของตัวเอง* ใน store เปลี่ยน ไม่ใช่ทุกครั้งที่ store update
 - state มี **ตรรกะซับซ้อนหรืออยู่นอก React tree** (cache, websocket connection, state machine) ที่ควรมีอยู่อิสระจาก component ใด ๆ
 
-external store เก็บ state ไว้ *นอก* React และให้ component subscribe เฉพาะส่วนที่มันใช้
+external store เก็บ state ไว้ *นอก* React และให้ component subscribe เฉพาะส่วนที่ใช้
 
 ```jsx
 // Zustand — the store lives outside React; components select a slice.
@@ -40,7 +40,7 @@ function CartCount() {
 
 store ป้อนข้อมูลเข้า React อย่างปลอดภัยได้อย่างไร? แต่ก่อนคุณจะต่อ `useEffect` + `useState` แต่นั่นมีบั๊กแฝงภายใต้ **concurrent rendering**: React render ในเบื้องหลังได้ และค่าภายนอกอาจเปลี่ยน *กลาง render* ทำให้ component ต่าง ๆ ใน render เดียวกันอ่านค่าคนละค่า ความไม่สอดคล้องนี้เรียกว่า **tearing** — บางส่วนของ UI แสดงค่าเก่า บางส่วนแสดงค่าใหม่
 
-React ให้ **`useSyncExternalStore`** มาเพื่อ subscribe external store ใด ๆ โดยไม่ tearing library ของ store ใช้มันอยู่เบื้องหลัง แต่คุณใช้ตรง ๆ ก็ได้:
+React ให้ **`useSyncExternalStore`** มาเพื่อ subscribe external store ใด ๆ โดยไม่ tearing library ของ store ใช้ hook ตัวนี้อยู่เบื้องหลัง แต่คุณใช้ตรง ๆ ก็ได้:
 
 ```jsx
 import { useSyncExternalStore } from "react";

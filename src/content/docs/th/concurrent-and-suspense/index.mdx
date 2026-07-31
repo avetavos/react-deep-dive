@@ -34,7 +34,7 @@ export const concDiagram = `flowchart TB
   nonurgent["Non-urgent update\n(filter list ใหญ่)"] --> render2["render เบื้องหลัง\n(interrupt ได้)"]
   urgent -.interrupt.-> render2`;
 
-คุณ mark update ที่หนักเป็น non-urgent (เรียกว่า *transition*) แล้ว React จะ render มันเบื้องหลังในที่ที่ keystroke แทรกได้ ส่วน **Suspense** จัดการกรณีที่บางส่วนของ tree ยังไม่พร้อม (กำลังโหลด data หรือ code) โดยแสดง fallback แบบ declarative แทนที่คุณจะต้องมานั่งจัดการ loading boolean เอง
+คุณ mark update ที่หนักเป็น non-urgent (เรียกว่า *transition*) แล้ว React จะ render update นั้นเบื้องหลังในที่ที่ keystroke แทรกได้ ส่วน **Suspense** จัดการกรณีที่บางส่วนของ tree ยังไม่พร้อม (กำลังโหลด data หรือ code) โดยแสดง fallback แบบ declarative แทนที่คุณจะต้องมานั่งจัดการ loading boolean เอง
 
 <Callout title="การเปลี่ยนมุมมอง">
 เลิกคิดว่าการ render เป็น pass เดียวที่ block และ all-or-nothing Concurrent React ทำให้การ render **interrupt ได้และมี priority** — browser ยัง responsive เพราะ urgent update ลัดคิวได้ คุณไม่ต้อง schedule เองเลย แค่ *ติดป้าย* update (transition) และ *วาง boundary* (Suspense) แล้ว React จัดการ scheduling ให้

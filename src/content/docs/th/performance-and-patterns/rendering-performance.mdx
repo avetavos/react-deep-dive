@@ -15,10 +15,10 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 component จะ re-render ด้วยเหตุผล 3 อย่างเท่านั้น:
 
 1. **state ของตัวเองเปลี่ยน** (มีการเรียก setter)
-2. **parent re-render** — โดย default เมื่อ component render มัน re-render children *ทั้งหมด*
-3. **context ที่มัน consume อยู่เปลี่ยนค่า**
+2. **parent re-render** — โดย default เมื่อ parent render React จะ re-render children *ทั้งหมด*
+3. **context ที่ component consume อยู่เปลี่ยนค่า**
 
-ข้อสองมักทำให้คนแปลกใจ: parent ที่ re-render จะ re-render ทั้ง subtree ข้างล่าง **แม้ children ที่ props ไม่ได้เปลี่ยน** React ทำแบบนี้เพราะมันไม่รู้ล่วงหน้าโดยไม่เช็ค ว่า output ของ child ขึ้นกับสิ่งที่เปลี่ยนหรือไม่
+ข้อสองมักทำให้คนแปลกใจ: parent ที่ re-render จะ re-render ทั้ง subtree ข้างล่าง **แม้ children ที่ props ไม่ได้เปลี่ยน** React ทำแบบนี้เพราะไม่รู้ล่วงหน้าโดยไม่เช็ค ว่า output ของ child ขึ้นกับสิ่งที่เปลี่ยนหรือไม่
 
 <Mermaid title="render หนึ่งครั้ง propagate ลงทั้ง subtree" code={propDiagram} />
 
@@ -63,7 +63,7 @@ function App() {
 
 ## แก้ #2: หยุด propagation ด้วย `React.memo`
 
-เมื่อย้าย state ไม่ได้และ child หนักจริง ให้ห่อมันด้วย `React.memo` component ที่ memoize แล้วจะข้ามการ re-render เมื่อ props **shallow-equal** กับ render ก่อนหน้า — มันกลายเป็นกำแพงที่ parent re-render ข้ามไม่ได้
+เมื่อย้าย state ไม่ได้และ child หนักจริง ให้ห่อ child ด้วย `React.memo` component ที่ memoize แล้วจะข้ามการ re-render เมื่อ props **shallow-equal** กับ render ก่อนหน้า — component นั้นกลายเป็นกำแพงที่ parent re-render ข้ามไม่ได้
 
 ```jsx
 const ExpensiveList = React.memo(function ExpensiveList({ items }) {
@@ -72,14 +72,14 @@ const ExpensiveList = React.memo(function ExpensiveList({ items }) {
 });
 ```
 
-จุดที่ต้องระวัง: `React.memo` ช่วยได้ก็ต่อเมื่อ props เสถียรจริง ๆ ส่ง object, array หรือ function แบบ inline ใหม่เป็น prop ทีไร shallow comparison จะ fail เสมอ — ซึ่งเป็นเหตุผลที่ memoization มักต้องใช้ `useMemo`/`useCallback` กับ props ด้วย (บทถัดไป)
+จุดที่ต้องระวัง: `React.memo` ช่วยได้ก็ต่อเมื่อ props เสถียรจริง ๆ ส่ง object, array หรือ function แบบ inline ใหม่เป็น prop ทีไร shallow comparison จะ fail เสมอ — นั่นคือเหตุผลที่ memoization มักต้องใช้ `useMemo`/`useCallback` กับ props ด้วย (บทถัดไป)
 
 ## วัดผลก่อน: Profiler
 
 อย่าเดาว่าความช้าอยู่ที่ไหน **React DevTools Profiler** บันทึก session และแสดงให้เห็นชัดว่า component ไหน render, บ่อยแค่ไหน, ใช้เวลาเท่าไร — และ *ทำไม* แต่ละตัวถึง render optimize component ที่ profiler ชี้ ไม่ใช่ตัวที่คุณสงสัย
 
 <Callout title="สรุปหนึ่งบรรทัด">
-component re-render เมื่อ **state ตัวเองเปลี่ยน**, **parent re-render** (ซึ่ง cascade ลงทั้ง subtree) หรือ **context** ที่มันอ่านเปลี่ยน แก้ re-render ที่ไม่จำเป็นเชิงโครงสร้างก่อน — **เก็บ state ให้ต่ำ** และยก child ที่ช้าเข้ามาผ่าน `children` — แล้วค่อยใช้ **`React.memo`** กั้น subtree ที่หนักจริง และยืนยันด้วย **DevTools Profiler** ทุกครั้งก่อน optimize
+component re-render เมื่อ **state ตัวเองเปลี่ยน**, **parent re-render** (ซึ่ง cascade ลงทั้ง subtree) หรือ **context** ที่อ่านเปลี่ยน แก้ re-render ที่ไม่จำเป็นเชิงโครงสร้างก่อน — **เก็บ state ให้ต่ำ** และยก child ที่ช้าเข้ามาผ่าน `children` — แล้วค่อยใช้ **`React.memo`** กั้น subtree ที่หนักจริง และยืนยันด้วย **DevTools Profiler** ทุกครั้งก่อน optimize
 </Callout>
 
 export const quizRender = [
@@ -87,7 +87,7 @@ export const quizRender = [
     q: 'เหตุผล 3 อย่างที่ component re-render คืออะไร?',
     options: [
       'CSS เปลี่ยน, รูปโหลด, scroll',
-      'state ตัวเองเปลี่ยน, parent re-render หรือ context ที่มัน consume เปลี่ยน',
+      'state ตัวเองเปลี่ยน, parent re-render หรือ context ที่ component consume เปลี่ยน',
       'URL เปลี่ยน, cookie เปลี่ยน หรือ tab focus',
       'เฉพาะเมื่อเรียก forceUpdate',
     ],

@@ -20,7 +20,7 @@ const [count, setCount] = useState(0);
 // setCount(next) → schedule a re-render where count is `next`
 ```
 
-การเรียก setter ไม่เปลี่ยน `count` ทันที — มันขอให้ React render อีกครั้ง ใน render ถัดไป `useState(0)` จะคืน value ที่อัปเดตแล้ว (บทเรียน "state เป็น snapshot" ใน Foundations คือ mental model ส่วนบทนี้คือกลไก)
+การเรียก setter ไม่เปลี่ยน `count` ทันที — แต่เป็นการขอให้ React render อีกครั้ง ใน render ถัดไป `useState(0)` จะคืน value ที่อัปเดตแล้ว (บทเรียน "state เป็น snapshot" ใน Foundations คือ mental model ส่วนบทนี้คือกลไก)
 
 ## Batching: หลาย setState, render เดียว
 
@@ -39,7 +39,7 @@ function handleClick() {
 
 ## Updater function เทียบกับ value
 
-ส่ง **value** เมื่อ state ถัดไปไม่ได้ขึ้นกับค่าก่อนหน้า ส่ง **updater function** เมื่อมันขึ้นกับค่าก่อนหน้า — React รัน updater ตามลำดับกับค่า pending ล่าสุด
+ส่ง **value** เมื่อ state ถัดไปไม่ได้ขึ้นกับค่าก่อนหน้า ส่ง **updater function** เมื่อขึ้นกับค่าก่อนหน้า — React รัน updater ตามลำดับกับค่า pending ล่าสุด
 
 ```jsx
 setCount(count + 1);      // value: uses the snapshot; three of these still add 1 total
@@ -58,7 +58,7 @@ export const updaterDiagram = `flowchart LR
 
 ## Lazy initialization
 
-argument ของ `useState` ถูกใช้แค่ใน render **แรก** เท่านั้น แต่ React ยัง evaluate มันทุก render (แล้วทิ้ง) ถ้าการคำนวณ initial value แพง ให้ส่ง **function** — React จะเรียกแค่ครั้งเดียว
+argument ของ `useState` ถูกใช้แค่ใน render **แรก** เท่านั้น แต่ React ยัง evaluate argument นั้นทุก render (แล้วทิ้ง) ถ้าการคำนวณ initial value แพง ให้ส่ง **function** — React จะเรียกแค่ครั้งเดียว
 
 ```jsx
 // ❌ createInitialTodos() runs on EVERY render (result discarded after the first).
@@ -70,7 +70,7 @@ const [todos, setTodos] = useState(() => createInitialTodos());
 
 ## state ต้อง immutable
 
-React ตัดสินใจว่าจะ re-render ไหมโดยเทียบ **reference** การ mutate object หรือ array ในที่เดิมทำให้ reference เดิม React จึงอาจข้ามการอัปเดต — และมันทำลาย snapshot model สร้าง value ใหม่เสมอ
+React ตัดสินใจว่าจะ re-render ไหมโดยเทียบ **reference** การ mutate object หรือ array ในที่เดิมทำให้ reference เดิม React จึงอาจข้ามการอัปเดต — และทำลาย snapshot model สร้าง value ใหม่เสมอ
 
 ```jsx
 // ❌ Mutation — same reference, unreliable render.
@@ -106,7 +106,7 @@ export const quizUseState = [
   {
     q: 'เมื่อไรควรใช้ updater form `setX(x => ...)`?',
     options: [
-      'ไม่เคย — มัน deprecated แล้ว',
+      'ไม่เคย — deprecated ไปแล้ว',
       'เมื่อค่าถัดไปขึ้นกับค่าก่อนหน้า (หรือเรียก setter หลายครั้งใน handler เดียว)',
       'เฉพาะใน useEffect',
       'เฉพาะกับ string',
@@ -129,7 +129,7 @@ export const quizUseState = [
       'immutability เป็นแค่ความชอบด้านสไตล์',
       'React เทียบด้วย reference; การ mutate ทำให้ reference เดิม React จึงอาจข้าม re-render',
       'object เป็น state ไม่ได้',
-      'มันทำให้ state read-only ตลอดไป',
+      'ทำให้ state read-only ตลอดไป',
     ],
     answer: 1,
   },

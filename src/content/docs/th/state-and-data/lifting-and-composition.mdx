@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## Lifting state up
 
-เมื่อสอง component ต้องใช้ state ก้อนเดียวกัน state นั้นจะอยู่ใน component ใด component หนึ่งไม่ได้ — มันต้องย้าย **ขึ้น** ไปที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props นี่คือ *lifting state up* และเป็นคำตอบเริ่มต้นของ "สอง component นี้ต้อง sync กัน"
+เมื่อสอง component ต้องใช้ state ก้อนเดียวกัน state นั้นจะอยู่ใน component ใด component หนึ่งไม่ได้ — state นั้นต้องย้าย **ขึ้น** ไปที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props นี่คือ *lifting state up* และเป็นคำตอบเริ่มต้นของ "สอง component นี้ต้อง sync กัน"
 
 ```jsx
 // The parent owns the state; both children read/update it through props.
@@ -31,7 +31,7 @@ state มี **single source of truth** (คือ parent) และข้อม
 
 ## ปัญหา prop drilling
 
-lifting ทำงานได้สวยงามจนกระทั่ง ancestor อยู่ *ไกล* เหนือ consumer มาก ตอนนั้น props ต้องร้อยผ่านทุก component ตรงกลางที่ไม่ได้สนใจมันเลย:
+lifting ทำงานได้สวยงามจนกระทั่ง ancestor อยู่ *ไกล* เหนือ consumer มาก ตอนนั้น props ต้องร้อยผ่านทุก component ตรงกลางที่ไม่ได้สนใจค่านั้นเลย:
 
 ```jsx
 // theme is only used by Button, but every layer must pass it through.
@@ -44,7 +44,7 @@ lifting ทำงานได้สวยงามจนกระทั่ง an
 </App>
 ```
 
-ทุก component ตรงกลางได้ prop ที่มันแค่ส่งต่อ นี่คือ **prop drilling** — รก และเป็นฝันร้ายตอน refactor สัญชาตญาณคือกระโดดไป Context ทันที แต่มีทางแก้ที่ง่ายกว่าให้ลองก่อน
+ทุก component ตรงกลางได้ prop ที่แค่ส่งต่อ นี่คือ **prop drilling** — รก และเป็นฝันร้ายตอน refactor สัญชาตญาณคือกระโดดไป Context ทันที แต่มีทางแก้ที่ง่ายกว่าให้ลองก่อน
 
 ## Composition: ส่ง JSX เป็น props
 
@@ -78,12 +78,12 @@ export const compDiagram = `flowchart TB
 คุณยังส่ง JSX ผ่าน prop ที่ตั้งชื่อได้ด้วย (`<Layout sidebar={<Nav />} main={<Feed />} />`) component ตรงกลางจะกลายเป็น container ทั่วไป ("render อะไรก็ตามที่ถูกส่งมา") ซึ่ง reuse ได้ดีกว่า *และ* กำจัด drilling ไปด้วย Context เอาไว้ใช้ตอนที่แม้แต่ composition ก็เอื้อมไม่ถึง — ข้อมูลแบบ cross-cutting จริง ๆ ที่ถูกใช้กระจัดกระจายหลายที่
 
 <Callout title="สรุปหนึ่งบรรทัด">
-เมื่อสอง component แชร์ state ให้ **lift** มันขึ้นไปที่ common ancestor ที่ใกล้ที่สุด — source of truth เดียว, ข้อมูลลง, callback ขึ้น เมื่อ props ต้องผ่านหลายชั้นที่ไม่สนใจ (**prop drilling**) ให้ลอง **composition ก่อน**: ส่ง JSX ที่ render แล้วเป็น `children` หรือ prop เพื่อให้ component ตรงกลางยัง generic และไม่เห็นค่านั้น ใช้ Context เฉพาะเมื่อ composition เอื้อมไปถึง consumer ไม่ได้
+เมื่อสอง component แชร์ state ให้ **lift** state ขึ้นไปที่ common ancestor ที่ใกล้ที่สุด — source of truth เดียว, ข้อมูลลง, callback ขึ้น เมื่อ props ต้องผ่านหลายชั้นที่ไม่สนใจ (**prop drilling**) ให้ลอง **composition ก่อน**: ส่ง JSX ที่ render แล้วเป็น `children` หรือ prop เพื่อให้ component ตรงกลางยัง generic และไม่เห็นค่านั้น ใช้ Context เฉพาะเมื่อ composition เอื้อมไปถึง consumer ไม่ได้
 </Callout>
 
 export const quizLift = [
   {
-    q: 'เมื่อสอง component พี่น้องต้องใช้ state เดียวกัน มันควรอยู่ที่ไหน?',
+    q: 'เมื่อสอง component พี่น้องต้องใช้ state เดียวกัน state นั้นควรอยู่ที่ไหน?',
     options: [
       'ทำซ้ำไว้ในทั้งสองพี่น้อง',
       'lift ขึ้นไปที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props',

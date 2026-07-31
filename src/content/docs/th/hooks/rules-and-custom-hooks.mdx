@@ -1,6 +1,6 @@
 ---
 title: 'Rules & Custom Hooks'
-description: 'ทำไม Rules of Hooks ถึงมี (call order), lint plugin ที่บังคับใช้มัน และการแยก custom hook มา reuse stateful logic'
+description: 'ทำไม Rules of Hooks ถึงมี (call order), lint plugin ที่บังคับใช้กฎเหล่านี้ และการแยก custom hook มา reuse stateful logic'
 sidebar:
   order: 6
 ---
@@ -43,11 +43,11 @@ export const ruleDiagram = `flowchart TB
 
 ถ้าคุณเรียก hook แบบมีเงื่อนไข พอถึง render ที่เงื่อนไขต่างออกไป *จำนวนและลำดับ* ของการเรียก hook จะเปลี่ยน — และ hook ทุกตัวหลังตัวที่มีเงื่อนไขจะอ่าน slot ผิด state รั่วข้าม hook วุ่นวายตามมา การเรียก hook แบบไม่มีเงื่อนไข ในลำดับเดิมทุก render คือสิ่งที่ทำให้การ map slot คงที่ นั่นคือเหตุผลทั้งหมดของกฎ
 
-บังคับใช้อัตโนมัติด้วย lint rule ทางการ (**eslint-plugin-react-hooks**) — มันจับ hook แบบมีเงื่อนไขและ effect dependency ที่ขาดก่อน ship
+บังคับใช้อัตโนมัติด้วย lint rule ทางการ (**eslint-plugin-react-hooks**) — plugin นี้จับ hook แบบมีเงื่อนไขและ effect dependency ที่ขาดก่อน ship
 
 ## Custom hooks: การแชร์ stateful logic
 
-**custom hook** คือ function ที่ชื่อขึ้นต้นด้วย `use` และเรียก hook อื่น เท่านั้นเอง — ไม่มี API พิเศษ มันให้คุณแยกและ reuse *stateful logic* (ไม่ใช่ UI) ข้าม component
+**custom hook** คือ function ที่ชื่อขึ้นต้นด้วย `use` และเรียก hook อื่น เท่านั้นเอง — ไม่มี API พิเศษ แต่ให้คุณแยกและ reuse *stateful logic* (ไม่ใช่ UI) ข้าม component
 
 ```jsx
 // A custom hook: reusable logic, its own state, calls built-in hooks.
@@ -78,7 +78,7 @@ function StatusBar() {
 เมื่อไรควรแยก custom hook: เมื่อสอง component ต้องการ stateful behavior เดียวกัน หรือเมื่อ logic ของ component ซับซ้อนพอที่การตั้งชื่อ (`useForm`, `useDebouncedValue`, `useFetch`) ทำให้ component ชัดขึ้น
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Rules of Hooks — **เรียก hook ที่ top level เท่านั้น เรียกจาก React function เท่านั้น** — มีเพราะ React จับคู่ hook กับ memory slot **ตามลำดับการเรียก** hook แบบมีเงื่อนไขทำให้ slot ที่เหลือทั้งหมดเลื่อนไปอ่าน state ผิด บังคับใช้ด้วย `eslint-plugin-react-hooks` **custom hook** คือแค่ function `use*` ที่เรียก hook มันแชร์ **logic ไม่ใช่ state** — ผู้เรียกแต่ละคนได้ state ของตัวเองอิสระ
+Rules of Hooks — **เรียก hook ที่ top level เท่านั้น เรียกจาก React function เท่านั้น** — มีเพราะ React จับคู่ hook กับ memory slot **ตามลำดับการเรียก** hook แบบมีเงื่อนไขทำให้ slot ที่เหลือทั้งหมดเลื่อนไปอ่าน state ผิด บังคับใช้ด้วย `eslint-plugin-react-hooks` **custom hook** คือแค่ function `use*` ที่เรียก hook อื่น โดยแชร์ **logic ไม่ใช่ state** — ผู้เรียกแต่ละคนได้ state ของตัวเองอิสระ
 </Callout>
 
 export const quizRules = [
@@ -88,7 +88,7 @@ export const quizRules = [
       'เรียก hook ที่ไหนก็ได้; จาก function ใดก็ได้',
       'เรียก hook ที่ top level เท่านั้น และจาก React component หรือ hook อื่นเท่านั้น',
       'เรียก hook ใน useEffect เท่านั้น; ตั้งชื่อด้วย use',
-      'เรียก hook ใน loop; return มันออกมา',
+      'เรียก hook ใน loop; return ค่าออกมา',
     ],
     answer: 1,
   },
@@ -113,7 +113,7 @@ export const quizRules = [
     answer: 1,
   },
   {
-    q: 'สอง component เรียก `useCounter()` ทั้งคู่ พวกมันแชร์อะไร?',
+    q: 'สอง component เรียก `useCounter()` ทั้งคู่ ทั้งสองแชร์อะไรกัน?',
     options: [
       'state เดียวกันที่แชร์กัน — เปลี่ยนอันหนึ่งกระทบอีกอัน',
       'แค่ logic — แต่ละ component ได้ state ของตัวเองอิสระ',

@@ -1,6 +1,6 @@
 ---
 title: 'Hooks In Depth'
-description: 'hook คืออะไร ทำไมถึงมี และมันทำให้ function ธรรมดามี state และ lifecycle ได้อย่างไรโดยไม่ต้องเป็น class — พื้นฐานของทุกอย่างในโมดูลนี้'
+description: 'hook คืออะไร ทำไมถึงมี และทำให้ function ธรรมดามี state และ lifecycle ได้อย่างไรโดยไม่ต้องเป็น class — พื้นฐานของทุกอย่างในโมดูลนี้'
 sidebar:
   order: 1
 ---
@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## hook คืออะไร
 
-**hook** คือ function ที่ชื่อขึ้นต้นด้วย `use` ซึ่งให้ component "hook เข้าไป" ใช้ feature ของ React — state, lifecycle, context — ได้ในขณะที่ยังเป็น function ธรรมดา ก่อนมี hooks มีแต่ class component เท่านั้นที่ถือ state ได้ hooks นำพลังนั้นมาให้ function โดยไม่ต้องเขียน boilerplate ของ class และไม่ทำลาย model `UI = f(state)`
+**hook** คือ function ที่ชื่อขึ้นต้นด้วย `use` ซึ่งให้ component "hook เข้าไป" ใช้ feature ของ React — state, lifecycle, context — ได้โดยที่ยังเป็น function ธรรมดา ก่อนมี hooks มีแต่ class component เท่านั้นที่ถือ state ได้ hooks นำพลังนั้นมาให้ function โดยไม่ต้องเขียน boilerplate ของ class และไม่ทำลาย model `UI = f(state)`
 
 ทริกคือ React จับคู่ hook แต่ละตัวกับ slot ในหน่วยความจำส่วนตัวของ component โดยจับคู่ **ตามลำดับการเรียก** การตัดสินใจออกแบบข้อเดียวนี้อธิบาย Rules of Hooks ได้ทั้งหมด และเป็นเหตุผลที่ hooks ดูเหมือนเวทมนตร์จนกว่าคุณจะเห็นกลไกข้างใน
 
@@ -38,10 +38,10 @@ export const slotDiagram = `flowchart LR
   h2 --> note
   h3 --> note`;
 
-React ไม่รู้ *ชื่อ* hook ของคุณ — มันรู้ *ลำดับ* ที่คุณเรียก ในทุก render `useState` ตัวแรก map ไป slot 1, ตัวที่สองไป slot 2 ไปเรื่อย ๆ นี่คือเหตุผลที่คุณห้ามเรียก hook แบบมีเงื่อนไข ถ้าข้ามไปตัวหนึ่ง hook ที่เหลือทั้งหมดจะเลื่อนไปอยู่ slot ผิด จำภาพนี้ไว้แล้วทั้งโมดูลจะเข้าที่
+React ไม่รู้ *ชื่อ* hook ของคุณ — React รู้แค่ *ลำดับ* ที่คุณเรียก ในทุก render `useState` ตัวแรก map ไป slot 1, ตัวที่สองไป slot 2 ไปเรื่อย ๆ นี่คือเหตุผลที่คุณห้ามเรียก hook แบบมีเงื่อนไข ถ้าข้ามไปตัวหนึ่ง hook ที่เหลือทั้งหมดจะเลื่อนไปอยู่ slot ผิด จำภาพนี้ไว้แล้วทั้งโมดูลจะเข้าที่
 
 <Callout title="การเปลี่ยนมุมมอง">
-class component เก็บ state ไว้ใน `this` ส่วน function component ไม่มี `this` และถูกเรียกใหม่ทุก render — แล้ว state ของมันอยู่ที่ไหน? อยู่ในหน่วยความจำของ React โดย index ตามลำดับการเรียก hook เป็นแค่ *function call ที่อ่านและเขียน slot หนึ่ง* พอมอง hook เป็นการเข้าถึง slot ตามลำดับ กฎต่าง ๆ ก็เลิกดูเหมือนตั้งขึ้นมาลอย ๆ
+class component เก็บ state ไว้ใน `this` ส่วน function component ไม่มี `this` และถูกเรียกใหม่ทุก render — แล้ว state ของตัวเองอยู่ที่ไหน? อยู่ในหน่วยความจำของ React โดย index ตามลำดับการเรียก hook เป็นแค่ *function call ที่อ่านและเขียน slot หนึ่ง* พอมอง hook เป็นการเข้าถึง slot ตามลำดับ กฎต่าง ๆ ก็เลิกดูเหมือนตั้งขึ้นมาลอย ๆ
 </Callout>
 
 export const quizIndex = [
@@ -49,7 +49,7 @@ export const quizIndex = [
     q: 'hook คืออะไร?',
     options: [
       'method ของ class',
-      'function (ชื่อ use*) ที่ให้ component ใช้ feature ของ React เช่น state และ lifecycle ในขณะที่ยังเป็น function',
+      'function (ชื่อ use*) ที่ให้ component ใช้ feature ของ React เช่น state และ lifecycle โดยที่ยังเป็น function',
       'CSS utility',
       'ชนิดหนึ่งของ component',
     ],

@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## JSX เป็นแค่ syntax
 
-JSX หน้าตาเหมือน HTML แต่มันเป็น **syntax sugar** ของการเรียกฟังก์ชัน JavaScript ธรรมดา อันนี้:
+JSX หน้าตาเหมือน HTML แต่เป็น **syntax sugar** ของการเรียกฟังก์ชัน JavaScript ธรรมดา อันนี้:
 
 ```jsx
 const el = <button className="primary">Click</button>;
@@ -25,7 +25,7 @@ import { jsx as _jsx } from "react/jsx-runtime";
 const el = _jsx("button", { className: "primary", children: "Click" });
 ```
 
-ผลที่สำคัญ: JSX เป็น *expression* มันประเมินค่าเป็นค่าที่คุณเก็บใส่ตัวแปรได้ return จากฟังก์ชันได้ ใส่ใน array ได้ หรือส่งเป็น prop ได้ มันไม่ใช่ template language ที่มีกฎของตัวเอง — มันคือ JavaScript ดังนั้น `{ }` ใน JSX ก็แค่หลุดกลับไปเป็น JS expression
+ผลที่สำคัญ: JSX เป็น *expression* ที่ประเมินค่าเป็นค่าที่คุณเก็บใส่ตัวแปรได้ return จากฟังก์ชันได้ ใส่ใน array ได้ หรือส่งเป็น prop ได้ ไม่ใช่ template language ที่มีกฎของตัวเอง — JSX คือ JavaScript ดังนั้น `{ }` ใน JSX ก็แค่หลุดกลับไปเป็น JS expression
 
 ```jsx
 function List({ items, showHeader }) {
@@ -66,7 +66,7 @@ export const jsxDiagram = `flowchart LR
 
 ## component เทียบกับ host element
 
-field `type` บอก React ว่ามันเป็น node ชนิดไหน:
+field `type` บอก React ว่าเป็น node ชนิดไหน:
 
 - `type` ที่เป็น **string** (`"button"`, `"div"`) คือ *host element* — React รู้วิธีแปลงเป็น DOM node จริง
 - `type` ที่เป็น **function** (`Counter`, `Greeting`) คือ *component* — React เรียกฟังก์ชันนั้นเพื่อได้ element เพิ่ม วนซ้ำไปเรื่อย ๆ จนเหลือแต่ host element
@@ -80,7 +80,7 @@ field `type` บอก React ว่ามันเป็น node ชนิดไ
 นี่คือเหตุผลที่ชื่อ component **ต้องขึ้นต้นด้วยตัวใหญ่** ใน JSX: `<Counter />` (ตัวใหญ่) แปลว่า "เรียก component `Counter`" ส่วน `<counter />` (ตัวเล็ก) แปลว่า "สร้าง host element ชื่อ `counter` ตรง ๆ" ตัวเล็กตัวใหญ่คือวิธีที่ compiler ตัดสินระหว่าง type ที่เป็น string กับการอ้างถึงตัวแปร
 
 <Callout title="สรุปหนึ่งบรรทัด">
-JSX เป็น syntax sugar ที่ compile เป็นการเรียก `jsx(type, props)` มันจึงเป็นแค่ JavaScript **expression** — และ `{ }` ในนั้นคือ JS ธรรมดา แต่ละการเรียก return **React element: object ธรรมดาที่ถูกและ immutable** (`{ type, props, key }`) ที่ *อธิบาย* UI ไม่ใช่เป็น UI type ที่เป็นตัวใหญ่คือ component (ฟังก์ชันที่ React เรียก) type ตัวเล็กคือ host element (DOM tag จริง)
+JSX เป็น syntax sugar ที่ compile เป็นการเรียก `jsx(type, props)` จึงเป็นแค่ JavaScript **expression** — และ `{ }` ในนั้นคือ JS ธรรมดา แต่ละการเรียก return **React element: object ธรรมดาที่ถูกและ immutable** (`{ type, props, key }`) ที่ *อธิบาย* UI ไม่ใช่เป็น UI type ที่เป็นตัวใหญ่คือ component (ฟังก์ชันที่ React เรียก) type ตัวเล็กคือ host element (DOM tag จริง)
 </Callout>
 
 export const quizJsx = [

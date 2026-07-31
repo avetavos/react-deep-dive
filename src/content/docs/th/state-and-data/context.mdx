@@ -1,6 +1,6 @@
 ---
 title: 'Context'
-description: 'createContext และ useContext, เมื่อไร Context เป็นเครื่องมือที่ถูก และเมื่อไรมันทำร้าย performance, การ split context และทำไม Context ไม่ใช่ state manager'
+description: 'createContext และ useContext, เมื่อไร Context เป็นเครื่องมือที่ถูก และเมื่อไรกลับทำร้าย performance, การ split context และทำไม Context ไม่ใช่ state manager'
 sidebar:
   order: 3
 ---
@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## Context: teleport ค่าลงไปทั้ง subtree
 
-**Context** ให้ parent ทำให้ค่าหนึ่งพร้อมใช้กับทุก component ที่อยู่ข้างล่าง โดยไม่ต้องส่ง props ผ่านชั้นตรงกลาง คุณสร้าง context, ห่อ subtree ด้วย provider แล้ว descendant ตัวไหนก็อ่านมันได้ด้วย `useContext`
+**Context** ให้ parent ทำให้ค่าหนึ่งพร้อมใช้กับทุก component ที่อยู่ข้างล่าง โดยไม่ต้องส่ง props ผ่านชั้นตรงกลาง คุณสร้าง context, ห่อ subtree ด้วย provider แล้ว descendant ตัวไหนก็อ่านค่านั้นได้ด้วย `useContext`
 
 ```jsx
 import { createContext, useContext, useState } from "react";
@@ -36,13 +36,13 @@ function Button() {
 }
 ```
 
-`Button` ได้ `theme` ไม่ว่ามันจะอยู่ลึกแค่ไหน และไม่มี component ตรงกลางต้องส่งต่อมัน นี่คือทางแก้ prop drilling เมื่อ composition เอื้อมไปถึง consumer ไม่ได้
+`Button` ได้ `theme` ไม่ว่าจะอยู่ลึกแค่ไหน และไม่มี component ตรงกลางต้องส่งต่อค่านั้น นี่คือทางแก้ prop drilling เมื่อ composition เอื้อมไปถึง consumer ไม่ได้
 
-## เมื่อไร Context เหมาะ — และเมื่อไรมันเจ็บ
+## เมื่อไร Context เหมาะ — และเมื่อไรกลับเจ็บ
 
 Context ถูกออกแบบมาสำหรับค่าที่ **แชร์กว้างและเปลี่ยนไม่บ่อย**: theme, user/auth ปัจจุบัน, locale, config ของ design-system สิ่งที่หลาย component อ่านแต่เปลี่ยนน้อย
 
-จุดที่ต้องระวังคือ performance: **เมื่อ value ของ provider เปลี่ยน ทุก consumer จะ re-render** — และ React หยุดมันด้วย `memo` ไม่ได้ เพราะพวกมัน subscribe context โดยตรง
+จุดที่ต้องระวังคือ performance: **เมื่อ value ของ provider เปลี่ยน ทุก consumer จะ re-render** — และ React หยุดการ re-render นั้นด้วย `memo` ไม่ได้ เพราะ consumer subscribe context โดยตรง
 
 <Mermaid title="value ของ context เปลี่ยนทีทำให้ทุก consumer re-render" code={ctxDiagram} />
 
@@ -52,16 +52,16 @@ export const ctxDiagram = `flowchart TB
   prov --> c3["Consumer C re-render"]
   note["memo หยุด context re-render ไม่ได้"] -.-> c1`;
 
-ดังนั้นการเอา state ที่ **เปลี่ยนเร็ว** (เช่นค่าที่ update ทุก keystroke หรือทุก animation frame) ไปใส่ context กว้าง ๆ ตัวเดียวคือกับดัก performance — มันจะ re-render ทั้ง subtree ตลอดเวลา
+ดังนั้นการเอา state ที่ **เปลี่ยนเร็ว** (เช่นค่าที่ update ทุก keystroke หรือทุก animation frame) ไปใส่ context กว้าง ๆ ตัวเดียวคือกับดัก performance — จะ re-render ทั้ง subtree ตลอดเวลา
 
 มีสองวิธีบรรเทา:
 
-- **Split context.** แยกค่าที่ไม่เกี่ยวกันไว้คนละ provider เพื่อให้การเปลี่ยนตัวหนึ่งไม่ re-render consumer ของอีกตัว การ split ที่พบบ่อย: context หนึ่งสำหรับ *state* และอีกหนึ่งสำหรับ *dispatch/updater* (updater มัน stable ดังนั้น component ที่ dispatch อย่างเดียวจะไม่ re-render)
-- **ทำให้ value stable.** memoize object `value` ของ provider เพื่อไม่ให้มันได้ reference ใหม่ทุกครั้งที่ parent render
+- **Split context.** แยกค่าที่ไม่เกี่ยวกันไว้คนละ provider เพื่อให้การเปลี่ยนตัวหนึ่งไม่ re-render consumer ของอีกตัว การ split ที่พบบ่อย: context หนึ่งสำหรับ *state* และอีกหนึ่งสำหรับ *dispatch/updater* (updater stable อยู่แล้ว ดังนั้น component ที่ dispatch อย่างเดียวจะไม่ re-render)
+- **ทำให้ value stable.** memoize object `value` ของ provider เพื่อไม่ให้ได้ reference ใหม่ทุกครั้งที่ parent render
 
 ## Context ไม่ใช่ state manager
 
-ความแตกต่างสำคัญ: **Context เป็นกลไก *ขนส่ง* ไม่ใช่ที่เก็บ state** มันย้ายค่าลงไปตาม tree มันไม่ได้ถือหรือ update state ตัว state เองยังอยู่ใน `useState` หรือ `useReducer` ใน component ที่เป็น provider "ใช้ Context สำหรับ state management" จริง ๆ แล้วหมายถึง "`useState`/`useReducer` ข้างบน แล้วส่งด้วย Context"
+ความแตกต่างสำคัญ: **Context เป็นกลไก *ขนส่ง* ไม่ใช่ที่เก็บ state** Context ย้ายค่าลงไปตาม tree ไม่ได้ถือหรือ update state ตัว state เองยังอยู่ใน `useState` หรือ `useReducer` ใน component ที่เป็น provider "ใช้ Context สำหรับ state management" จริง ๆ แล้วหมายถึง "`useState`/`useReducer` ข้างบน แล้วส่งด้วย Context"
 
 ```jsx
 function AuthProvider({ children }) {
@@ -98,10 +98,10 @@ export const quizCtx = [
   {
     q: 'ทำไม Context ถึง "ไม่ใช่ state manager"?',
     options: [
-      'มันเก็บข้อมูลอะไรไม่ได้เลย',
-      'มันแค่ขนส่งค่าลงไปตาม tree ตัว state จริงยังอยู่ใน useState/useReducer ใน provider',
-      'มันใช้ได้กับ string เท่านั้น',
-      'มันรันบน server',
+      'เก็บข้อมูลอะไรไม่ได้เลย',
+      'แค่ขนส่งค่าลงไปตาม tree ตัว state จริงยังอยู่ใน useState/useReducer ใน provider',
+      'ใช้ได้กับ string เท่านั้น',
+      'รันบน server',
     ],
     answer: 1,
   },

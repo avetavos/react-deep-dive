@@ -12,11 +12,11 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## test behavior ไม่ใช่ implementation
 
-แนวทางหลักในการ test React component คือ **React Testing Library (RTL)** ปกติรันบน **Vitest** (หรือ Jest) หลักการนำทางของมันคือ:
+แนวทางหลักในการ test React component คือ **React Testing Library (RTL)** ปกติรันบน **Vitest** (หรือ Jest) หลักการนำทางของตัวเองคือ:
 
-> ยิ่ง test ของคุณเหมือนวิธีที่ software ถูกใช้จริงมากเท่าไร มันยิ่งให้ความมั่นใจมากขึ้นเท่านั้น
+> ยิ่ง test ของคุณเหมือนวิธีที่ software ถูกใช้จริงมากเท่าไร ก็ยิ่งให้ความมั่นใจมากขึ้นเท่านั้น
 
-หมายความว่าคุณไม่ test internal state, ชื่อ prop หรือว่า component เรียก hooks ตัวไหน คุณ render component, โต้ตอบกับมันแบบที่ user ทำ (click, type) แล้ว assert สิ่งที่ user เห็น เมื่อคุณ refactor internal — สลับ `useState` เป็น `useReducer`, แยก hook — test ที่อิง behavior ก็ยังผ่าน เพราะ behavior ไม่เปลี่ยน ส่วน test ที่อิง implementation จะพังโดยไม่มีเหตุผลจริง
+หมายความว่าคุณไม่ test internal state, ชื่อ prop หรือว่า component เรียก hooks ตัวไหน คุณ render component, โต้ตอบกับ component แบบที่ user ทำ (click, type) แล้ว assert สิ่งที่ user เห็น เมื่อคุณ refactor internal — สลับ `useState` เป็น `useReducer`, แยก hook — test ที่อิง behavior ก็ยังผ่าน เพราะ behavior ไม่เปลี่ยน ส่วน test ที่อิง implementation จะพังโดยไม่มีเหตุผลจริง
 
 ## test widget แบบ end to end
 
@@ -43,7 +43,7 @@ test('increments when the button is clicked', async () => {
 นิสัยสำคัญ:
 
 - **query ด้วย role/label/text** ตามลำดับนี้ — `getByRole` ดีที่สุดเพราะสะท้อนวิธีที่ assistive tech (และ user) หา element ซึ่งยัง nudge ให้คุณเขียน markup ที่ accessible
-- **ใช้ `userEvent`** ไม่ใช่ `fireEvent` ดิบ ๆ สำหรับ interaction — มัน simulate การกระทำของ user จริง (focus, key sequence) ได้แม่นกว่า
+- **ใช้ `userEvent`** ไม่ใช่ `fireEvent` ดิบ ๆ สำหรับ interaction — simulate การกระทำของ user จริง (focus, key sequence) ได้แม่นกว่า
 - **assert สิ่งที่ render ออกมา** (`toBeInTheDocument`, text ที่เห็น) ไม่ใช่ `component.state`
 
 ## testing pyramid ฉบับ React
@@ -93,9 +93,9 @@ export const quizTesting = [
     q: 'ทำไม test ที่อิง behavior ดีกว่าอิง implementation?',
     options: [
       'รันเร็วกว่า',
-      'refactor internal (เช่น useState → useReducer) ไม่ทำให้มันพัง เพราะ behavior ไม่เปลี่ยน',
+      'refactor internal (เช่น useState → useReducer) ไม่ทำให้ test พัง เพราะ behavior ไม่เปลี่ยน',
       'ไม่ต้อง assert',
-      'มัน test compiler',
+      'test compiler',
     ],
     answer: 1,
   },

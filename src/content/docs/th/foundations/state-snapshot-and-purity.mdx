@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## state เป็น snapshot ไม่ใช่ตัวแปรที่มีชีวิต
 
-นี่คือเรื่องที่คนเข้าใจผิดมากที่สุดใน React ตอนคุณอ่านตัวแปร state คุณกำลังอ่านค่าของมัน **สำหรับ render นี้** — snapshot ที่ถูกแช่แข็ง ณ ตอนที่ component ถูกเรียก มันไม่เปลี่ยนกลาง render แม้หลังจากคุณเรียก setter แล้ว
+นี่คือเรื่องที่คนเข้าใจผิดมากที่สุดใน React ตอนคุณอ่านตัวแปร state คุณกำลังอ่านค่าของตัวเอง **สำหรับ render นี้** — snapshot ที่ถูกแช่แข็ง ณ ตอนที่ component ถูกเรียก ไม่เปลี่ยนกลาง render แม้หลังจากคุณเรียก setter แล้ว
 
 ```jsx
 function Counter() {
@@ -30,7 +30,7 @@ function Counter() {
 }
 ```
 
-ถ้าจะ update จากค่า *ล่าสุด* ที่ pending อยู่ ให้ส่ง **updater function** — React รันมันตามลำดับกับค่าที่กำลังเปลี่ยน:
+ถ้าจะ update จากค่า *ล่าสุด* ที่ pending อยู่ ให้ส่ง **updater function** — React รัน updater เหล่านั้นตามลำดับกับค่าที่กำลังเปลี่ยน:
 
 ```jsx
 setCount((c) => c + 1);
@@ -43,7 +43,7 @@ Mental model: re-render คือการเรียกฟังก์ชั�
 
 ## มอง state เป็น immutable
 
-เพราะ state เป็น snapshot ที่ React เทียบด้วย identity คุณจึง **ต้องไม่ mutate มัน** ให้สร้าง object/array ใหม่แทน:
+เพราะ state เป็น snapshot ที่ React เทียบด้วย identity คุณจึง **ต้องไม่ mutate state** ให้สร้าง object/array ใหม่แทน:
 
 ```jsx
 // ❌ Mutation — same array reference, React may not re-render, and it's a bug.
@@ -54,11 +54,11 @@ setTodos(todos);
 setTodos([...todos, newTodo]);
 ```
 
-การ mutate state ทำลายความสามารถของ React ในการตรวจจับการเปลี่ยนแปลง (มันเทียบ reference) และทำลาย model แบบ snapshot ให้สร้างค่าใหม่เสมอ
+การ mutate state ทำลายความสามารถของ React ในการตรวจจับการเปลี่ยนแปลง (React เทียบ reference) และทำลาย model แบบ snapshot ให้สร้างค่าใหม่เสมอ
 
 ## render ต้อง pure
 
-การ render ของ component — ทุกอย่างที่มันทำระหว่างคำนวณ JSX ที่จะ return — ต้อง **pure**: เมื่อ props และ state เท่าเดิม ต้อง return output เดิมและไม่มี side effect ระหว่าง render คุณต้องไม่:
+การ render ของ component — ทุกอย่างที่ทำระหว่างคำนวณ JSX ที่จะ return — ต้อง **pure**: เมื่อ props และ state เท่าเดิม ต้อง return output เดิมและไม่มี side effect ระหว่าง render คุณต้องไม่:
 
 - mutate props, state หรือตัวแปร/object ใด ๆ ที่มีอยู่ก่อน;
 - เขียน DOM, ยิง network request หรือเริ่ม timer;
@@ -76,10 +76,10 @@ Side effect อยู่ใน **event handler** (สิ่งที่เกิ
 
 ## StrictMode double-render โดยตั้งใจ
 
-ใน development `<StrictMode>` ของ React **เรียกฟังก์ชัน component ของคุณสองครั้ง** โดยตั้งใจ (และรัน effect setup→cleanup→setup) นี่ไม่ใช่ bug — มันเป็นตัวตรวจจับ ถ้า render ของคุณ pure การเรียกสองครั้งจะให้ output เหมือนกันและไม่มีอะไรพัง ถ้าคุณเผลอ mutate อะไรหรือพึ่ง side effect ระหว่าง render การเรียกซ้ำจะเผยให้เห็น bug ทันทีใน development แทนที่จะเป็น glitch ลึกลับใน production
+ใน development `<StrictMode>` ของ React **เรียกฟังก์ชัน component ของคุณสองครั้ง** โดยตั้งใจ (และรัน effect setup→cleanup→setup) นี่ไม่ใช่ bug — เป็นตัวตรวจจับ ถ้า render ของคุณ pure การเรียกสองครั้งจะให้ output เหมือนกันและไม่มีอะไรพัง ถ้าคุณเผลอ mutate อะไรหรือพึ่ง side effect ระหว่าง render การเรียกซ้ำจะเผยให้เห็น bug ทันทีใน development แทนที่จะเป็น glitch ลึกลับใน production
 
 <Callout title="สรุปหนึ่งบรรทัด">
-ตัวแปร state คือ **snapshot สำหรับ render ปัจจุบัน** — การเรียก setter ไม่เปลี่ยนมันกลาง render ดังนั้นใช้ **updater function** (`setX(x => ...)`) เมื่อค่าถัดไปขึ้นกับค่าก่อนหน้า มอง state เป็น **immutable** (สร้าง object/array ใหม่ React เทียบด้วย reference) และรักษา **render ให้ pure** — ไม่ mutate หรือ side effect ระหว่าง render พวกนั้นไปอยู่ใน event handler และ effect การ double-render ของ StrictMode มีไว้จับการละเมิดเรื่องนี้พอดี
+ตัวแปร state คือ **snapshot สำหรับ render ปัจจุบัน** — การเรียก setter ไม่เปลี่ยนค่านั้นกลาง render ดังนั้นใช้ **updater function** (`setX(x => ...)`) เมื่อค่าถัดไปขึ้นกับค่าก่อนหน้า มอง state เป็น **immutable** (สร้าง object/array ใหม่ React เทียบด้วย reference) และรักษา **render ให้ pure** — ไม่ mutate หรือ side effect ระหว่าง render พวกนั้นไปอยู่ใน event handler และ effect การ double-render ของ StrictMode มีไว้จับการละเมิดเรื่องนี้พอดี
 </Callout>
 
 export const quizPurity = [
@@ -107,9 +107,9 @@ export const quizPurity = [
     q: 'ทำไมต้องไม่ mutate state (เช่น `todos.push(x); setTodos(todos)`)?',
     options: [
       'mutation ช้ากว่า',
-      'React ตรวจจับการเปลี่ยนแปลงด้วย reference การ mutate เก็บ reference เดิมไว้ React จึงอาจไม่ re-render และมันทำลาย model แบบ snapshot',
+      'React ตรวจจับการเปลี่ยนแปลงด้วย reference การ mutate เก็บ reference เดิมไว้ React จึงอาจไม่ re-render และทำลาย model แบบ snapshot',
       'array เป็น state ไม่ได้',
-      'มันทำได้และไม่มีปัญหา',
+      'ทำได้และไม่มีปัญหา',
     ],
     answer: 1,
   },

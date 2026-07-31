@@ -27,7 +27,7 @@ function Page() {
 }
 ```
 
-คุณไม่ต้องเขียน "if loading show spinner" ที่ไหนเลย boundary เป็นเจ้าของ loading UI ของ subtree มัน แบบ declarative
+คุณไม่ต้องเขียน "if loading show spinner" ที่ไหนเลย boundary เป็นเจ้าของ loading UI ของ subtree ตัวเอง แบบ declarative
 
 ## "suspend" หมายความว่าอะไร
 
@@ -43,7 +43,7 @@ export const suspDiagram = `flowchart TB
 
 ## code-splitting ด้วย React.lazy
 
-การใช้ Suspense ที่พบบ่อยที่สุดคือ **lazy-loading** component เพื่อไม่ให้ code ของมันอยู่ใน initial bundle `React.lazy` รับ dynamic `import()` และคืน component ที่ suspend จนกว่า chunk จะโหลดเสร็จ
+การใช้ Suspense ที่พบบ่อยที่สุดคือ **lazy-loading** component เพื่อไม่ให้ code ของตัวเองอยู่ใน initial bundle `React.lazy` รับ dynamic `import()` และคืน component ที่ suspend จนกว่า chunk จะโหลดเสร็จ
 
 ```jsx
 import { lazy, Suspense } from "react";
@@ -60,11 +60,11 @@ function App({ showSettings }) {
 }
 ```
 
-จนกว่า `SettingsPanel` จะถูก render จริง JavaScript ของมันจะไม่ถูกโหลดเลย — win ตรง ๆ กับเวลา initial load พอ render ครั้งแรก มันจะ suspend (กำลังโหลด), fallback โชว์, แล้ว panel ค่อยโผล่
+จนกว่า `SettingsPanel` จะถูก render จริง JavaScript ของตัวเองจะไม่ถูกโหลดเลย — win ตรง ๆ กับเวลา initial load พอ render ครั้งแรก จะ suspend (กำลังโหลด), fallback โชว์, แล้ว panel ค่อยโผล่
 
 ## การ nest boundary
 
-Suspense boundary **nest กันได้** และคุณวางมันเพื่อควบคุม *granularity* ของการโหลด boundary ที่อยู่สูงใน tree หมายถึง "แสดง spinner ใหญ่อันเดียวสำหรับทุกอย่างข้างล่าง" boundary ที่ลึกลงไปหมายถึง "เผย shell ทันที และแสดง spinner เล็ก ๆ เฉพาะส่วนที่ยังโหลดอยู่"
+Suspense boundary **nest กันได้** และคุณวางตำแหน่ง boundary เพื่อควบคุม *granularity* ของการโหลด boundary ที่อยู่สูงใน tree หมายถึง "แสดง spinner ใหญ่อันเดียวสำหรับทุกอย่างข้างล่าง" boundary ที่ลึกลงไปหมายถึง "เผย shell ทันที และแสดง spinner เล็ก ๆ เฉพาะส่วนที่ยังโหลดอยู่"
 
 ```jsx
 <Suspense fallback={<PageSkeleton />}>
@@ -95,10 +95,10 @@ export const quizSusp = [
   {
     q: 'component "suspend" หมายความว่าอะไร?',
     options: [
-      'มัน throw error',
-      'มัน render ไม่จบเพราะกำลังรอ code หรือ data ดังนั้น React แสดง fallback ของ boundary ที่ใกล้ที่สุด',
-      'มันหยุด render ตลอดไป',
-      'มัน re-render วนลูป',
+      'throw error',
+      'render ไม่จบเพราะกำลังรอ code หรือ data ดังนั้น React แสดง fallback ของ boundary ที่ใกล้ที่สุด',
+      'หยุด render ตลอดไป',
+      're-render วนลูป',
     ],
     answer: 1,
   },
@@ -106,7 +106,7 @@ export const quizSusp = [
     q: '`React.lazy(() => import("./X"))` ทำอะไร?',
     options: [
       'cache X ไว้ใน memory',
-      'code-split X เป็น chunk แยกที่โหลดตอน render ครั้งแรกเท่านั้น (suspend จนกว่ามันจะมา)',
+      'code-split X เป็น chunk แยกที่โหลดตอน render ครั้งแรกเท่านั้น (suspend จนกว่าจะมา)',
       'ทำให้ X render เร็วขึ้น',
       'preload ทุก component',
     ],

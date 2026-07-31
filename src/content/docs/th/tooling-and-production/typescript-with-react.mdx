@@ -9,9 +9,9 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## type component และ props ของมัน
+## type component และ props ของตัวเอง
 
-React component คือ function คุณจึง type มันด้วยการ type props นิยาม `type` (หรือ `interface`) สำหรับ props แล้ว annotate พารามิเตอร์:
+React component คือ function คุณจึง type component ด้วยการ type props นิยาม `type` (หรือ `interface`) สำหรับ props แล้ว annotate พารามิเตอร์:
 
 ```tsx
 type ButtonProps = {
@@ -25,7 +25,7 @@ function Button({ label, onClick, variant = 'primary' }: ButtonProps) {
 }
 ```
 
-ให้ type props object ตรง ๆ (แบบข้างบน) แทน `React.FC` แบบเก่า — `React.FC` เลิกนิยมแล้ว (มันทำให้ generics และการ type children ยุ่งยาก) แค่ annotate พารามิเตอร์ props ที่ destructure ก็พอ
+ให้ type props object ตรง ๆ (แบบข้างบน) แทน `React.FC` แบบเก่า — `React.FC` เลิกนิยมแล้ว (ทำให้ generics และการ type children ยุ่งยาก) แค่ annotate พารามิเตอร์ props ที่ destructure ก็พอ
 
 ## children และ React type ที่พบบ่อย
 
@@ -69,7 +69,7 @@ function onChange(e: React.ChangeEvent<HTMLInputElement>) {
 
 ## React 19: ref เป็น prop ธรรมดา
 
-จุด currency ที่ชัดเจน: ใน **React 19 `ref` เป็น prop ธรรมดา** สำหรับ function component คุณจึงไม่ต้องใช้ `forwardRef` และ generics ที่เก้ ๆ กัง ๆ ของมันอีก type `ref` ไว้ข้าง ๆ props ตัวอื่นได้เลย:
+จุด currency ที่ชัดเจน: ใน **React 19 `ref` เป็น prop ธรรมดา** สำหรับ function component คุณจึงไม่ต้องใช้ `forwardRef` และ generics ที่เก้ ๆ กัง ๆ ของตัวเองอีก type `ref` ไว้ข้าง ๆ props ตัวอื่นได้เลย:
 
 ```tsx
 // React 19 — ref is just a prop.
@@ -83,7 +83,7 @@ function TextInput({ placeholder, ref }: InputProps) {
 }
 ```
 
-`forwardRef` ยังทำงานได้ และ code เก่าที่ใช้ `React.forwardRef<HTMLInputElement, Props>` ก็ไม่มีปัญหา แต่สำหรับ component ใหม่ใน React 19 ข้ามมันไปได้เลย — wrapper น้อยลงหนึ่งชั้นและไม่ต้องเล่นกล generic
+`forwardRef` ยังทำงานได้ และ code เก่าที่ใช้ `React.forwardRef<HTMLInputElement, Props>` ก็ไม่มีปัญหา แต่สำหรับ component ใหม่ใน React 19 ข้าม `forwardRef` ไปได้เลย — wrapper น้อยลงหนึ่งชั้นและไม่ต้องเล่นกล generic
 
 <Callout title="The one-line takeaway">
 type component ด้วยการ type **props object** (ข้าม `React.FC`); type `children` เป็น `React.ReactNode`; ให้ type argument กับ hook เมื่อค่าเริ่มต้นกำกวม (`useState<User | null>(null)`, `useRef<HTMLInputElement>(null)`); และ type event ด้วย `React.ChangeEvent`/`MouseEvent` ใน **React 19 `ref` เป็น prop ธรรมดา** — type เป็น `React.Ref<T>` ใน props และเลิกใช้ `forwardRef` สำหรับ code ใหม่

@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## useFormStatus: pending โดยไม่ต้อง drilling
 
-บ่อยครั้งคุณอยากให้ submit button รู้ว่า form ของมัน pending อยู่ไหม — เพื่อ disable ตัวเองและแสดง spinner การส่ง `isPending` ลงไปทุก component ระหว่างทางน่าเบื่อ **`useFormStatus`** (จาก `react-dom`) ให้ component อ่าน status ของ `<form>` ที่เป็น parent ที่ใกล้ที่สุดได้ตรง ๆ:
+บ่อยครั้งคุณอยากให้ submit button รู้ว่า form ของตัวเอง pending อยู่ไหม — เพื่อ disable ตัวเองและแสดง spinner การส่ง `isPending` ลงไปทุก component ระหว่างทางน่าเบื่อ **`useFormStatus`** (จาก `react-dom`) ให้ component อ่าน status ของ `<form>` ที่เป็น parent ที่ใกล้ที่สุดได้ตรง ๆ:
 
 ```jsx
 import { useFormStatus } from 'react-dom';
@@ -39,7 +39,7 @@ function ProfileForm({ action }) {
 
 กฎเดียว: `useFormStatus` อ่าน form ที่เป็น *parent* ดังนั้น `SubmitButton` ต้องถูก **render อยู่ข้างใน** `<form>` ไม่ใช่เป็น component ที่ render form เอง
 
-## useOptimistic: แสดงผลลัพธ์ก่อนที่มันจะเป็นจริง
+## useOptimistic: แสดงผลลัพธ์ก่อนที่จะเป็นจริง
 
 เพื่อให้ UX กระฉับกระเฉง คุณมักอยากแสดงผลลัพธ์ที่ *คาดว่าจะเกิด* ทันทีและแก้ก็ต่อเมื่อ request ล้มเหลว **`useOptimistic`** ให้ optimistic value ที่คุณ set ทันทีและ React จะ revert กลับไปเป็นค่าจริงอัตโนมัติเมื่อ action จบ:
 
@@ -72,7 +72,7 @@ function Thread({ messages, sendMessage }) {
 }
 ```
 
-message ปรากฏทันทีที่คุณ submit เมื่อ `sendMessage` resolve, React จะ drop entry ที่เป็น optimistic แล้วใช้ state จริงแทน; ถ้ามัน *ล้มเหลว* React จะ revert อัตโนมัติ คุณจึงไม่ต้อง roll back เอง
+message ปรากฏทันทีที่คุณ submit เมื่อ `sendMessage` resolve, React จะ drop entry ที่เป็น optimistic แล้วใช้ state จริงแทน; ถ้า `sendMessage` *ล้มเหลว* React จะ revert อัตโนมัติ คุณจึงไม่ต้อง roll back เอง
 
 <Mermaid title="optimistic update แล้วค่อย settle" code={optimisticDiagram} />
 
@@ -89,7 +89,7 @@ export const optimisticDiagram = `sequenceDiagram
 สอง hook นี้รวมกันทำให้ form รู้สึกทันใจ: `useOptimistic` สำหรับ feedback ทันที, `useFormStatus` สำหรับ affordance เรื่อง pending บนปุ่ม — ทั้งคู่โดยไม่ต้องร้อย state ผ่าน props
 
 <Callout title="สรุปหนึ่งบรรทัด">
-**`useFormStatus`** ให้ submit button (ที่ render อยู่ *ข้างใน* `<form>`) อ่าน state `pending` ของ form ได้โดยไม่ต้อง prop drilling **`useOptimistic`** แสดงค่าที่คาดไว้ทันทีและให้ React revert อัตโนมัติถ้า async action ล้มเหลว — ไม่ต้อง roll back เอง เมื่อจับคู่กับ form Action มันทำให้ interaction รู้สึกทันที
+**`useFormStatus`** ให้ submit button (ที่ render อยู่ *ข้างใน* `<form>`) อ่าน state `pending` ของ form ได้โดยไม่ต้อง prop drilling **`useOptimistic`** แสดงค่าที่คาดไว้ทันทีและให้ React revert อัตโนมัติถ้า async action ล้มเหลว — ไม่ต้อง roll back เอง เมื่อจับคู่กับ form Action ทำให้ interaction รู้สึกทันที
 </Callout>
 
 export const quizForms = [
@@ -107,7 +107,7 @@ export const quizForms = [
     q: 'component ที่เรียก useFormStatus ต้องถูก render ที่ไหน?',
     options: [
       'ที่ไหนก็ได้ในแอป',
-      'ข้างใน <form> ที่มันอ่าน status (มันอ่าน form ที่เป็น parent)',
+      'ข้างใน <form> ที่อ่าน status (hook อ่าน form ที่เป็น parent)',
       'ที่ root ของแอป',
       'บน server เท่านั้น',
     ],

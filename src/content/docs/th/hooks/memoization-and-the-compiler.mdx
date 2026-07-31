@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## ปัญหาที่ memoization แก้
 
-ทุก render จะรัน component ใหม่ ซึ่งสร้าง value ทุกตัวข้างในใหม่หมด — รวมถึง object, array และ function พวกนี้เป็น **reference ใหม่ทุกครั้ง** แม้เนื้อหาจะเหมือนเดิม ปกติแล้วไม่เป็นไร แต่มันเป็นปัญหาใน 2 กรณี:
+ทุก render จะรัน component ใหม่ ซึ่งสร้าง value ทุกตัวข้างในใหม่หมด — รวมถึง object, array และ function พวกนี้เป็น **reference ใหม่ทุกครั้ง** แม้เนื้อหาจะเหมือนเดิม ปกติแล้วไม่เป็นไร แต่เป็นปัญหาใน 2 กรณี:
 
 1. **การคำนวณที่แพง** รันทุก render ทั้งที่ input ไม่เปลี่ยน
 2. **reference ใหม่** (function หรือ object) ที่ส่งให้ memoized child ทำลาย memoization ของ child ทำให้ re-render โดยไม่จำเป็น
@@ -23,7 +23,7 @@ tool memoization สามตัวจัดการคนละส่วน:
 |------|--------|----------|
 | `useMemo(fn, deps)` | **value** (ผลของ `fn`) | การคำนวณแพง หรือต้องการ object/array reference ที่ stable |
 | `useCallback(fn, deps)` | **function** (reference ที่ stable) | ส่ง callback ให้ memoized child (คือ `useMemo` สำหรับ function) |
-| `React.memo(Component)` | **render ของ component** | component re-render ด้วย props เดิมและการ render มัน costly |
+| `React.memo(Component)` | **render ของ component** | component re-render ด้วย props เดิมและการ render นั้น costly |
 
 ```jsx
 // Expensive calc, cached until inputs change:
@@ -36,9 +36,9 @@ const handleSelect = useCallback((id) => setSelected(id), []);
 const Row = React.memo(function Row({ item }) { /* ... */ });
 ```
 
-## เมื่อ memoization ช่วย — และเมื่อมันทำร้าย
+## เมื่อ memoization ช่วย — และเมื่อกลับทำร้าย
 
-memoization ไม่ฟรี: มันเสีย memory และเสียการเทียบทุก render ใส่ไว้ทุกที่ "เผื่อไว้" ทำให้ code รกและอาจติดลบสุทธิ มันช่วยจริงเมื่อ:
+memoization ไม่ฟรี: เสีย memory และเสียการเทียบทุก render ใส่ไว้ทุกที่ "เผื่อไว้" ทำให้ code รกและอาจติดลบสุทธิ memoization ช่วยจริงเมื่อ:
 
 - การคำนวณที่ cache นั้นแพงแบบวัดได้ **หรือ**
 - ต้องการ reference ที่ stable เพื่อกัน `React.memo` child (หรือ effect dependency) ไม่ให้รันใหม่
@@ -55,7 +55,7 @@ export const refDiagram = `flowchart TB
 
 ## React Compiler เปลี่ยนสมการ
 
-React มี **compiler** ที่ memoize component และ value ของคุณอัตโนมัติตอน build — มันแทรกสิ่งที่เทียบเท่า `useMemo`/`useCallback`/`memo` ให้ตรงจุดที่ช่วยจริง โดยวิเคราะห์ code ของคุณ จุดประสงค์ทั้งหมดคือ **คุณไม่ควรต้อง memoize เอง**
+React มี **compiler** ที่ memoize component และ value ของคุณอัตโนมัติตอน build — compiler แทรกสิ่งที่เทียบเท่า `useMemo`/`useCallback`/`memo` ให้ตรงจุดที่ช่วยจริง โดยวิเคราะห์ code ของคุณ จุดประสงค์ทั้งหมดคือ **คุณไม่ควรต้อง memoize เอง**
 
 แนวทางปฏิบัติสำหรับ project React 19+:
 
@@ -65,7 +65,7 @@ React มี **compiler** ที่ memoize component และ value ของ�
 ทิศทางชัดเจน: manual memoization กำลังกลายเป็น optimization ทางเลือกสุดท้าย ไม่ใช่นิสัยเริ่มต้น ทำให้ component pure แล้วให้ compiler จัดการงานจดจำให้
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`useMemo` cache **value**, `useCallback` cache **function reference** และ `React.memo` ข้าม **re-render ของ child** เมื่อ props ไม่เปลี่ยน — ทั้งหมดเพื่อสู้กับงานที่ไม่จำเป็นจาก reference ใหม่ทุก render ใช้เฉพาะที่ bottleneck จริง ไม่ใช่แบบอัตโนมัติ และด้วย **React Compiler** คุณแทบเลิก memoize เอง: มันแทรก memoization ที่จุดที่ช่วยให้ หน้าที่คุณจึงเหลือแค่ทำให้ component pure และเขียน code ตรง ๆ
+`useMemo` cache **value**, `useCallback` cache **function reference** และ `React.memo` ข้าม **re-render ของ child** เมื่อ props ไม่เปลี่ยน — ทั้งหมดเพื่อสู้กับงานที่ไม่จำเป็นจาก reference ใหม่ทุก render ใช้เฉพาะที่ bottleneck จริง ไม่ใช่แบบอัตโนมัติ และด้วย **React Compiler** คุณแทบเลิก memoize เอง: compiler แทรก memoization ที่จุดที่ช่วยให้ หน้าที่คุณจึงเหลือแค่ทำให้ component pure และเขียน code ตรง ๆ
 </Callout>
 
 export const quizMemo = [
@@ -85,14 +85,14 @@ export const quizMemo = [
       'inline function ช้า',
       'มีการสร้าง function reference ใหม่ทุก render, memoized child จึงเห็น prop ที่เปลี่ยนและ re-render',
       'memo ไม่รับ function',
-      'มัน throw error',
+      'throw error',
     ],
     answer: 1,
   },
   {
     q: 'แนวทางเมื่อเปิด React Compiler คืออะไร?',
     options: [
-      'ใส่ useMemo และ useCallback ทุกที่เพื่อช่วยมัน',
+      'ใส่ useMemo และ useCallback ทุกที่เพื่อช่วย compiler',
       'เขียน code ตรง ๆ และ pure แล้วให้ compiler auto-memoize — แทบไม่ต้อง memoize เอง',
       'เลิกใช้ hooks',
       'ปิด StrictMode',

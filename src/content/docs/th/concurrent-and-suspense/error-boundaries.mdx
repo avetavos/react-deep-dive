@@ -1,6 +1,6 @@
 ---
 title: 'Error Boundaries'
-description: 'จับ render error ด้วย error boundary, มันจับอะไรและไม่จับอะไร และการจับคู่กับ Suspense เพื่อ UI แบบ loading บวก error'
+description: 'จับ render error ด้วย error boundary, จับอะไรได้และจับอะไรไม่ได้ และการจับคู่กับ Suspense เพื่อ UI แบบ loading บวก error'
 sidebar:
   order: 4
 ---
@@ -12,9 +12,9 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## component เดียว crash ไม่ควรทำทั้งแอปว่างเปล่า
 
-ถ้า component throw ระหว่าง render React — โดยตั้งใจ — จะ unmount *ทั้ง* tree แทนที่จะแสดง UI ที่เสียหาย **error boundary** คือ component ที่จับ error แบบนั้นใน subtree ของมัน เพื่อให้ความล้มเหลวใน widget เดียวแสดง fallback ตรงนั้น แทนที่จะทำทั้งหน้าล่ม
+ถ้า component throw ระหว่าง render React — โดยตั้งใจ — จะ unmount *ทั้ง* tree แทนที่จะแสดง UI ที่เสียหาย **error boundary** คือ component ที่จับ error แบบนั้นใน subtree ของตัวเอง เพื่อให้ความล้มเหลวใน widget เดียวแสดง fallback ตรงนั้น แทนที่จะทำทั้งหน้าล่ม
 
-error boundary ยังต้องเขียนเป็น **class component** เพราะมันพึ่ง lifecycle method สองตัวที่ไม่มี hook เทียบเท่า:
+error boundary ยังต้องเขียนเป็น **class component** เพราะพึ่ง lifecycle method สองตัวที่ไม่มี hook เทียบเท่า:
 
 ```jsx
 import { Component } from "react";
@@ -47,13 +47,13 @@ class ErrorBoundary extends Component {
 </ErrorBoundary>
 ```
 
-## มันจับอะไร — และไม่จับอะไร
+## จับอะไรได้ — และจับอะไรไม่ได้
 
-ตรงนี้คนเข้าใจผิดบ่อย error boundary จับ error ที่เกิด **ระหว่าง rendering** (และใน lifecycle method กับ constructor) ของ component ที่อยู่ *ใต้* มัน มัน **ไม่** จับ:
+ตรงนี้คนเข้าใจผิดบ่อย error boundary จับ error ที่เกิด **ระหว่าง rendering** (และใน lifecycle method กับ constructor) ของ component ที่อยู่ *ใต้* boundary แต่ **ไม่** จับ:
 
 - **event handler** — error ใน `onClick` เป็น JS error ปกติ; ใช้ `try/catch`
 - **asynchronous code** — promise ที่ reject หรือ callback ของ `setTimeout` รันนอก render ของ React ดังนั้นไม่มี boundary ไหนเห็น
-- **error ใน boundary เอง** — จับเฉพาะที่อยู่ *ใต้* มัน
+- **error ใน boundary เอง** — boundary จับเฉพาะ error ที่อยู่ *ใต้* ตัวเอง
 - **server-side rendering error** — จัดการแยกต่างหาก
 
 <Mermaid title="error boundary จับอะไร" code={ebDiagram} />
@@ -76,10 +76,10 @@ Suspense และ error boundary เสริมกัน: Suspense จัด�
 </ErrorBoundary>
 ```
 
-เมื่อ `use()` อ่าน promise ที่ *reject* React จะ propagate มันไปยัง error boundary ที่ใกล้ที่สุด — ดังนั้น boundary เดียวกันที่จัดการ render crash ก็จัดการ data-fetch failure ด้วย
+เมื่อ `use()` อ่าน promise ที่ *reject* React จะ propagate error นั้นไปยัง error boundary ที่ใกล้ที่สุด — ดังนั้น boundary เดียวกันที่จัดการ render crash ก็จัดการ data-fetch failure ด้วย
 
 <Callout title="สรุปหนึ่งบรรทัด">
-**error boundary** (class component ที่ใช้ `getDerivedStateFromError` + `componentDidCatch` หรือ library `react-error-boundary`) จับ error ที่ throw **ระหว่าง render** ใน children และแสดง fallback แทนที่จะ unmount ทั้งแอป มัน **ไม่** จับ error ใน event handler, async callback หรือตัวมันเอง — พวกนั้นใช้ `try/catch` ครอบ `<Suspense>` ด้วย error boundary เพื่อได้ state loading, error และ success แบบ declarative
+**error boundary** (class component ที่ใช้ `getDerivedStateFromError` + `componentDidCatch` หรือ library `react-error-boundary`) จับ error ที่ throw **ระหว่าง render** ใน children และแสดง fallback แทนที่จะ unmount ทั้งแอป แต่ **ไม่** จับ error ใน event handler, async callback หรือตัวเอง — พวกนั้นใช้ `try/catch` ครอบ `<Suspense>` ด้วย error boundary เพื่อได้ state loading, error และ success แบบ declarative
 </Callout>
 
 export const quizEb = [
@@ -87,7 +87,7 @@ export const quizEb = [
     q: 'error boundary จับอะไร?',
     options: [
       'ทุก error ทุกที่ในแอป',
-      'error ที่ throw ระหว่าง rendering (และ lifecycle) ของ component ที่อยู่ใต้มัน',
+      'error ที่ throw ระหว่าง rendering (และ lifecycle) ของ component ที่อยู่ใต้ boundary',
       'เฉพาะ network error',
       'เฉพาะ syntax error',
     ],
@@ -107,7 +107,7 @@ export const quizEb = [
     q: 'ทำไม error boundary ยังต้องเขียนเป็น class component?',
     options: [
       'class เร็วกว่า',
-      'มันพึ่ง getDerivedStateFromError และ componentDidCatch ซึ่งไม่มี hook เทียบเท่า',
+      'พึ่ง getDerivedStateFromError และ componentDidCatch ซึ่งไม่มี hook เทียบเท่า',
       'hook render อะไรไม่ได้',
       'เป็นแค่ความชอบด้าน style',
     ],

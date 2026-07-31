@@ -37,11 +37,11 @@ function ChangeName() {
 }
 ```
 
-async form ทุกอันในแอปทำซ้ำแบบนี้: loading flag, error slot, `try/catch/finally` มันคือ boilerplate และถ้าลืม `finally` spinner จะค้างตลอดกาล
+async form ทุกอันในแอปทำซ้ำแบบนี้: loading flag, error slot, `try/catch/finally` ทั้งหมดนี้คือ boilerplate และถ้าลืม `finally` spinner จะค้างตลอดกาล
 
 ## Action: async function ที่ส่งให้ form
 
-**Action** ก็แค่ async function ที่คุณส่งให้ `<form>` ผ่าน prop `action` React เรียกมันตอน submit, ส่ง `FormData` ให้ และจัดการ pending state กับการ reset form ให้:
+**Action** ก็แค่ async function ที่คุณส่งให้ `<form>` ผ่าน prop `action` React เรียก function นี้ตอน submit, ส่ง `FormData` ให้ และจัดการ pending state กับการ reset form ให้:
 
 ```jsx
 <form action={async (formData) => {
@@ -105,7 +105,7 @@ export const actionDiagram = `sequenceDiagram
 ทั้งการเต้นสามจังหวะ — loading flag, error slot, try/catch/finally — ยุบเหลือ hook เดียวที่ลืม reset spinner ไม่ได้
 
 <Callout title="สรุปหนึ่งบรรทัด">
-**Action** คือ async function ที่ส่งให้ `<form action={fn}>`; React เรียกมันพร้อม `FormData` และจัดการการ submit ให้ **`useActionState(action, initialState)`** ห่อมันและคืน **`[state, formAction, isPending]`** — action รับ `(previousState, formData)` และ return state ถัดไป และ pending ถูก track อัตโนมัติ นี่แทนที่ boilerplate เดิมที่ต้องมี `useState`-สำหรับ-data + `useState`-สำหรับ-loading + `try/catch/finally`
+**Action** คือ async function ที่ส่งให้ `<form action={fn}>`; React เรียก action นั้นพร้อม `FormData` และจัดการการ submit ให้ **`useActionState(action, initialState)`** ห่อ action นั้นและคืน **`[state, formAction, isPending]`** — action รับ `(previousState, formData)` และ return state ถัดไป และ pending ถูก track อัตโนมัติ นี่แทนที่ boilerplate เดิมที่ต้องมี `useState`-สำหรับ-data + `useState`-สำหรับ-loading + `try/catch/finally`
 </Callout>
 
 export const quizActions = [
@@ -113,7 +113,7 @@ export const quizActions = [
     q: '"Action" ของ React 19 คืออะไร?',
     options: [
       'Redux action object',
-      'async function ที่ส่งให้ form ผ่าน prop action; React เรียกมันตอน submit พร้อม FormData',
+      'async function ที่ส่งให้ form ผ่าน prop action; React เรียกตอน submit พร้อม FormData',
       'CSS transition',
       'router redirect',
     ],
