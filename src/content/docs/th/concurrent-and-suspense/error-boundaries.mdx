@@ -22,12 +22,12 @@ import { Component } from "react";
 class ErrorBoundary extends Component {
   state = { error: null };
 
-  // render phase: คืน state ใหม่เพื่อแสดง fallback ใน render ถัดไป
+  // Render phase: return new state to show a fallback on the next render.
   static getDerivedStateFromError(error) {
     return { error };
   }
 
-  // commit phase: side effect — log error ไปยัง reporting service ของคุณ
+  // Commit phase: side effect — log the error to your reporting service.
   componentDidCatch(error, info) {
     reportError(error, info.componentStack);
   }
@@ -43,7 +43,7 @@ class ErrorBoundary extends Component {
 
 ```jsx
 <ErrorBoundary fallback={<p>Something went wrong.</p>}>
-  <Widget />   {/* ถ้า Widget throw ระหว่าง render, fallback จะโชว์ตรงนี้ */}
+  <Widget />   {/* if Widget throws while rendering, the fallback shows here */}
 </ErrorBoundary>
 ```
 

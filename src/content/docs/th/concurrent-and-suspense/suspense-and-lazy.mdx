@@ -20,8 +20,8 @@ import { Suspense } from "react";
 function Page() {
   return (
     <Suspense fallback={<Spinner />}>
-      <Profile />       {/* ถ้าอันนี้ suspend, Spinner จะโชว์ */}
-      <Timeline />      {/* จนกว่าทั้งคู่พร้อม แล้วทั้งคู่จะโผล่พร้อมกัน */}
+      <Profile />       {/* if this suspends, the Spinner shows */}
+      <Timeline />      {/* until BOTH are ready, then both appear together */}
     </Suspense>
   );
 }
@@ -48,7 +48,7 @@ export const suspDiagram = `flowchart TB
 ```jsx
 import { lazy, Suspense } from "react";
 
-// code ของ SettingsPanel เป็น chunk แยก, fetch ตอน render ครั้งแรกเท่านั้น
+// SettingsPanel's code is a separate chunk, fetched only when first rendered.
 const SettingsPanel = lazy(() => import("./SettingsPanel"));
 
 function App({ showSettings }) {
@@ -70,7 +70,7 @@ Suspense boundary **nest กันได้** และคุณวางตำ�
 <Suspense fallback={<PageSkeleton />}>
   <Header />
   <Suspense fallback={<FeedSkeleton />}>
-    <Feed />                 {/* header โชว์ระหว่างที่มีแค่ feed กำลังโหลด */}
+    <Feed />                 {/* the header shows while only the feed loads */}
   </Suspense>
 </Suspense>
 ```

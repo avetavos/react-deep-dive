@@ -18,7 +18,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import { use, Suspense } from "react";
 
 function Message({ messagePromise }) {
-  const text = use(messagePromise);   // suspend จนกว่า promise จะ resolve
+  const text = use(messagePromise);   // suspends until the promise resolves
   return <p>{text}</p>;
 }
 
@@ -38,13 +38,13 @@ function Container({ messagePromise }) {
 `use()` *ไม่* เริ่ม fetch และไม่ cache อะไรเลย แค่อ่าน promise ที่คุณให้ — ดังนั้น promise นั้น **ต้องเสถียรข้าม render** การสร้าง promise ใน body ของ component หมายถึง promise ใหม่ทุก render ซึ่งจะ suspend ตลอดกาล (หรือ refetch ไม่หยุด)
 
 ```jsx
-// ❌ promise ใหม่ทุก render — refetch / ไม่ settle
+// ❌ New promise every render — refetches / never settles.
 function Bad({ id }) {
   const data = use(fetch(`/api/${id}`).then(r => r.json()));
   // ...
 }
 
-// ✅ promise ถูกสร้างข้างนอกและส่งเข้ามา (cache โดย caller/framework)
+// ✅ The promise is created outside and passed in (cached by the caller/framework).
 function Good({ dataPromise }) {
   const data = use(dataPromise);
   // ...

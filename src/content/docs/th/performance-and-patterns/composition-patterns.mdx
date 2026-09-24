@@ -15,7 +15,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 คำตอบเรื่องการ reuse ของ React ไม่ใช่ inheritance แต่คือ **composition** แทนที่จะ extend component คุณส่ง content และ behavior *เข้าไป* ใน component รูปแบบง่ายที่สุดคือ prop `children`: component รับ JSX อะไรก็ได้ แล้วตัดสินใจว่าจะวางไว้ตรงไหน
 
 ```jsx
-// Card ทั่วไปที่ไม่รู้และไม่สนว่าข้างในมีอะไร
+// A generic Card that doesn't know or care what's inside it.
 function Card({ title, children }) {
   return (
     <section className="card">
@@ -38,7 +38,7 @@ function Card({ title, children }) {
 เมื่อหลาย component ต้องทำงานร่วมกันและ **แชร์ state** pattern *compound component* จะเปิดเผยกลุ่มชิ้นส่วนที่ประสานงานกันผ่าน state ที่แชร์ (มักผ่าน context) — ส่วนผู้ใช้จัดวางชิ้นส่วนเหล่านั้นได้อย่างอิสระ
 
 ```jsx
-// ผู้ใช้ compose ชิ้นส่วนเอง; Tabs แชร์ state ผ่าน context ภายใน
+// The consumer composes the pieces; Tabs shares state via context internally.
 <Tabs defaultValue="a">
   <TabList>
     <Tab value="a">First</Tab>
@@ -63,17 +63,17 @@ export const compoundDiagram = `flowchart TB
 **render prop** คือ prop ที่ค่าเป็น function ที่ return JSX — ให้ component แชร์ *logic* ส่วนผู้เรียกควบคุม *การ render*
 
 ```jsx
-// Render prop: MouseTracker เป็นเจ้าของ logic, ผู้เรียก render เอง
+// Render prop: MouseTracker owns the logic, the caller renders.
 <MouseTracker render={({ x, y }) => <p>Cursor at {x}, {y}</p>} />
 ```
 
 render props เป็นวิธีคลาสสิกในการแชร์ stateful logic ก่อนมี hook วันนี้ **custom hook** ทำแบบเดียวกันได้ตรงกว่า — ไม่มี wrapper component ไม่มีการซ้อน:
 
 ```jsx
-// เทียบเท่าสมัยใหม่: custom hook
+// The modern equivalent: a custom hook.
 function Component() {
-  const { x, y } = useMousePosition();   // แชร์ logic ผ่าน hook
-  return <p>Cursor at {x}, {y}</p>;      // ผู้เรียก render ตามปกติ
+  const { x, y } = useMousePosition();   // logic shared via a hook
+  return <p>Cursor at {x}, {y}</p>;      // caller renders normally
 }
 ```
 
@@ -84,13 +84,13 @@ function Component() {
 input จะเป็น **controlled** เมื่อ React state เป็น single source of truth (`value` + `onChange`) และเป็น **uncontrolled** เมื่อ DOM ถือค่าไว้และคุณอ่านผ่าน ref (หรือใน React 19 อ่านจาก `FormData` ของ form ตอน submit)
 
 ```jsx
-// Controlled: state ขับ input; validate/transform ได้ทุก keystroke
+// Controlled: state drives the input; you can validate/transform on every keystroke.
 const [name, setName] = useState("");
 <input value={name} onChange={(e) => setName(e.target.value)} />
 
-// Uncontrolled: DOM เป็นเจ้าของค่า; อ่านตอนที่ต้องการ
+// Uncontrolled: the DOM owns the value; read it when you need it.
 const ref = useRef(null);
-<input defaultValue="Ada" ref={ref} />   // ref.current.value ตอน submit
+<input defaultValue="Ada" ref={ref} />   // ref.current.value on submit
 ```
 
 ใช้ **controlled** เมื่อต้อง react หรือจำกัด input ระหว่างที่เปลี่ยน; ใช้ **uncontrolled** สำหรับ form ง่าย ๆ ที่สนใจแค่ค่าสุดท้าย (state น้อยกว่า, re-render น้อยกว่า)

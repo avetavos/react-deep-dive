@@ -22,7 +22,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import { createPortal } from "react-dom";
 
 function Modal({ children }) {
-  // render เข้า document.body แต่ยังเป็น React child ของที่ที่ <Modal/> ถูกใช้
+  // Rendered into document.body, but still a React child of wherever <Modal/> is used.
   return createPortal(
     <div className="overlay">{children}</div>,
     document.body,
@@ -65,8 +65,8 @@ React **batch** การ update state และ apply DOM change แบบ asyn
 ```jsx
 import { flushSync } from "react-dom";
 
-flushSync(() => setItems([...items, newItem])); // DOM ถูก update แล้วเมื่อบรรทัดนี้ return
-listRef.current.scrollTop = listRef.current.scrollHeight; // ตอนนี้อ่าน/scroll ได้ปลอดภัย
+flushSync(() => setItems([...items, newItem])); // DOM is updated by the time this returns
+listRef.current.scrollTop = listRef.current.scrollHeight; // now safe to read/scroll
 ```
 
 `flushSync` ทำลาย batching และทำ performance แย่ลง ดังนั้นใช้เฉพาะเมื่อจำเป็นจริง ๆ ที่ต้องอ่านหรือทำอะไรกับ DOM ก่อน browser paint

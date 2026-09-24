@@ -37,23 +37,23 @@ export const propDiagram = `flowchart TB
 วิธีแก้ที่ดีที่สุดคือเชิงโครงสร้าง ถ้า state อยู่สูงใน tree แต่มีแค่ branch เล็ก ๆ ที่ใช้ ทุกครั้งที่ state เปลี่ยนจะ re-render ทั้ง tree **ย้าย state ลงมา** ไปที่ component ที่ใช้จริง เพื่อให้การเปลี่ยนแปลง re-render แค่ branch เล็ก ๆ นั้น
 
 ```jsx
-// ❌ Search text อยู่ใน App ดังนั้นการพิมพ์ re-render ทั้ง app
+// ❌ Search text lives in App, so typing re-renders the entire app.
 function App() {
   const [query, setQuery] = useState("");
   return (
     <>
       <SearchBox query={query} onChange={setQuery} />
-      <HugeExpensiveDashboard />   {/* re-render ทุก keystroke! */}
+      <HugeExpensiveDashboard />   {/* re-renders on every keystroke! */}
     </>
   );
 }
 
-// ✅ ย้าย state เข้าไปใน SearchBox; การพิมพ์ re-render แค่ SearchBox
+// ✅ Move the state into SearchBox; typing re-renders only SearchBox.
 function App() {
   return (
     <>
       <SearchBox />
-      <HugeExpensiveDashboard />   {/* ไม่ re-render ระหว่างพิมพ์ */}
+      <HugeExpensiveDashboard />   {/* never re-renders while typing */}
     </>
   );
 }
@@ -67,7 +67,7 @@ function App() {
 
 ```jsx
 const ExpensiveList = React.memo(function ExpensiveList({ items }) {
-  // re-render เฉพาะเมื่อ `items` (โดย reference) เปลี่ยนจริง
+  // Only re-renders when `items` (by reference) actually changes.
   return items.map((it) => <Row key={it.id} item={it} />);
 });
 ```

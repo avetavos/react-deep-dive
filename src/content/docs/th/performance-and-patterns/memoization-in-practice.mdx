@@ -19,13 +19,13 @@ memoization คือการ cache ผลลัพธ์ระหว่าง 
 - **`React.memo(Component)`** — ห่อ *component* ให้ข้าม re-render เมื่อ props shallow-equal
 
 ```jsx
-// useMemo: ข้ามการ sort list ใหญ่ใหม่ ยกเว้น list หรือ order เปลี่ยน
+// useMemo: skip re-sorting a big list unless the list or order changes.
 const sorted = useMemo(() => items.slice().sort(compare), [items]);
 
-// useCallback: คง onSelect ให้เสถียร เพื่อไม่ให้ memoized child re-render
+// useCallback: keep a stable onSelect so a memoized child does not re-render.
 const onSelect = useCallback((id) => setSelected(id), []);
 
-// React.memo: ข้าม re-render เมื่อ props ไม่เปลี่ยน
+// React.memo: skip re-render when props are unchanged.
 const Row = React.memo(function Row({ item, onSelect }) { /* ... */ });
 ```
 
@@ -41,10 +41,10 @@ export const refDiagram = `flowchart TB
   memo --> fail["reference ใหม่ != reference เก่า\n→ shallow-equal fail → Child re-render อยู่ดี"]`;
 
 ```jsx
-// ❌ function และ object ใหม่ทุก render — React.memo(Child) ข้ามไม่ได้เลย
+// ❌ A fresh function and object every render — React.memo(Child) never skips.
 <Child onClick={() => doThing()} style={{ color: "red" }} />
 
-// ✅ reference เสถียร — ตอนนี้ React.memo(Child) ข้ามได้จริง
+// ✅ Stable references — now React.memo(Child) can actually skip.
 const onClick = useCallback(() => doThing(), []);
 const style = useMemo(() => ({ color: "red" }), []);
 <Child onClick={onClick} style={style} />

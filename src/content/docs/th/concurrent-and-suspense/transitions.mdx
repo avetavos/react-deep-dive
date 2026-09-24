@@ -27,9 +27,9 @@ function SearchResults({ allItems }) {
   const [isPending, startTransition] = useTransition();
 
   function handleChange(e) {
-    setQuery(e.target.value);          // urgent — input อัปเดตทันที
+    setQuery(e.target.value);          // urgent — the input updates instantly
     startTransition(() => {
-      // non-urgent — React render อันนี้เบื้องหลัง, interrupt ได้
+      // non-urgent — React renders this in the background, interruptible.
       setResults(filterExpensive(allItems, e.target.value));
     });
   }
@@ -60,8 +60,8 @@ export const transDiagram = `flowchart LR
 ```jsx
 function SearchResults({ allItems, query }) {
   const deferredQuery = useDeferredValue(query);
-  // list render จาก deferredQuery ระหว่างที่ user พิมพ์ deferredQuery จะตามหลังหนึ่งก้าว
-  // ทำให้การ render list ที่แพงเกิดเบื้องหลัง
+  // The list renders against deferredQuery. While the user types, deferredQuery
+  // stays a step behind, so the expensive list render happens in the background.
   const results = filterExpensive(allItems, deferredQuery);
 
   const isStale = query !== deferredQuery;
