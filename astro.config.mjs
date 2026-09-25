@@ -40,6 +40,7 @@ export default defineConfig({
         { label: 'React 19: Actions, RSC & Forms', items: [{ autogenerate: { directory: 'react-19' } }] },
         { label: 'Performance & Patterns', items: [{ autogenerate: { directory: 'performance-and-patterns' } }] },
         { label: 'Tooling, Testing & Production', items: [{ autogenerate: { directory: 'tooling-and-production' } }] },
+        { label: 'Glossary', translations: { th: 'อภิธานศัพท์' }, link: 'glossary' },
       ],
       }), preact()],
 });
