@@ -85,13 +85,12 @@ nest boundary ยังคุม *ลำดับ* ด้วย: boundary ชั
 import { use, Suspense } from 'react';
 import { render, screen, act } from '@testing-library/react';
 
-let feedPromise: Promise<string> | null = null;
+// A stable, module-level cached promise — see "use() needs a stable
+// promise" above for why an uncached one would suspend forever. The test
+// resolves it explicitly, so timing cannot make the assertion flaky.
+let resolveFeed!: (value: string) => void;
+const feedPromise = new Promise<string>((resolve) => { resolveFeed = resolve; });
 function SlowFeed() {
-  // A stable, module-level cached promise — see "use() needs a stable
-  // promise" above for why an uncached one would suspend forever.
-  if (!feedPromise) {
-    feedPromise = new Promise((resolve) => setTimeout(() => resolve('feed-data'), 15));
-  }
   const data = use(feedPromise);
   return <p data-testid="feed">{data}</p>;
 }
@@ -119,7 +118,7 @@ test('nested Suspense: the inner fallback shows without hiding already-ready out
   expect(screen.queryByTestId('page-fallback')).toBeNull();
 
   await act(async () => {
-    await new Promise((r) => setTimeout(r, 30));
+    resolveFeed('feed-data');
   });
   expect(screen.getByTestId('feed').textContent).toBe('feed-data');
 });
