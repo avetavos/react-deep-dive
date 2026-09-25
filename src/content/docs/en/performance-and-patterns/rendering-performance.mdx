@@ -1,6 +1,6 @@
 ---
 title: 'Rendering Performance'
-description: 'Why components re-render, the render-propagates-downward default, keeping state low, stopping propagation with React.memo, and profiling before optimizing.'
+description: 'Why components re-render, keeping state low, stopping propagation with React.memo, proving renders with the Profiler API, useDeferredValue vs debounce, and virtualization.'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Why a component re-renders
 
@@ -74,12 +75,208 @@ const ExpensiveList = React.memo(function ExpensiveList({ items }) {
 
 The catch: `React.memo` only helps if the props are actually stable. Pass a fresh inline object, array, or function as a prop and the shallow comparison always fails — which is why memoization often needs `useMemo`/`useCallback` on the props too (next lesson).
 
-## Measure first: the Profiler
+## Measuring, not guessing: the `<Profiler>` API
 
-Do not guess where the slowness is. The **React DevTools Profiler** records a session and shows you exactly which components rendered, how often, and how long each took — and *why* each rendered. Optimize the component the profiler points at, not the one you suspect.
+Do not guess where the slowness is. React ships a `<Profiler>` component built exactly for this: wrap any subtree in it, pass an `onRender` callback, and React calls it after every commit inside that subtree with the numbers you'd otherwise have to guess at — `id`, `phase` (`"mount"` the first time, `"update"` every time after), `actualDuration`, `baseDuration`, `startTime`, and `commitTime`.
+
+```tsx
+// src/__tests__/profilerMountUpdate.test.tsx
+import { useState, Profiler, type ProfilerOnRenderCallback } from 'react';
+import { render, screen, act } from '@testing-library/react';
+
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>count: {count}</button>;
+}
+
+test('Profiler onRender reports "mount" on first commit and "update" on the next', () => {
+  const phases: string[] = [];
+  const onRender: ProfilerOnRenderCallback = (_id, phase) => {
+    phases.push(phase);
+  };
+
+  render(
+    <Profiler id="counter" onRender={onRender}>
+      <Counter />
+    </Profiler>,
+  );
+  expect(phases).toEqual(['mount']);
+
+  act(() => {
+    screen.getByText(/count: 0/).click();
+  });
+  expect(phases).toEqual(['mount', 'update']);
+});
+
+test('actualDuration is a non-negative number for every commit', () => {
+  const durations: number[] = [];
+  const onRender: ProfilerOnRenderCallback = (_id, _phase, actualDuration) => {
+    durations.push(actualDuration);
+  };
+
+  render(
+    <Profiler id="counter2" onRender={onRender}>
+      <Counter />
+    </Profiler>,
+  );
+  act(() => {
+    screen.getByText(/count: 0/).click();
+  });
+
+  expect(durations.length).toBe(2);
+  for (const d of durations) expect(d).toBeGreaterThanOrEqual(0);
+});
+```
+
+```text
+✓ Profiler onRender reports "mount" on first commit and "update" on the next
+✓ actualDuration is a non-negative number for every commit
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`actualDuration` is the real number to watch in production diagnostics: how long this commit actually took to render the subtree, versus `baseDuration` (how long it *would* take to render the whole subtree from scratch, with no memoization). A component that commits often with a non-trivial `actualDuration` and an `"update"` phase — for props that did not visibly change — is exactly the re-render you're hunting for.
+
+### React DevTools: Highlight Updates and the Profiler flamegraph
+
+`<Profiler onRender>` is for gathering numbers programmatically; for an interactive session, the **React DevTools** browser extension gives you the same information visually:
+
+- **"Highlight updates when components render"** (a checkbox in the Components tab) flashes a colored outline around any component that just re-rendered — the fastest way to *see* the propagation problem from "Fix #2" above with your own eyes, live, on a real page.
+- The **Profiler tab** records a session and renders a **flamegraph** per commit: each bar is a component, its width is roughly proportional to render time, and clicking a bar shows the same `actualDuration`/`baseDuration` numbers the `onRender` callback receives, plus *why* it rendered (props changed, state changed, parent rendered, hooks changed).
+
+Between the two: use Highlight Updates first to spot *that* something is re-rendering too much, then the Profiler flamegraph to see *how expensive* that render actually was before you reach for `React.memo`.
+
+{/* RenderVisualizer: Phase 4 */}
+
+## `useDeferredValue` vs. debouncing
+
+Both techniques keep a UI responsive while an expensive part lags behind — but they lag for different reasons, and the difference matters when you pick one.
+
+**Debouncing** delays applying a value until input has been quiet for a fixed amount of time you choose (`setTimeout(..., 300)`, typically). You are guessing at a delay that's long enough to skip wasted work but short enough to still feel responsive.
+
+**`useDeferredValue`** has no fixed delay at all. Per react.dev: *"There is no fixed delay caused by `useDeferredValue` itself. As soon as React finishes the original re-render, React will immediately start working on the background re-render with the new deferred value."* The background render is also **interruptible** — if another update to the value arrives before it finishes, React throws away the stale background attempt and starts over with the newest value, so it never wastes work rendering an already-obsolete result the way a debounce timer can.
+
+```jsx
+// Debounce: you choose the delay, and it fires on a timer regardless of render cost.
+function useDebounced(value, delayMs) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(id);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+// useDeferredValue: no delay to tune, no timer, no cleanup — React
+// schedules the background render at low priority and adapts automatically.
+const deferredQuery = useDeferredValue(query);
+```
+
+Proof that the deferred value really does lag one render behind the urgent input, then catches up on its own:
+
+```tsx
+// src/__tests__/deferredValueLag.test.tsx
+import { useState, useDeferredValue } from 'react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+
+function Demo({ onCommit }: { onCommit: (text: string, deferred: string) => void }) {
+  const [text, setText] = useState('a');
+  const deferredText = useDeferredValue(text);
+  onCommit(text, deferredText);
+  return (
+    <div>
+      <input aria-label="urgent" value={text} onChange={(e) => setText(e.target.value)} />
+      <p data-testid="deferred">{deferredText}</p>
+    </div>
+  );
+}
+
+test('useDeferredValue commits an intermediate render with the OLD value before catching up to the new one', () => {
+  const commits: Array<{ text: string; deferred: string }> = [];
+  const onCommit = (text: string, deferred: string) => commits.push({ text, deferred });
+
+  render(<Demo onCommit={onCommit} />);
+
+  act(() => {
+    fireEvent.change(screen.getByLabelText('urgent'), { target: { value: 'ab' } });
+  });
+
+  // react.dev: "React will first attempt a re-render with the old value, and
+  // then try another re-render in the background with the new value."
+  expect(commits).toEqual([
+    { text: 'a', deferred: 'a' },   // mount
+    { text: 'ab', deferred: 'a' },  // urgent update commits; deferred still lags
+    { text: 'ab', deferred: 'ab' }, // background render catches up
+  ]);
+
+  expect(screen.getByLabelText<HTMLInputElement>('urgent').value).toBe('ab');
+  expect(screen.getByTestId('deferred').textContent).toBe('ab');
+});
+```
+
+```text
+✓ useDeferredValue commits an intermediate render with the OLD value before catching up to the new one
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Reach for `useDeferredValue` when you only have a *value* (no setter to wrap in `startTransition`, e.g. it arrived as a prop); reach for debouncing when you specifically want to throttle a rate of *calls* — a network request on every keystroke, for instance, where "as soon as possible" is the wrong goal and you genuinely want to wait for a pause.
+
+## When the render itself is still the problem: virtualization
+
+Memoization and `React.memo` stop *needless* re-renders, but neither one helps when a single, necessary render has to produce thousands of real DOM nodes — a 10,000-row table renders slowly the first time no matter how well it's memoized afterward. The fix for genuinely huge lists is **virtualization**: render only the rows currently scrolled into view (plus a small buffer), and swap them as the user scrolls, so the DOM only ever holds a few dozen nodes regardless of the underlying data size. This course does not add a virtualization library as a dependency, but the current standard tool for it is [`@tanstack/virtual`](https://tanstack.com/virtual) — reach for it once a profiled render shows the cost is proportional to list length, not to anything memoization can remove.
+
+## Mental Model
+
+A re-render is not "did this component's *output* change" — it is "did React re-run this component's function." By default it re-runs the entire subtree under any state change, and only *then* checks (via reconciliation) whether the DOM needs to change. `React.memo` inserts a checkpoint *before* that re-run: "are the props shallow-equal to last time? If so, skip re-running this function at all." The Profiler API and DevTools exist so you never have to guess which of these two things — running the function, or committing a DOM change — is actually where your time goes.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Keep state low/local | Fewer components re-render per change, no extra API | Requires noticing where state actually lives; sometimes means restructuring components |
+| `React.memo` | Walls off an expensive subtree from a parent's re-renders | Only works if every prop is referentially stable; adds a comparison on every render |
+| `useDeferredValue` | No delay to tune, automatically interruptible, integrates with Suspense | No `isPending`-style flag; you compare `value !== deferredValue` yourself |
+| Debouncing | Simple, well-understood, good for reducing call *rate* (e.g. network requests) | Fixed delay you must guess; wastes the delay even when the render would have been cheap |
+| Virtualization | DOM size stays constant regardless of list length | Extra dependency and complexity; breaks assumptions like "select-all" text or `Ctrl+F` across the whole list |
+
+## Common Misconceptions
+
+- **"Re-rendering means the DOM changed."** Reconciliation still runs a diff; a re-render with identical output produces zero DOM mutations. The cost is re-running the function and diffing, not necessarily touching the browser.
+- **"`useDeferredValue` delays the update by some amount of time, like debounce."** Proven above: there is no timer. It commits an immediate render with the old value, then starts the new one as soon as the first one finishes — not after any fixed wait.
+- **"`React.memo` makes a component fast."** It only skips re-*running* the function when props are unchanged; it does nothing for a component whose single, necessary render is itself expensive (that's what virtualization or an algorithmic fix is for).
+- **"I should profile the whole app to find the problem."** Profile the specific interaction that feels slow (React DevTools Profiler records a session) — a global profile buries the one component that matters under everything that re-rendered along the way but cost nothing.
+
+## Reading AI-generated code
+
+When reviewing generated code that touches rendering performance, check for:
+
+- Is `React.memo` applied to a component whose parent still passes it a fresh inline object, array, or function every render? The memo does nothing in that case (proven in the next lesson).
+- Does a "debounced search" actually use a fixed `setTimeout` where `useDeferredValue` would adapt automatically to real render cost — or vice versa, is `useDeferredValue` used to throttle an actual network call (it does not reduce call count, only render priority)?
+- Is state that's only read by one small leaf component declared much higher up the tree "just in case," forcing unrelated siblings to re-render on every change?
+- Does a claim of "this component doesn't re-render often" have any Profiler or DevTools evidence behind it, or is it asserted from reading the code alone?
+- Is a large, fixed-size list (thousands of rows) rendered in full with no virtualization, memoization used instead to paper over a render that is expensive by construction?
+
+<SpotTheBug code={`const Row = React.memo(function Row({ label, onSelect }) {
+  return <li onClick={onSelect}>{label}</li>;
+});
+
+function List({ items, onPick }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <Row key={item.id} label={item.label} onSelect={() => onPick(item.id)} />
+      ))}
+    </ul>
+  );
+}`}>
+`Row` is wrapped in `React.memo`, but `List` passes `onSelect={() => onPick(item.id)}` — a brand-new arrow function created on every render of `List`, for every row. `React.memo`'s shallow prop comparison sees a "changed" `onSelect` every single time, so every `Row` re-renders whenever `List` re-renders, exactly as if `memo` were not there at all. The fix is to give `Row` a stable callback: either pass `item.id` down and call `onPick(id)` inside `Row` itself (so `List` only passes the stable `onPick` reference), or wrap the per-row callback in `useCallback` keyed on `item.id` (only worthwhile if `onPick` itself is stable).
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-A component re-renders when its **own state changes**, its **parent re-renders** (which cascades to the whole subtree), or a **context** it reads changes. Fix needless re-renders structurally first — **keep state low** and lift slow children in via `children` — then use **`React.memo`** to wall off a genuinely expensive subtree. Always confirm with the **DevTools Profiler** before optimizing.
+A component re-renders when its **own state changes**, its **parent re-renders** (which cascades to the whole subtree), or a **context** it reads changes. Fix needless re-renders structurally first — **keep state low** and lift slow children in via `children` — then use **`React.memo`** to wall off a genuinely expensive subtree, and confirm every claim with the **`<Profiler onRender>`** API or the **DevTools Profiler/Highlight Updates**, never by guessing. **`useDeferredValue`** lags a value behind with no fixed delay (unlike debouncing) and is interruptible; for lists so large that the *render itself* — not re-rendering — is the cost, reach for virtualization instead.
 </Callout>
 
 export const quizRender = [
@@ -92,6 +289,7 @@ export const quizRender = [
       'Only when you call forceUpdate',
     ],
     answer: 1,
+    explain: 'Those are the only three triggers React defines for a re-render — everything else (a DOM event, a timer, a network response) has to go through one of these to actually cause one.',
   },
   {
     q: 'When a parent re-renders, what happens to its children by default?',
@@ -102,6 +300,7 @@ export const quizRender = [
       'Only the first child re-renders',
     ],
     answer: 1,
+    explain: 'React re-runs the entire subtree by default because it cannot know, without checking, whether a child\'s output depends on something that changed — that is exactly what React.memo opts a component out of.',
   },
   {
     q: 'What is the best FIRST fix for a component that re-renders too often?',
@@ -112,16 +311,40 @@ export const quizRender = [
       'Disable StrictMode',
     ],
     answer: 1,
+    explain: 'Moving state to where it is actually used is a structural fix with no new API and no memoization cost — it shrinks the subtree that re-renders in the first place.',
   },
   {
-    q: 'When does `React.memo` actually prevent a re-render?',
+    q: '```tsx\nconst onRender: ProfilerOnRenderCallback = (id, phase) => {\n  phases.push(phase);\n};\nrender(<Profiler id="c" onRender={onRender}><Counter /></Profiler>);\n// ...click the button once...\n```\nWhat does the `phases` array contain after the initial render and one click?',
     options: [
-      'Always',
-      'When the component\'s props are shallow-equal to the previous render (stable references)',
-      'Only for class components',
-      'Only when there is no state',
+      '["update", "update"]',
+      '["mount", "update"] — "mount" for the first commit, "update" for every commit after',
+      '["mount", "mount"]',
+      'It stays empty — Profiler only works in React DevTools, not in code',
     ],
     answer: 1,
+    explain: 'Proven in the probe: the first commit reports phase "mount"; the click causes a state update, and that second commit reports "update" — Profiler works from plain code, no DevTools extension required.',
+  },
+  {
+    q: 'Per react.dev, what happens to the timing of `useDeferredValue`\'s background re-render?',
+    options: [
+      'It waits a fixed delay you configure, like debounce',
+      'There is no fixed delay — React starts the background render immediately after the current render finishes, and it is interruptible by a newer update',
+      'It only runs once, on unmount',
+      'It runs synchronously before the urgent update is even applied',
+    ],
+    answer: 1,
+    explain: 'react.dev is explicit: "There is no fixed delay caused by useDeferredValue itself" — it starts as soon as possible and restarts if interrupted by a newer value, unlike a debounce timer.',
+  },
+  {
+    q: '```tsx\nfunction Demo() {\n  const [text, setText] = useState("a");\n  const deferredText = useDeferredValue(text);\n  // ...\n}\n// setText("ab") is called via a fireEvent.change\n```\nWhat sequence of (text, deferredText) commits does the probe\'s test observe?',
+    options: [
+      '("a","a") then ("ab","ab") — only two commits, no lag',
+      '("a","a") then ("ab","a") then ("ab","ab") — the deferred value commits one render behind before catching up',
+      '("ab","ab") only — deferredValue updates instantly',
+      '("a","a") then ("a","ab") — the urgent value lags instead',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: three commits — mount, an urgent-update commit where deferredText still holds the old value, then a background commit where deferredText catches up to "ab".',
   },
 ];
 

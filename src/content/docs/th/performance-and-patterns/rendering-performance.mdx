@@ -1,6 +1,6 @@
 ---
 title: 'Rendering Performance'
-description: 'ทำไม component ถึง re-render, default ที่ render propagate ลงล่าง, การเก็บ state ให้ต่ำ, การหยุด propagation ด้วย React.memo และการ profile ก่อน optimize'
+description: 'ทำไม component re-render, การเก็บ state ให้ต่ำและ local, การหยุด propagation ด้วย React.memo, การพิสูจน์ render ด้วย Profiler API, useDeferredValue เทียบ debounce และ virtualization'
 sidebar:
   order: 2
 ---
@@ -9,32 +9,33 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ทำไม component ถึง re-render
 
-component จะ re-render ด้วยเหตุผล 3 อย่างเท่านั้น:
+มีเหตุผลแค่ 3 อย่างที่ component จะ re-render:
 
 1. **state ของตัวเองเปลี่ยน** (มีการเรียก setter)
-2. **parent re-render** — โดย default เมื่อ parent render React จะ re-render children *ทั้งหมด*
-3. **context ที่ component consume อยู่เปลี่ยนค่า**
+2. **parent re-render** — ปกติแล้วเมื่อ component render, React จะ re-render children *ทุกตัว*
+3. **context** ที่มัน consume เปลี่ยนค่า
 
-ข้อสองมักทำให้คนแปลกใจ: parent ที่ re-render จะ re-render ทั้ง subtree ข้างล่าง **แม้ children ที่ props ไม่ได้เปลี่ยน** React ทำแบบนี้เพราะไม่รู้ล่วงหน้าโดยไม่เช็ค ว่า output ของ child ขึ้นกับสิ่งที่เปลี่ยนหรือไม่
+ข้อสองคือสิ่งที่คนแปลกใจ: parent re-render จะ re-render ทั้ง subtree ข้างล่าง **แม้แต่ children ที่ prop ไม่เปลี่ยนเลย** React ทำแบบนี้เพราะมันไม่รู้ได้เลยว่า output ของ child ขึ้นกับสิ่งที่เปลี่ยนไปหรือเปล่า ถ้าไม่เช็ก
 
-<Mermaid title="render หนึ่งครั้ง propagate ลงทั้ง subtree" code={propDiagram} />
+<Mermaid title="render กระจายลงไปทั้ง subtree" code={propDiagram} />
 
 export const propDiagram = `flowchart TB
-  app["App re-render\n(state เปลี่ยน)"] --> header["Header re-render"]
-  app --> main["Main re-render"]
-  main --> list["List re-render"]
-  list --> item1["Item re-render"]
-  list --> item2["Item re-render"]
-  note["ทุก descendant re-render\nแม้ props ไม่เปลี่ยน"]`;
+  app["App re-renders\n(state changed)"] --> header["Header re-renders"]
+  app --> main["Main re-renders"]
+  main --> list["List re-renders"]
+  list --> item1["Item re-renders"]
+  list --> item2["Item re-renders"]
+  note["Every descendant re-renders,\neven if its props are unchanged"]`;
 
-การ re-render ไม่ฟรี แต่ปกติแล้วถูก — จำไว้ว่า reconciliation ให้ผลเป็น **zero DOM change** เมื่อ output ไม่เปลี่ยน ปัญหาจะโผล่ก็ต่อเมื่อ subtree ขนาดใหญ่ หรือ component ที่หนัก re-render โดยไม่จำเป็นและบ่อย ๆ
+การ re-render ไม่ฟรี แต่ปกติแล้วถูก — อย่าลืมว่า reconciliation ให้ **DOM change เป็นศูนย์** เมื่อ output ไม่เปลี่ยน ปัญหาจะเกิดก็ต่อเมื่อ subtree ขนาดใหญ่ หรือ component ที่แพง re-render โดยไม่จำเป็นและบ่อย
 
-## แก้ #1: เก็บ state ให้ต่ำและ local
+## แก้ที่ 1: เก็บ state ให้ต่ำและ local
 
-วิธีแก้ที่ดีที่สุดคือเชิงโครงสร้าง ถ้า state อยู่สูงใน tree แต่มีแค่ branch เล็ก ๆ ที่ใช้ ทุกครั้งที่ state เปลี่ยนจะ re-render ทั้ง tree **ย้าย state ลงมา** ไปที่ component ที่ใช้จริง เพื่อให้การเปลี่ยนแปลง re-render แค่ branch เล็ก ๆ นั้น
+การแก้ที่ดีที่สุดคือเชิงโครงสร้าง ถ้า state ก้อนหนึ่งอยู่สูงใน tree แต่มีแค่ branch เล็ก ๆ เดียวที่ใช้มัน state เปลี่ยนทีก็ re-render ทั้ง tree **ย้าย state ลงไป** ที่ component ที่ใช้มันจริง ๆ ให้การเปลี่ยนแปลง re-render แค่ branch เล็ก ๆ นั้น
 
 ```jsx
 // ❌ Search text lives in App, so typing re-renders the entire app.
@@ -59,11 +60,11 @@ function App() {
 }
 ```
 
-อีกทริกที่เกี่ยวกัน: **ยก content ด้วย composition** ถ้า parent ที่เปลี่ยนบ่อยต้องห่อ child ที่ช้า ให้ส่ง child ที่ช้าเข้าไปเป็น `children` — children ที่ส่งเป็น props จะไม่ re-render เพียงเพราะ state ของ parent เปลี่ยน
+เทคนิคที่เกี่ยวข้อง: **ยก content ขึ้นด้วย composition** ถ้า parent ที่เปลี่ยนไวต้องห่อ child ที่ช้า ให้ส่ง child ตัวช้าเข้ามาเป็น `children` — children ที่ส่งมาเป็น prop จะไม่ re-render แค่เพราะ state ของ parent เปลี่ยน
 
-## แก้ #2: หยุด propagation ด้วย `React.memo`
+## แก้ที่ 2: หยุด propagation ด้วย `React.memo`
 
-เมื่อย้าย state ไม่ได้และ child หนักจริง ให้ห่อ child ด้วย `React.memo` component ที่ memoize แล้วจะข้ามการ re-render เมื่อ props **shallow-equal** กับ render ก่อนหน้า — component นั้นกลายเป็นกำแพงที่ parent re-render ข้ามไม่ได้
+เมื่อย้าย state ไม่ได้และ child นั้นแพงจริง ๆ ให้ห่อด้วย `React.memo` component ที่ memoize จะข้าม re-render เมื่อ props ของมัน **shallow-equal** กับ render ก่อนหน้า — มันกลายเป็นกำแพงที่ parent re-render ข้ามไม่ได้
 
 ```jsx
 const ExpensiveList = React.memo(function ExpensiveList({ items }) {
@@ -72,14 +73,210 @@ const ExpensiveList = React.memo(function ExpensiveList({ items }) {
 });
 ```
 
-จุดที่ต้องระวัง: `React.memo` ช่วยได้ก็ต่อเมื่อ props เสถียรจริง ๆ ส่ง object, array หรือ function แบบ inline ใหม่เป็น prop ทีไร shallow comparison จะ fail เสมอ — นั่นคือเหตุผลที่ memoization มักต้องใช้ `useMemo`/`useCallback` กับ props ด้วย (บทถัดไป)
+ข้อควรระวัง: `React.memo` ช่วยได้ก็ต่อเมื่อ props stable จริง ๆ ส่ง object, array หรือ function literal ใหม่เป็น prop แล้ว shallow comparison จะ fail เสมอ — นี่คือเหตุผลที่ memoization มักต้องการ `useMemo`/`useCallback` บน props ด้วย (บทถัดไป)
 
-## วัดผลก่อน: Profiler
+## วัด ไม่ใช่เดา: `<Profiler>` API
 
-อย่าเดาว่าความช้าอยู่ที่ไหน **React DevTools Profiler** บันทึก session และแสดงให้เห็นชัดว่า component ไหน render, บ่อยแค่ไหน, ใช้เวลาเท่าไร — และ *ทำไม* แต่ละตัวถึง render optimize component ที่ profiler ชี้ ไม่ใช่ตัวที่คุณสงสัย
+อย่าเดาว่าจุดช้าอยู่ตรงไหน React มี component `<Profiler>` ที่สร้างมาเพื่องานนี้โดยเฉพาะ: ห่อ subtree ไหนก็ได้ด้วยมัน ส่ง `onRender` callback แล้ว React จะเรียกมันหลังทุก commit ใน subtree นั้นพร้อมตัวเลขที่คุณจะต้องเดาเอง — `id`, `phase` (`"mount"` ครั้งแรก, `"update"` ทุกครั้งหลังจากนั้น), `actualDuration`, `baseDuration`, `startTime` และ `commitTime`
+
+```tsx
+// src/__tests__/profilerMountUpdate.test.tsx
+import { useState, Profiler, type ProfilerOnRenderCallback } from 'react';
+import { render, screen, act } from '@testing-library/react';
+
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>count: {count}</button>;
+}
+
+test('Profiler onRender reports "mount" on first commit and "update" on the next', () => {
+  const phases: string[] = [];
+  const onRender: ProfilerOnRenderCallback = (_id, phase) => {
+    phases.push(phase);
+  };
+
+  render(
+    <Profiler id="counter" onRender={onRender}>
+      <Counter />
+    </Profiler>,
+  );
+  expect(phases).toEqual(['mount']);
+
+  act(() => {
+    screen.getByText(/count: 0/).click();
+  });
+  expect(phases).toEqual(['mount', 'update']);
+});
+
+test('actualDuration is a non-negative number for every commit', () => {
+  const durations: number[] = [];
+  const onRender: ProfilerOnRenderCallback = (_id, _phase, actualDuration) => {
+    durations.push(actualDuration);
+  };
+
+  render(
+    <Profiler id="counter2" onRender={onRender}>
+      <Counter />
+    </Profiler>,
+  );
+  act(() => {
+    screen.getByText(/count: 0/).click();
+  });
+
+  expect(durations.length).toBe(2);
+  for (const d of durations) expect(d).toBeGreaterThanOrEqual(0);
+});
+```
+
+```text
+✓ Profiler onRender reports "mount" on first commit and "update" on the next
+✓ actualDuration is a non-negative number for every commit
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`actualDuration` คือเลขจริงที่ต้องจับตาในงาน diagnostics production: commit นี้ใช้เวลา render subtree จริงเท่าไร เทียบกับ `baseDuration` (เวลาที่ *จะ* ใช้ถ้า render ทั้ง subtree ใหม่หมดโดยไม่มี memoization เลย) component ที่ commit บ่อยด้วย `actualDuration` ที่ไม่น้อยและ phase เป็น `"update"` — ทั้งที่ prop ไม่เห็นว่าเปลี่ยน — คือ re-render ที่คุณกำลังตามหาพอดี
+
+### React DevTools: Highlight Updates และ Profiler flamegraph
+
+`<Profiler onRender>` ใช้เก็บตัวเลขแบบเขียนโปรแกรม สำหรับ session แบบ interactive **React DevTools** (browser extension) ให้ข้อมูลชุดเดียวกันแบบเห็นภาพ:
+
+- **"Highlight updates when components render"** (checkbox ใน tab Components) จะ flash เส้นขอบสีรอบ component ที่เพิ่ง re-render — วิธีเร็วที่สุดที่จะ *เห็น* ปัญหา propagation จาก "แก้ที่ 2" ด้านบนด้วยตาตัวเอง สด ๆ บนหน้าจริง
+- **tab Profiler** บันทึก session แล้ว render **flamegraph** ต่อ commit: แต่ละแท่งคือ component ความกว้างประมาณสัดส่วนกับเวลา render คลิกแท่งไหนก็เห็นตัวเลข `actualDuration`/`baseDuration` เดียวกับที่ `onRender` callback ได้รับ บวกกับ *ทำไม* มัน render (props เปลี่ยน, state เปลี่ยน, parent render, hooks เปลี่ยน)
+
+ระหว่างสองอย่างนี้: ใช้ Highlight Updates ก่อนเพื่อจับว่า *มี* อะไร re-render มากเกินไป แล้วใช้ Profiler flamegraph เพื่อดูว่า render นั้น *แพงแค่ไหน* จริง ๆ ก่อนจะหยิบ `React.memo` มาใช้
+
+{/* RenderVisualizer: Phase 4 */}
+
+## `useDeferredValue` เทียบ debounce
+
+ทั้งสองเทคนิคทำให้ UI ตอบสนองไวไว้ในขณะที่ส่วนที่แพงลากตามหลัง — แต่ลากด้วยเหตุผลต่างกัน และความต่างนี้สำคัญเวลาเลือก
+
+**Debounce** ดีเลย์การ apply ค่าจนกว่า input จะนิ่งเป็นเวลาคงที่ที่คุณเลือกเอง (`setTimeout(..., 300)` ตามปกติ) คุณกำลังเดาดีเลย์ที่นานพอจะข้ามงานที่เสียเปล่า แต่สั้นพอที่ยังรู้สึกตอบสนองไว
+
+**`useDeferredValue`** ไม่มีดีเลย์คงที่เลย ตาม react.dev: *"There is no fixed delay caused by `useDeferredValue` itself. As soon as React finishes the original re-render, React will immediately start working on the background re-render with the new deferred value."* background render ยัง **interruptible** ด้วย — ถ้ามี update ใหม่มาถึงค่าก่อนที่มันจะเสร็จ React จะทิ้ง background attempt ที่ค้างและเริ่มใหม่ด้วยค่าล่าสุด จึงไม่มีทางเสียเวลา render ผลที่ล้าสมัยไปแล้วแบบที่ debounce timer ทำได้
+
+```jsx
+// Debounce: you choose the delay, and it fires on a timer regardless of render cost.
+function useDebounced(value, delayMs) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(id);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+// useDeferredValue: no delay to tune, no timer, no cleanup — React
+// schedules the background render at low priority and adapts automatically.
+const deferredQuery = useDeferredValue(query);
+```
+
+พิสูจน์ว่า deferred value ลากตามหลัง urgent input จริงหนึ่ง render แล้วค่อยตามทัน:
+
+```tsx
+// src/__tests__/deferredValueLag.test.tsx
+import { useState, useDeferredValue } from 'react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+
+function Demo({ onCommit }: { onCommit: (text: string, deferred: string) => void }) {
+  const [text, setText] = useState('a');
+  const deferredText = useDeferredValue(text);
+  onCommit(text, deferredText);
+  return (
+    <div>
+      <input aria-label="urgent" value={text} onChange={(e) => setText(e.target.value)} />
+      <p data-testid="deferred">{deferredText}</p>
+    </div>
+  );
+}
+
+test('useDeferredValue commits an intermediate render with the OLD value before catching up to the new one', () => {
+  const commits: Array<{ text: string; deferred: string }> = [];
+  const onCommit = (text: string, deferred: string) => commits.push({ text, deferred });
+
+  render(<Demo onCommit={onCommit} />);
+
+  act(() => {
+    fireEvent.change(screen.getByLabelText('urgent'), { target: { value: 'ab' } });
+  });
+
+  // react.dev: "React will first attempt a re-render with the old value, and
+  // then try another re-render in the background with the new value."
+  expect(commits).toEqual([
+    { text: 'a', deferred: 'a' },   // mount
+    { text: 'ab', deferred: 'a' },  // urgent update commits; deferred still lags
+    { text: 'ab', deferred: 'ab' }, // background render catches up
+  ]);
+
+  expect(screen.getByLabelText<HTMLInputElement>('urgent').value).toBe('ab');
+  expect(screen.getByTestId('deferred').textContent).toBe('ab');
+});
+```
+
+```text
+✓ useDeferredValue commits an intermediate render with the OLD value before catching up to the new one
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+หยิบ `useDeferredValue` มาใช้เมื่อคุณมีแค่ *value* (ไม่มี setter ให้ห่อใน `startTransition` เช่นมันมาเป็น prop) หยิบ debounce มาใช้เมื่อต้องการ throttle *อัตราการเรียก* จริง ๆ — เช่น network request ทุก keystroke ที่ "เร็วที่สุดเท่าที่จะทำได้" เป็นเป้าหมายที่ผิด และคุณต้องการรอ pause จริง ๆ
+
+## เมื่อตัว render เองยังเป็นปัญหา: virtualization
+
+Memoization และ `React.memo` หยุด re-render ที่ *ไม่จำเป็น* แต่ไม่ช่วยเลยเมื่อ render เดียวที่จำเป็นต้องสร้าง DOM node จริงเป็นพัน ๆ — ตาราง 10,000 แถว render ช้าตั้งแต่ครั้งแรกไม่ว่าจะ memoize ดีแค่ไหนหลังจากนั้น ทางแก้สำหรับ list ที่ใหญ่จริง ๆ คือ **virtualization**: render เฉพาะแถวที่ scroll เข้ามาในจอ (บวก buffer เล็กน้อย) แล้วสลับตอนผู้ใช้ scroll เพื่อให้ DOM มีแค่ไม่กี่สิบ node เสมอไม่ว่า data จะใหญ่แค่ไหน คอร์สนี้ไม่ได้เพิ่ม library virtualization เป็น dependency แต่ tool มาตรฐานตอนนี้คือ [`@tanstack/virtual`](https://tanstack.com/virtual) — หยิบมาใช้เมื่อ profile แล้วเห็นว่าต้นทุนแปรผันตามความยาว list ไม่ใช่อะไรที่ memoization ตัดออกได้
+
+## Mental Model
+
+re-render ไม่ใช่ "output ของ component นี้เปลี่ยนไหม" — มันคือ "React รัน function ของ component นี้ใหม่ไหม" ปกติแล้วมันรันทั้ง subtree ใหม่เมื่อ state เปลี่ยน แล้ว *ค่อย* เช็ก (ผ่าน reconciliation) ว่า DOM ต้องเปลี่ยนหรือเปล่า `React.memo` แทรก checkpoint *ก่อน* การรันใหม่นั้น: "props shallow-equal กับครั้งก่อนไหม ถ้าใช่ ข้ามการรัน function นี้ไปเลย" Profiler API และ DevTools มีไว้เพื่อให้คุณไม่ต้องเดาเลยว่าสองอย่างนี้ — การรัน function หรือ การ commit DOM change — อันไหนกินเวลาจริง
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| เก็บ state ต่ำ/local | component re-render น้อยลงต่อการเปลี่ยนแปลงหนึ่งครั้ง ไม่ต้องมี API เพิ่ม | ต้องสังเกตว่า state อยู่ตรงไหนจริง บางครั้งต้อง restructure component |
+| `React.memo` | กั้น subtree ที่แพงจาก re-render ของ parent | ใช้ได้ก็ต่อเมื่อทุก prop stable ด้วย reference; เพิ่มการเทียบทุก render |
+| `useDeferredValue` | ไม่มีดีเลย์ต้องปรับ, interruptible อัตโนมัติ, integrate กับ Suspense | ไม่มี flag แบบ `isPending`; ต้องเทียบ `value !== deferredValue` เอง |
+| Debounce | ง่าย เข้าใจกันดีทั่วไป ดีสำหรับลด *อัตรา* การเรียก (เช่น network request) | ต้องเดาดีเลย์คงที่ เสียดีเลย์ไปเปล่า ๆ แม้ render จะถูกอยู่แล้ว |
+| Virtualization | ขนาด DOM คงที่ไม่ว่า list จะยาวแค่ไหน | เพิ่ม dependency และความซับซ้อน ทำลายสมมติฐานเช่น "select-all" text หรือ `Ctrl+F` ข้ามทั้ง list |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"re-render แปลว่า DOM เปลี่ยน"** reconciliation ยังรัน diff อยู่ดี; re-render ที่ output เหมือนเดิมให้ DOM mutation เป็นศูนย์ ต้นทุนคือการรัน function ใหม่และ diff ไม่ใช่การแตะ browser จริง ๆ เสมอไป
+- **"`useDeferredValue` ดีเลย์การ update ไปเวลาหนึ่ง เหมือน debounce"** พิสูจน์แล้วด้านบน: ไม่มี timer มัน commit render ด้วยค่าเก่าทันที แล้วเริ่มค่าใหม่ทันทีที่ครั้งแรกเสร็จ — ไม่ใช่หลังรอที่กำหนดตายตัว
+- **"`React.memo` ทำให้ component เร็ว"** มันแค่ข้ามการ *รัน* function ใหม่เมื่อ props ไม่เปลี่ยน มันไม่ช่วยอะไรเลยกับ component ที่ render เดียวที่จำเป็นแพงอยู่แล้ว (นั่นคือหน้าที่ของ virtualization หรือแก้ algorithm)
+- **"ต้อง profile ทั้งแอปเพื่อหาปัญหา"** profile เฉพาะ interaction ที่รู้สึกช้า (React DevTools Profiler บันทึก session) — profile ทั้งหมดจะฝัง component ตัวเดียวที่สำคัญไว้ใต้ทุกอย่างที่ re-render ไปด้วยแต่ไม่ได้เสียต้นทุนอะไรเลย
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ review โค้ดที่ generate มาที่แตะเรื่อง rendering performance ให้เช็ก:
+
+- `React.memo` ถูกใช้กับ component ที่ parent ยังส่ง object, array หรือ function literal ใหม่ทุก render อยู่ไหม? memo ไม่ช่วยอะไรเลยในกรณีนั้น (พิสูจน์ในบทถัดไป)
+- "debounced search" ใช้ `setTimeout` คงที่จริง ๆ ทั้งที่ `useDeferredValue` จะปรับตามต้นทุน render จริงเองได้ — หรือกลับกัน `useDeferredValue` ถูกใช้ throttle network call จริง (มันไม่ลดจำนวนครั้งที่เรียก ลดแค่ priority ของ render)?
+- state ที่มีแค่ leaf component เล็ก ๆ ตัวเดียวอ่าน ถูกประกาศไว้สูงใน tree "เผื่อไว้" จนทำให้ sibling ที่ไม่เกี่ยวข้อง re-render ทุกครั้งที่เปลี่ยนไหม?
+- claim ว่า "component นี้ไม่ค่อย re-render" มีหลักฐานจาก Profiler หรือ DevTools รองรับไหม หรือแค่อ่านจาก code แล้วสรุปเอง?
+- list ขนาดใหญ่คงที่ (data เป็นพัน) ถูก render เต็มโดยไม่มี virtualization แล้วใช้ memoization มากลบเกลื่อน render ที่แพงโดยธรรมชาติอยู่แล้วไหม?
+
+<SpotTheBug code={`const Row = React.memo(function Row({ label, onSelect }) {
+  return <li onClick={onSelect}>{label}</li>;
+});
+
+function List({ items, onPick }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <Row key={item.id} label={item.label} onSelect={() => onPick(item.id)} />
+      ))}
+    </ul>
+  );
+}`}>
+`Row` ถูกห่อด้วย `React.memo` แต่ `List` ส่ง `onSelect={() => onPick(item.id)}` — arrow function ใหม่ที่สร้างทุก render ของ `List` ต่อทุกแถว shallow comparison ของ `React.memo` เห็น `onSelect` ที่ "เปลี่ยน" ทุกครั้ง `Row` เลย re-render ทุกครั้งที่ `List` re-render เหมือน `memo` ไม่มีอยู่เลย ทางแก้คือให้ `Row` ได้ callback ที่ stable: ส่ง `item.id` ลงไปแล้วเรียก `onPick(id)` ข้างใน `Row` เอง (ทำให้ `List` ส่งแค่ `onPick` reference ที่ stable) หรือห่อ callback ต่อแถวด้วย `useCallback` ที่ key ด้วย `item.id` (คุ้มก็ต่อเมื่อ `onPick` เองก็ stable)
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-component re-render เมื่อ **state ตัวเองเปลี่ยน**, **parent re-render** (ซึ่ง cascade ลงทั้ง subtree) หรือ **context** ที่อ่านเปลี่ยน แก้ re-render ที่ไม่จำเป็นเชิงโครงสร้างก่อน — **เก็บ state ให้ต่ำ** และยก child ที่ช้าเข้ามาผ่าน `children` — แล้วค่อยใช้ **`React.memo`** กั้น subtree ที่หนักจริง และยืนยันด้วย **DevTools Profiler** ทุกครั้งก่อน optimize
+component re-render เมื่อ **state ตัวเอง** เปลี่ยน, **parent re-render** (ซึ่งไล่ลงทั้ง subtree) หรือ **context** ที่มันอ่านเปลี่ยน แก้ re-render ที่ไม่จำเป็นเชิงโครงสร้างก่อน — **เก็บ state ให้ต่ำ** และยก child ที่ช้าเข้ามาทาง `children` — แล้วใช้ **`React.memo`** กั้น subtree ที่แพงจริง และยืนยันทุก claim ด้วย **`<Profiler onRender>`** API หรือ **DevTools Profiler/Highlight Updates** ไม่ใช่เดาเอา **`useDeferredValue`** ลากค่าตามหลังโดยไม่มีดีเลย์คงที่ (ต่างจาก debounce) และ interruptible; สำหรับ list ที่ใหญ่จนตัว render เอง — ไม่ใช่การ re-render — เป็นต้นทุน ให้หยิบ virtualization มาใช้แทน
 </Callout>
 
 export const quizRender = [
@@ -87,41 +284,67 @@ export const quizRender = [
     q: 'เหตุผล 3 อย่างที่ component re-render คืออะไร?',
     options: [
       'CSS เปลี่ยน, รูปโหลด, scroll',
-      'state ตัวเองเปลี่ยน, parent re-render หรือ context ที่ component consume เปลี่ยน',
-      'URL เปลี่ยน, cookie เปลี่ยน หรือ tab focus',
-      'เฉพาะเมื่อเรียก forceUpdate',
+      'state ตัวเองเปลี่ยน, parent re-render หรือ context ที่มัน consume เปลี่ยน',
+      'URL เปลี่ยน, cookie เปลี่ยน หรือ tab ถูก focus',
+      'เฉพาะตอนเรียก forceUpdate',
     ],
     answer: 1,
+    explain: 'นั่นคือ 3 trigger เดียวที่ React นิยามไว้สำหรับ re-render — อะไรอื่น (DOM event, timer, network response) ต้องผ่านหนึ่งในสามนี้ถึงจะทำให้เกิด re-render จริง',
   },
   {
-    q: 'เมื่อ parent re-render จะเกิดอะไรกับ children โดย default?',
+    q: 'เมื่อ parent re-render children ของมันจะเป็นยังไงโดย default?',
     options: [
-      'เฉพาะ children ที่ props เปลี่ยนถึง re-render',
-      'children ทั้งหมด re-render แม้ตัวที่ props ไม่เปลี่ยน',
-      'ไม่มี children ตัวไหน re-render',
+      'เฉพาะ children ที่ prop เปลี่ยนถึง re-render',
+      'children ทุกตัว re-render แม้ prop จะไม่เปลี่ยนเลย',
+      'ไม่มี children re-render เลย',
       'เฉพาะ child ตัวแรก re-render',
     ],
     answer: 1,
+    explain: 'React รันทั้ง subtree ใหม่โดย default เพราะไม่รู้ได้เลยว่า output ของ child ขึ้นกับสิ่งที่เปลี่ยนไปหรือเปล่าถ้าไม่เช็ก — นั่นคือสิ่งที่ React.memo ทำให้ component ข้ามได้พอดี',
   },
   {
-    q: 'วิธีแก้ที่ดีที่สุด "ตัวแรก" สำหรับ component ที่ re-render บ่อยเกินไปคืออะไร?',
+    q: 'อะไรคือการแก้ **แรก** ที่ดีที่สุดสำหรับ component ที่ re-render บ่อยเกินไป?',
     options: [
       'ห่อทุกอย่างด้วย useMemo',
-      'ย้าย state ลงไปที่ component ที่ใช้จริง เพื่อให้การเปลี่ยนแปลง re-render subtree ที่เล็กลง',
-      'แปลงเป็น class component',
+      'ย้าย state ลงไปที่ component ที่ใช้มันจริง ๆ ให้การเปลี่ยนแปลง re-render subtree ที่เล็กลง',
+      'เปลี่ยนเป็น class component',
       'ปิด StrictMode',
     ],
     answer: 1,
+    explain: 'การย้าย state ไปที่ที่มันถูกใช้จริงคือการแก้เชิงโครงสร้างที่ไม่ต้องมี API ใหม่และไม่มีต้นทุน memoization — มันย่อ subtree ที่ re-render ตั้งแต่ต้น',
   },
   {
-    q: '`React.memo` ป้องกันการ re-render ได้จริงเมื่อไร?',
+    q: '```tsx\nconst onRender: ProfilerOnRenderCallback = (id, phase) => {\n  phases.push(phase);\n};\nrender(<Profiler id="c" onRender={onRender}><Counter /></Profiler>);\n// ...click the button once...\n```\n`phases` array หลัง render แรกและคลิกหนึ่งครั้งมีอะไรบ้าง?',
     options: [
-      'เสมอ',
-      'เมื่อ props ของ component shallow-equal กับ render ก่อนหน้า (reference เสถียร)',
-      'เฉพาะ class component',
-      'เฉพาะเมื่อไม่มี state',
+      '["update", "update"]',
+      '["mount", "update"] — "mount" สำหรับ commit แรก, "update" ทุก commit หลังจากนั้น',
+      '["mount", "mount"]',
+      'ว่างเปล่า — Profiler ทำงานแค่ใน React DevTools เท่านั้น ไม่ใช่ในโค้ด',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: commit แรกรายงาน phase "mount"; คลิกทำให้เกิด state update, commit ที่สองรายงาน "update" — Profiler ทำงานได้จาก code ธรรมดา ไม่ต้องมี DevTools extension',
+  },
+  {
+    q: 'ตาม react.dev, timing ของ background re-render ของ `useDeferredValue` เป็นยังไง?',
+    options: [
+      'รอดีเลย์คงที่ที่คุณตั้งค่า เหมือน debounce',
+      'ไม่มีดีเลย์คงที่ — React เริ่ม background render ทันทีที่ render ปัจจุบันเสร็จ และ interruptible ด้วย update ที่ใหม่กว่า',
+      'รันแค่ครั้งเดียวตอน unmount',
+      'รัน sync ก่อนที่ urgent update จะถูก apply ด้วยซ้ำ',
+    ],
+    answer: 1,
+    explain: 'react.dev บอกชัดว่า "There is no fixed delay caused by useDeferredValue itself" — มันเริ่มทันทีที่ทำได้ และเริ่มใหม่ถ้าถูก interrupt ด้วยค่าที่ใหม่กว่า ต่างจาก debounce timer',
+  },
+  {
+    q: '```tsx\nfunction Demo() {\n  const [text, setText] = useState("a");\n  const deferredText = useDeferredValue(text);\n  // ...\n}\n// setText("ab") is called via a fireEvent.change\n```\nลำดับ commit ของ (text, deferredText) ที่ test ในโพรบสังเกตได้คืออะไร?',
+    options: [
+      '("a","a") แล้ว ("ab","ab") — สอง commit เท่านั้น ไม่มีการลาก',
+      '("a","a") แล้ว ("ab","a") แล้ว ("ab","ab") — deferred value commit ตามหลังหนึ่ง render ก่อนจะตามทัน',
+      '("ab","ab") เท่านั้น — deferredValue update ทันที',
+      '("a","a") แล้ว ("a","ab") — urgent value ลากตามหลังแทน',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: สาม commit — mount, commit ของ urgent update ที่ deferredText ยังถือค่าเก่าอยู่ แล้ว background commit ที่ deferredText ตามทัน "ab"',
   },
 ];
 

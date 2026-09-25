@@ -1,6 +1,6 @@
 ---
 title: 'Memoization in Practice'
-description: 'useMemo, useCallback และ React.memo — แต่ละตัว cache อะไร, pitfall เรื่อง referential equality ที่ทำให้พัง และทำไม React Compiler ทำให้ส่วนใหญ่ไม่จำเป็นอีกต่อไป'
+description: 'useMemo, useCallback และ React.memo — cache อะไร, referential-equality pitfall ที่ทำลายมัน, children-as-props, เมื่อ memo กลายเป็นต้นทุนสุทธิ และทำไม React Compiler ทำให้ส่วนใหญ่ไม่จำเป็นอีกต่อไป'
 sidebar:
   order: 3
 ---
@@ -9,13 +9,14 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## สามเครื่องมือ สามหน้าที่
 
-memoization คือการ cache ผลลัพธ์ระหว่าง render เพื่อให้ React ข้ามการคำนวณหรือ re-render ได้ มีสามเครื่องมือ และแต่ละตัวทำหน้าที่ต่างกัน:
+Memoization คือการ cache ผลลัพธ์ข้าม render เพื่อให้ React ข้ามการคำนวณหรือ re-render ใหม่ได้ มี 3 เครื่องมือ ทำหน้าที่ต่างกัน:
 
-- **`useMemo(fn, deps)`** — cache *ค่าที่ return* ของการคำนวณที่หนัก คำนวณใหม่เฉพาะเมื่อ dependency เปลี่ยน
-- **`useCallback(fn, deps)`** — cache *identity ของ function* คืน reference เดิมข้าม render จนกว่า dependency จะเปลี่ยน
+- **`useMemo(fn, deps)`** — cache *ค่าที่คืน* ของการคำนวณที่แพง คำนวณใหม่แค่ตอน dependency เปลี่ยน
+- **`useCallback(fn, deps)`** — cache *identity ของ function* คืน function reference เดิมข้าม render จนกว่า dependency จะเปลี่ยน
 - **`React.memo(Component)`** — ห่อ *component* ให้ข้าม re-render เมื่อ props shallow-equal
 
 ```jsx
@@ -31,14 +32,14 @@ const Row = React.memo(function Row({ item, onSelect }) { /* ... */ });
 
 ## ทำไม `useCallback` กับ `React.memo` เป็นคู่กัน
 
-`React.memo` เทียบ props ด้วย **shallow equality** (`===` ต่อ prop) primitive เทียบด้วยค่า แต่ object, array และ function เทียบด้วย **reference** — และ component สร้างตัวใหม่เอี่ยมทุก render
+`React.memo` เทียบ prop ด้วย **shallow equality** (`===` ต่อ prop) primitive เทียบด้วยค่า แต่ object, array และ function เทียบด้วย **reference** — และ component สร้างของ *ใหม่เอี่ยม* ทุก render
 
 <Mermaid title="reference ใหม่ทำลาย React.memo" code={refDiagram} />
 
 export const refDiagram = `flowchart TB
-  parent["Parent re-render"] --> inline["สร้าง onClick ใหม่, object style ใหม่"]
-  inline --> memo["React.memo(Child) เทียบ props"]
-  memo --> fail["reference ใหม่ != reference เก่า\n→ shallow-equal fail → Child re-render อยู่ดี"]`;
+  parent["Parent re-renders"] --> inline["creates NEW onClick, NEW style object"]
+  inline --> memo["React.memo(Child) compares props"]
+  memo --> fail["new reference !== old reference\n→ shallow-equal fails → Child re-renders anyway"]`;
 
 ```jsx
 // ❌ A fresh function and object every render — React.memo(Child) never skips.
@@ -50,72 +51,369 @@ const style = useMemo(() => ({ color: "red" }), []);
 <Child onClick={onClick} style={style} />
 ```
 
-นี่คือหัวใจ: `React.memo` คุ้มก็ต่อเมื่อ *ทุก* prop เสถียรเชิง reference ซึ่งมักหมายถึงต้อง memoize props ที่เป็น object/array/function ด้วย `useMemo`/`useCallback` พลาด prop เดียว memo ก็ไม่ทำอะไรเลย
+นี่คือหัวใจ: `React.memo` คุ้มก็ต่อเมื่อ prop *ทุกตัว* stable ด้วย reference ซึ่งปกติแปลว่าต้อง memoize object/array/function prop ด้วย `useMemo`/`useCallback` พลาด prop เดียวแล้ว memo ไม่ได้อะไรเลย
 
-## React Compiler เปลี่ยนสมการ
+### พิสูจน์: inline function ทำลาย `React.memo`; `useCallback` แก้ได้
 
-การคง reference ให้เสถียรด้วยมือน่าเบื่อและพลาดง่าย **React Compiler** (ตัว optimize ตอน build ของ React) วิเคราะห์ component ของคุณและ memoize ค่ากับ component ให้อัตโนมัติในจุดที่ปลอดภัย — เหมือนใส่ `useMemo`/`useCallback`/`memo` ให้ทั่วโดยที่คุณไม่ต้องเขียน
+```tsx
+// src/__tests__/inlineFunctionBreaksMemo.test.tsx
+import { memo, useState, useCallback } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
 
-พอเปิด compiler บน codebase แล้ว แนวทางจะพลิก:
+afterEach(cleanup);
 
-- **อย่า** เขียน `useMemo`/`useCallback` เองโดย default — compiler จัดการ common case ให้
-- **จง** เขียน component ให้ pure และทำตาม Rules of Hooks — นั่นคือสิ่งที่ให้ compiler optimize ได้อย่างปลอดภัย
-- **สงวน** manual memoization ไว้สำหรับกรณีหายากที่ compiler จัดการไม่ได้ หรือ profiler ยังชี้อยู่
+let rowRenders = 0;
 
-## เมื่อ manual memoization ช่วยได้จริง (วันนี้)
+const Row = memo(function Row({ onSelect }: { onSelect: () => void }) {
+  rowRenders++;
+  return <li onClick={onSelect}>row</li>;
+});
 
-จนกว่า compiler จะแพร่หลาย hand-memoization ยังคุ้มสำหรับบางกรณีเฉพาะ:
+test('a fresh inline function prop defeats React.memo — the child re-renders on every parent render', () => {
+  rowRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    // 🔴 a NEW function every render.
+    return <Row onSelect={() => setTick((t) => t + 1)} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(rowRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  expect(rowRenders).toBe(3); // memo did nothing — re-rendered every time
+});
 
-- การคำนวณที่ **หนักจริง** (sort/filter หลายพัน item, คณิตหนัก ๆ) → `useMemo`
-- ค่า/function ที่ส่งให้ **memoized child** หรือเป็น **effect dependency** ซึ่ง reference ใหม่จะทำให้เกิด render หรือ effect รันเกิน → `useCallback`/`useMemo`
-- **subtree ขนาดใหญ่ที่ถูกข้ามบ่อย** → `React.memo`
+test('useCallback keeps the reference stable, so React.memo actually skips the re-render', () => {
+  rowRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    const onSelect = useCallback(() => setTick((t) => t + 1), []);
+    return <Row onSelect={onSelect} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(rowRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  expect(rowRenders).toBe(1); // stable reference — memo skips the re-render
+});
+```
 
-นอกเหนือจากนั้น memoize มักมีต้นทุน (memory + การเทียบ + ความรก) มากกว่าที่ประหยัด วัดผล
+```text
+✓ a fresh inline function prop defeats React.memo — the child re-renders on every parent render
+✓ useCallback keeps the reference stable, so React.memo actually skips the re-render
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+## `useCallback` อย่างเดียวไม่พอ — child ต้อง memoize ด้วย
+
+`useCallback` ให้แค่ *reference* ที่ stable reference นั้นจะหยุด re-render ได้ก็ต่อเมื่อมีอะไรข้างล่างเช็ก equality กับมันจริง ๆ — ซึ่งแปลว่า component ที่รับมันต้องถูกห่อด้วย `React.memo` callback ที่ stable ที่ส่งให้ component ธรรมดาที่ไม่ memoize ไม่เปลี่ยนอะไรเลย: component นั้น re-render ทุกครั้งที่ parent re-render เหมือน child ทั่วไป ไม่ว่า prop มันจะ stable แค่ไหน
+
+```tsx
+// src/__tests__/useCallbackNeedsMemoizedChild.test.tsx
+import { memo, useState, useCallback } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(cleanup);
+
+let plainRenders = 0;
+let memoRenders = 0;
+
+function PlainRow({ onSelect }: { onSelect: () => void }) {
+  plainRenders++;
+  return <li onClick={onSelect}>row</li>;
+}
+
+const MemoRow = memo(function MemoRow({ onSelect }: { onSelect: () => void }) {
+  memoRenders++;
+  return <li onClick={onSelect}>row</li>;
+});
+
+test('useCallback alone does not stop a re-render — the child must be memoized too', () => {
+  plainRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    const onSelect = useCallback(() => setTick((t) => t + 1), []);
+    // PlainRow is NOT wrapped in React.memo.
+    return <PlainRow onSelect={onSelect} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(plainRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  // A stable callback changes nothing here: a non-memoized component
+  // re-renders whenever its parent does, regardless of prop stability.
+  expect(plainRenders).toBe(3);
+});
+
+test('the same stable callback DOES stop a re-render once the child is wrapped in React.memo', () => {
+  memoRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    const onSelect = useCallback(() => setTick((t) => t + 1), []);
+    return <MemoRow onSelect={onSelect} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(memoRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  expect(memoRenders).toBe(1); // memo + stable reference — the pairing works
+});
+```
+
+```text
+✓ useCallback alone does not stop a re-render — the child must be memoized too
+✓ the same stable callback DOES stop a re-render once the child is wrapped in React.memo
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`useCallback` กับ `React.memo` แยกกันไม่ออก: ตัวหนึ่งให้ reference ที่ stable อีกตัวคือสิ่งที่ทำงานกับมันจริง ใช้แค่ตัวเดียวไม่ได้อะไรเลย
+
+## Children เป็น props: หยุด re-render โดยไม่ต้อง memoize อะไรเลย
+
+บทก่อนพูดถึง "ยก content ขึ้นด้วย composition" เป็นการแก้เชิงโครงสร้าง — นี่คือหลักฐาน เมื่อ component ที่ถือ state ของตัวเอง render `{children}` ที่มันได้รับมาเป็น prop ค่า `children` นั้นคือ *element reference เดิมเป๊ะ* ทุกครั้งที่ component นั้น re-render เอง (parent ของมันสร้าง element นั้นครั้งเดียว component ที่ถือ ticking state ไม่เคยสร้างมันใหม่) reconciler ของ React จึง bail out จาก subtree นั้นได้ทั้งหมดโดยไม่ต้องเรียก function ของ child component ใหม่เลยด้วยซ้ำ — ไม่ต้องมี `React.memo`, `useMemo`, `useCallback` เข้ามาเกี่ยวข้อง
+
+```tsx
+// src/__tests__/childrenAsPropsStopsRerenders.test.tsx
+import { useState, type ReactNode } from 'react';
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(cleanup);
+
+let expensiveRenders = 0;
+
+function Expensive() {
+  expensiveRenders++;
+  return <p>expensive</p>;
+}
+
+// ❌ Ticker builds `<Expensive />` itself, inside its own render — every
+// tick re-creates it, so it re-renders along with Ticker.
+function TickerBuildsItsOwnChild() {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>tick: {tick}</button>
+      <Expensive />
+    </div>
+  );
+}
+
+// ✅ Ticker receives `children` from its OWN parent instead — its local
+// `tick` state changing does not touch that prop at all.
+function Ticker({ children }: { children: ReactNode }) {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>tick: {tick}</button>
+      {children}
+    </div>
+  );
+}
+
+test('Expensive built directly inside the ticking component re-renders on every tick', () => {
+  expensiveRenders = 0;
+  render(<TickerBuildsItsOwnChild />);
+  expect(expensiveRenders).toBe(1);
+
+  act(() => {
+    screen.getByText(/tick: 0/).click();
+  });
+  act(() => {
+    fireEvent.click(screen.getByText(/tick: 1/));
+  });
+
+  expect(expensiveRenders).toBe(3); // Expensive re-renders with every tick
+});
+
+test('the same component passed in as `children` does NOT re-render when the wrapper\'s OWN state ticks', () => {
+  expensiveRenders = 0;
+  render(
+    <Ticker>
+      <Expensive />
+    </Ticker>,
+  );
+  expect(expensiveRenders).toBe(1);
+
+  act(() => {
+    screen.getByText(/tick: 0/).click();
+  });
+  act(() => {
+    fireEvent.click(screen.getByText(/tick: 1/));
+  });
+
+  // Ticker re-rendered twice (its button label changed), but the `children`
+  // prop it holds is the exact same element reference both times — React
+  // bails out of that subtree entirely, so Expensive never re-renders.
+  expect(expensiveRenders).toBe(1);
+});
+```
+
+```text
+✓ Expensive built directly inside the ticking component re-renders on every tick
+✓ the same component passed in as `children` does NOT re-render when the wrapper's OWN state ticks
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+trick นี้ช่วยกันแค่ re-render ที่เกิดจาก *component ที่ถือ `children`* เท่านั้น ถ้าตัวที่สร้าง `children` element นั้น re-render เอง (ancestor ของมัน) element ใหม่จะถูกสร้างและส่งลงมาอีกครั้ง แล้วกฎการ propagate จากบทก่อนก็ใช้ตามปกติ
+
+## `useMemo` สำหรับการคำนวณที่แพง — และให้ compiler ทำแทน
+
+`useMemo` คุ้มค่าตอนการคำนวณ **แพงจริง ๆ** — sort หรือ filter data เป็นพัน, คำนวณหนัก, สร้าง derived data structure React Compiler เปลี่ยนว่าใครควรเป็นคนเขียน `useMemo` นั้น: ดู [Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/) ว่า compiler อ่าน component ธรรมดาที่ไม่ memoize เลยแล้วแทรก caching เทียบเท่าให้เองยังไง ละเอียดกว่า code ที่เขียนมือส่วนใหญ่ — บทนั้นแสดง output จริงของ compiler กับการคำนวณแบบนี้เป๊ะ ๆ
+
+พอเปิด compiler บน codebase แล้ว แนวทางเปลี่ยนไป:
+
+- **อย่า** เขียน `useMemo`/`useCallback` มือเป็น default — compiler จัดการ case ทั่วไปให้
+- **ต้อง** ทำให้ component pure และตาม Rules of Hooks — นั่นคือสิ่งที่ทำให้ compiler optimize ได้อย่างปลอดภัย
+- **เก็บไว้ใช้** manual memoization เฉพาะ case หายากที่ compiler จัดการไม่ได้ หรือ profiler ยังชี้ปัญหาอยู่
+
+## เมื่อไร manual memoization ยังช่วยจริง (วันนี้)
+
+จนกว่า compiler จะครอบคลุมทุกที่ hand-memoization ยังคุ้มค่าใน case เฉพาะบางอัน:
+
+- การคำนวณที่ **แพงจริง ๆ** (sort/filter data เป็นพัน, คำนวณหนัก) → `useMemo`
+- value/function ที่ส่งให้ **memoized child** หรือ **effect dependency** ที่ reference ใหม่จะทำให้ render/effect รันเพิ่ม → `useCallback`/`useMemo`
+- **subtree ใหญ่ที่ถูก bypass บ่อย** → `React.memo`
+
+นอกเหนือจากนั้น การ memoize มักเสียมากกว่าที่ได้ (memory + การเทียบ + ความรก) วัดก่อนเสมอ
+
+## เมื่อ `React.memo` กลายเป็นต้นทุนสุทธิ
+
+`React.memo` ไม่ฟรี: ทุก render ยังต้องจ่ายค่าเทียบ prop แบบ shallow และ component ที่ memoize ยังถือ output ที่ render ล่าสุดไว้ใน memory ห่อ component ด้วย `memo` กลายเป็นต้นทุนสุทธิเมื่อ:
+
+- **component render ถูกอยู่แล้ว** การเทียบ prop เสียต้นทุนพอ ๆ กับแค่ re-render component ธรรมดา — จ่ายต้นทุนแต่ไม่ได้อะไรกลับมา
+- **prop เปลี่ยนแทบทุก render อยู่แล้ว** ถ้า prop ของ component ที่ memoize ไม่มีทาง stable จริง (เช่น มันได้ derived data ใหม่เสมอ) การเทียบรันทุกครั้งและไม่เคยคุ้มเลย — เป็น overhead ล้วน ๆ
+- **ไม่มีใครทำให้ prop ของ child stable** อย่างที่แสดงด้านบน `React.memo` บน component ที่ caller ยังส่ง inline object/function อยู่ ทำงานเทียบ prop แล้วก็ re-render อยู่ดี — แย่กว่าไม่ memoize ด้วยซ้ำ เพราะตอนนี้จ่ายทั้งค่าเทียบที่ fail *และ* re-render เต็ม
+
+หลักคร่าว ๆ คือ: หยิบ `React.memo` มาใช้กับ component ที่ **profile** แล้วว่าทั้งแพงและ prop stable — ไม่ใช่ใส่แบบอัตโนมัติกับทุกอย่าง
+
+## Mental Model
+
+มองว่า `React.memo` เป็น **ประตูที่ล็อกไว้** หน้า component: มันเปิด (ข้าม re-render) ก็ต่อเมื่อทุก prop ที่ยื่นให้มัน `===` กับที่เห็นครั้งก่อน `useMemo`/`useCallback` คือ **กุญแจ** ที่ทำให้ value หรือ function เป็น object เดิมจริง ๆ ข้าม render เพื่อให้ประตูจำได้ การส่ง `children` ลงมาจากที่สูงกว่าคือทางที่สาม ไม่ต้องมีประตูเลย: ค่านั้นไม่เคยถูกสร้างใหม่ตั้งแต่แรก จึงไม่มีอะไรให้เช็ก "prop เปลี่ยน" มาสะดุด
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| `useMemo`/`useCallback` + `React.memo` (คู่กัน) | ข้าม re-render ของ subtree ที่แพงจริงและ prop stable | ต้องทำทั้งสองฝั่งให้ถูก พลาด prop เดียวแล้วคู่นี้ไม่ทำอะไรเลย |
+| Children เป็น props | ไม่มี memoization API เลย เชิงโครงสร้าง ใช้ผิดไม่ได้ | กันได้แค่ re-render ของ component ที่ *ถือ* children เท่านั้น ไม่กัน ancestor ของมัน |
+| ให้ React Compiler ทำแทน | ละเอียดกว่า sync กับ code เสมอ | ต้อง setup toolchain ครอบคลุมแค่ code ที่ตรวจสอบแบบ static ได้ |
+| Manual memoization ทุกที่ | ไม่มี | ต้นทุนการเทียบ + memory ทุก render สำหรับ component ที่มักถูกอยู่แล้ว |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ห่อ component ด้วย `React.memo` ช่วยเสมอ"** พิสูจน์แล้วด้านบน: ถ้า prop ไม่ stable ด้วย reference หรือ component ถูกอยู่แล้ว `memo` เพิ่มต้นทุนการเทียบโดยไม่ได้ประโยชน์อะไร — บางทีกลายเป็นต้นทุนสุทธิ
+- **"`useCallback` อย่างเดียวหยุด child re-render ได้"** พิสูจน์แล้วด้านบน: reference ที่ stable ไม่ทำอะไรเลยถ้า component ที่รับไม่ถูกห่อด้วย `React.memo` เพื่อเช็กมันจริง ๆ
+- **"ส่ง `children` ลงมาเป็นแค่เรื่องสไตล์การเขียน"** มันคือ optimization การ re-render ที่วัดได้จริง — พิสูจน์แล้วด้านบน — ที่ทำงานได้โดยไม่มี memoization API เลย เพราะ element reference ไม่เคยเปลี่ยนตั้งแต่แรก
+- **"compiler ทำให้ทั้งหมดนี้ล้าสมัย เลยไม่ต้องเข้าใจมัน"** compiler แปลงแค่ code ที่ตรวจสอบแบบ static ได้ว่าตาม Rules of React การเข้าใจว่า *ทำไม* memoization ถึงทำงาน ยังเป็นสิ่งที่บอกได้ว่า code ชิ้นนั้น compiler ช่วยได้อย่างปลอดภัยหรือเปล่า
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ review code ที่ generate มาที่ใช้ `useMemo`/`useCallback`/`React.memo` ให้เช็ก:
+
+- child ที่เป็น `React.memo` ได้รับ object, array หรือ function literal แบบ inline จาก caller ไหม? แบบนั้นทำลาย memoization ทุก render (พิสูจน์แล้วด้านบน)
+- `useCallback` ถูกใช้กับ callback ที่ส่งให้ component ที่ **ไม่ได้** ห่อด้วย `React.memo` เองไหม? reference ที่ stable ไม่ทำอะไรตรงนั้นเลย
+- "expensive child" อาจ restructure เป็น `children` ที่ส่งลงมาจากที่สูงกว่าได้ไหม แทนที่จะหยิบ `useMemo`/`React.memo` มาใช้เลย?
+- `React.memo` ถูกใช้กับ component ที่ render ถูกอยู่แล้ว และ/หรือ prop ไม่มีทาง stable จริง — overhead ล้วน ๆ ไม่มีผลตอบแทน?
+- project มี React Compiler ตั้งค่าไว้ไหม หรือ code เขียน memoization มือที่ compiler จะจัดการได้ละเอียดกว่า? (ดู [Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/))
+
+<SpotTheBug code={`const ExpensiveRow = React.memo(function ExpensiveRow({ item, onSelect }) {
+  return <li onClick={() => onSelect(item.id)}>{item.label}</li>;
+});
+
+function List({ items }) {
+  function handleSelect(id) {
+    console.log("selected", id);
+  }
+  return (
+    <ul>
+      {items.map((item) => (
+        <ExpensiveRow key={item.id} item={item} onSelect={handleSelect} />
+      ))}
+    </ul>
+  );
+}`}>
+มีสองปัญหาซ้อนกันตรงนี้ อย่างแรก `onSelect={() => onSelect(item.id)}` ข้างใน `ExpensiveRow` เองไม่เกี่ยวกับการเช็ก memo (มันรันหลังจากการเทียบ prop ผ่านหรือ fail ไปแล้ว) — แต่ `handleSelect` ที่ประกาศใหม่เป็น function สดในทุก render ของ `List` คือบั๊กตัวจริง: `List` ส่ง `onSelect` reference ใหม่เอี่ยมให้ทุก `ExpensiveRow` ทุก render shallow comparison ของ `React.memo` จึง fail ทุกครั้ง memo ไม่เคยคุ้มเลย พิสูจน์ด้วย pattern เดียวกันเป๊ะในเทสต์แรกของบทนี้ (renderCount 1 → 3 ไม่ใช่ 1 → 1) ทางแก้คือ `const handleSelect = useCallback((id) => console.log("selected", id), [])` ใน `List` คู่กับ `ExpensiveRow` ที่ memoize ไว้แล้ว — คู่กันตามที่บทนี้พิสูจน์ว่าจำเป็น
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`useMemo` cache ค่า, `useCallback` cache identity ของ function และ `React.memo` ข้าม re-render เมื่อ props shallow-equal — สองตัวหลังเป็น **คู่กัน** เพราะ object/array/function แบบ inline ใหม่ทำลาย `React.memo` แต่ **React Compiler** ตอนนี้ auto-memoize ให้แล้ว ดังนั้น default สมัยใหม่คือเขียน component ให้ clean และ pure แล้วสงวน manual memoization ไว้สำหรับไม่กี่กรณีที่ profiler ยังชี้
+`useMemo` cache value, `useCallback` cache identity ของ function และ `React.memo` ข้าม re-render เมื่อ prop shallow-equal — สองตัวหลังเป็น **คู่กัน** พิสูจน์แล้วด้านบน: object/array/function literal ใหม่ทำลาย `React.memo` ทุกครั้ง `useCallback` แก้ได้ก็ต่อเมื่อ component ที่รับ *ก็* memoize ด้วย และการส่ง `children` ลงมาข้ามปัญหาทั้งหมดได้โดยไม่มี memoization API เลย `React.memo` เป็น **ต้นทุนสุทธิ** บน component ที่ถูกอยู่แล้วหรือ prop ไม่เคย stable **React Compiler** ตอนนี้ auto-memoize ส่วนใหญ่ให้แล้ว — ดู [Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/) — default สมัยใหม่จึงเป็น component สะอาด pure และเก็บ manual memoization ไว้เฉพาะ case ที่ profiler ยังชี้ปัญหา
 </Callout>
 
 export const quizMemo = [
   {
-    q: '`useCallback` cache อะไร?',
+    q: 'useCallback ทำอะไร?',
     options: [
-      'ค่าที่ return ของการคำนวณ',
-      'identity ของ function (reference เดิมข้าม render) จนกว่า dependency จะเปลี่ยน',
-      'output ที่ render ของ component',
-      'DOM node',
+      'cache ผลของการคำนวณ',
+      'cache identity ของ function (reference เดิมข้าม render) จนกว่า dependency จะเปลี่ยน',
+      'cache output ที่ render แล้วของ component',
+      'cache DOM node',
     ],
     answer: 1,
+    explain: 'useCallback คือ useMemo เฉพาะทางสำหรับ function — มัน return function reference เดิมข้าม render ตราบใดที่ dependency ยังไม่เปลี่ยน',
   },
   {
-    q: 'ทำไมการส่ง `style={{ color: "red" }}` แบบ inline ให้ `React.memo` child ถึงทำลาย memo?',
+    q: 'ทำไมการส่ง inline `style={{ color: "red" }}` ให้ `React.memo` child ถึงทำลาย memo?',
     options: [
-      'inline style ใช้ไม่ได้',
-      'object ใหม่ถูกสร้างทุก render ดังนั้น shallow comparison (reference) fail และ child re-render อยู่ดี',
-      'React.memo ไม่สนใจ prop style',
-      'ไม่ทำลาย — memo ยังข้ามได้',
+      'inline style ผิด',
+      'object ใหม่ถูกสร้างทุก render shallow (reference) comparison จึง fail และ child re-render อยู่ดี',
+      'React.memo ไม่สนใจ style prop',
+      'ไม่จริง — memo ยังข้ามได้',
     ],
     answer: 1,
+    explain: 'React.memo เทียบ prop ด้วย reference (shallow equality) object literal ใหม่ที่สร้างทุก render คือ prop ที่ "ต่างออกไป" ทุกครั้ง แม้เนื้อหาจะเหมือนเดิม',
   },
   {
-    q: 'เมื่อเปิด React Compiler แล้ว default ที่แนะนำคืออะไร?',
+    q: '```tsx\nconst Row = memo(function Row({ onSelect }) { renderCount++; return <li onClick={onSelect} />; });\nfunction Parent() {\n  const [, setTick] = useState(0);\n  return <Row onSelect={() => setTick(t => t + 1)} />;\n}\n```\nหลัง `Parent` render 3 ครั้ง `renderCount` ของ `Row` เป็นเท่าไร?',
     options: [
-      'ห่อทุกอย่างด้วย useMemo และ useCallback เอง',
-      'เขียน component ให้ clean และ pure แล้วปล่อยให้ compiler auto-memoize; สงวน manual memoization ไว้สำหรับ edge case',
-      'เลิกใช้ hook',
-      'ปิด memoization ทั้งหมด',
+      '1 — React.memo ป้องกัน render เกินเสมอ',
+      '3 — arrow function ใหม่ถูกสร้างทุก render การเทียบของ memo จึง fail ทุกครั้ง',
+      '0 — Row ไม่ render เลย',
+      '3 แต่เฉพาะ development mode',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: renderCount ไป 1 → 3 ไม่ใช่ 1 → 1 — inline arrow function เป็น reference ใหม่ทุก render shallow comparison ของ React.memo จึงไม่ผ่านเลย',
   },
   {
-    q: 'ข้อไหนคือการใช้ `useMemo` ที่ดีจริงในวันนี้?',
+    q: 'ถ้า callback ถูกห่อด้วย `useCallback` แต่ component ที่รับเป็น function component ธรรมดา (ไม่ห่อด้วย `React.memo`) re-render จะหยุดไหม?',
     options: [
-      'memoize การต่อ string ง่าย ๆ',
-      'cache การคำนวณที่หนักอย่างการ sort item หลายพันตัว',
-      'ห่อทุกค่าที่ render',
-      'ใช้แทน state',
+      'หยุด — useCallback อย่างเดียวก็พอ',
+      'ไม่หยุด — component ที่ไม่ memoize re-render ทุกครั้งที่ parent re-render ไม่ว่า prop จะ stable แค่ไหน ต้องห่อ child ด้วย React.memo ด้วย',
+      'หยุด แต่เฉพาะ class component',
+      'ไม่หยุด เพราะ useCallback ไม่มีผลอะไรเลย',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: component ธรรมดา (ไม่ memoize) re-render 3 ครั้งทั้งที่ได้ useCallback reference ที่ stable — การจับคู่กับ React.memo ต่างหากที่หยุดมันได้ (render 1 ครั้งใน test เดียวกัน)',
+  },
+  {
+    q: 'ทำไมการส่ง component เข้ามาเป็น `children` ถึงกัน re-render ได้โดยไม่ต้องมี `useMemo`/`useCallback`/`React.memo` เลย?',
+    options: [
+      'children prop ถูก React memoize ให้อัตโนมัติเสมอ',
+      'element ถูกสร้างครั้งเดียวโดย ancestor แล้วส่งลงมาไม่เปลี่ยน — component ที่ถือ local state re-render ตัวเองแต่ไม่เคยสร้าง element นั้นใหม่ React จึง bail out จาก subtree นั้นได้',
+      'ไม่จริง — children re-render เหมือนทุกอย่าง',
+      'เพราะ JSX children เป็น string ไม่ใช่ object',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: component ที่ render `{children}` ที่ได้รับมาเป็น prop ไม่ re-render content นั้นตอน state ของ*ตัวเอง*เปลี่ยน เพราะ children element reference ไม่เคยเปลี่ยน — content จะ update ก็ต่อเมื่อ ancestor ที่สร้างมัน re-render เท่านั้น',
+  },
+  {
+    q: 'เมื่อไรที่ห่อ component ด้วย `React.memo` มีโอกาสเป็นต้นทุนสุทธิมากที่สุด?',
+    options: [
+      'เมื่อ component แพงและ prop stable',
+      'เมื่อ component render ถูกอยู่แล้ว หรือ prop เปลี่ยนแทบทุก render อยู่แล้ว',
+      'เฉพาะ component ที่ไม่มี prop',
+      'ไม่เคย — memo ช่วยเสมอ',
+    ],
+    answer: 1,
+    explain: 'memo ยังจ่ายต้นทุนการเทียบแบบ shallow ทุก render ถ้า component ถูกอยู่แล้ว หรือการเทียบไม่เคยผ่านเพราะ prop ไม่เคย stable ต้นทุนนั้นไม่ได้อะไรกลับมาเลย',
   },
 ];
 

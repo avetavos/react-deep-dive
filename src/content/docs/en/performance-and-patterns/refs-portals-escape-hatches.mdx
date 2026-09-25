@@ -1,6 +1,6 @@
 ---
 title: 'Refs, Portals & Escape Hatches'
-description: 'Stepping outside the declarative model on purpose — createPortal for modals, imperative refs, flushSync for synchronous updates, and when it is justified.'
+description: 'Stepping outside the declarative model on purpose — createPortal for modals with proven context/event behavior, imperative refs, flushSync proven synchronous, and a checklist for when it is justified.'
 sidebar:
   order: 5
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## When declarative is not enough
 
@@ -40,9 +41,79 @@ export const portalDiagram = `flowchart TB
 
 The key subtlety: a portal changes *where the DOM node lives*, not *where it sits in the React tree*. Context still flows in, and events still bubble up through the React parent — so a click inside a portaled modal still reaches handlers on its logical React ancestors.
 
+### Proof: context and event bubbling both cross the portal boundary
+
+```tsx
+// src/__tests__/portalContextAndBubbling.test.tsx
+import { createContext, useContext, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { render, screen, fireEvent } from '@testing-library/react';
+
+const ThemeContext = createContext('light');
+
+function PortalModal({ children }: { children: ReactNode }) {
+  // Rendered into document.body — a different DOM subtree entirely.
+  return createPortal(children, document.body);
+}
+
+function ThemedLabel() {
+  // Reads context from the LOGICAL (React tree) ancestor, not the DOM ancestor.
+  const theme = useContext(ThemeContext);
+  return <p data-testid="label">theme: {theme}</p>;
+}
+
+test('a portal still receives context from its React-tree ancestor, not its DOM ancestor', () => {
+  render(
+    <ThemeContext.Provider value="dark">
+      <PortalModal>
+        <ThemedLabel />
+      </PortalModal>
+    </ThemeContext.Provider>,
+  );
+
+  // ThemedLabel is physically a direct child of document.body, outside the
+  // render container, yet it still reads "dark" from the Provider that
+  // wraps it in the React tree.
+  expect(screen.getByTestId('label').textContent).toBe('theme: dark');
+});
+
+test('a click inside a portal bubbles through the React tree, not the DOM tree', () => {
+  const onClick = vi.fn();
+
+  function App() {
+    return (
+      // onClick lives on a React ancestor that is NOT a DOM ancestor of the
+      // portaled button (the portal renders straight into document.body).
+      <div onClick={onClick}>
+        <PortalModal>
+          <button>click me</button>
+        </PortalModal>
+      </div>
+    );
+  }
+
+  render(<App />);
+  fireEvent.click(screen.getByText('click me'));
+
+  // Proven: the click reaches the React-ancestor's handler even though the
+  // button's actual DOM parent is document.body, not <div>.
+  expect(onClick).toHaveBeenCalledTimes(1);
+});
+```
+
+```text
+✓ a portal still receives context from its React-tree ancestor, not its DOM ancestor
+✓ a click inside a portal bubbles through the React tree, not the DOM tree
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+Per react.dev: *"Events from portals propagate according to the React tree rather than the DOM tree. For example, if you click inside a portal, and the portal is wrapped in `<div onClick>`, that `onClick` handler will fire."* If that surprises a consumer of your modal (say, a click handler on an outer wrapper that assumes "nothing outside my DOM subtree can trigger this"), the fix is to stop propagation from inside the portal's content, not to avoid portals.
+
 ## Imperative refs: calling into a child or the DOM
 
-Most of the time data flows down through props. But sometimes a parent needs to *imperatively* trigger something on a child or DOM node — focus an input, play a video, scroll to an element. A **ref** gives you that handle.
+Most of the time data flows down through props. But sometimes a parent needs to *imperatively* trigger something on a child or DOM node — focus an input, play a video, scroll to an element, measure a size. A **ref** gives you that handle.
 
 ```jsx
 function SearchForm() {
@@ -56,11 +127,27 @@ function SearchForm() {
 }
 ```
 
-To expose a *custom* imperative API from a component (rather than the raw DOM node), use `useImperativeHandle` to define exactly which methods a parent's ref can call. Prefer props/state for anything that can be declarative; reach for an imperative ref only for genuinely imperative actions (focus, scroll, media, measurement).
+For anything that reads layout — measuring a node's size or position, then immediately acting on it (scrolling, positioning a tooltip) — do that measuring in `useLayoutEffect`, not `useEffect`. `useLayoutEffect` runs synchronously *after* React has updated the DOM but *before* the browser paints, so a measurement taken there reflects the just-committed layout with no visible flash; `useEffect` runs after paint, so a measure-then-reposition inside it can flicker.
+
+```jsx
+function AutoSizedBox({ text }) {
+  const boxRef = useRef(null);
+  const [tooTall, setTooTall] = useState(false);
+
+  useLayoutEffect(() => {
+    // Runs after the DOM commit, before paint — safe to measure real layout here.
+    setTooTall(boxRef.current.scrollHeight > 200);
+  }, [text]);
+
+  return <div ref={boxRef}>{text}</div>;
+}
+```
+
+To expose a *custom* imperative API from a component (rather than the raw DOM node), use `useImperativeHandle` to define exactly which methods a parent's ref can call — see [useRef & the DOM](/react/en/hooks/useref-and-the-dom/) for the full hook and its React 19 ref-callback-cleanup behavior. Prefer props/state for anything that can be declarative; reach for an imperative ref only for genuinely imperative actions (focus, scroll, media, measurement).
 
 ## `flushSync`: opt out of batching
 
-React **batches** state updates and applies the DOM changes asynchronously for performance. Occasionally you need the DOM updated *synchronously* — for example, to read the new layout immediately (measure a just-added element, then scroll to it). `flushSync` forces a state update and its DOM commit to happen right away.
+React **batches** state updates and applies the DOM changes asynchronously for performance. Occasionally you need the DOM updated *synchronously* — for example, to read the new layout immediately (measure a just-added element, then scroll to it). `flushSync` forces a state update and its DOM commit to happen right away, before the next line of your code runs.
 
 ```jsx
 import { flushSync } from "react-dom";
@@ -69,10 +156,138 @@ flushSync(() => setItems([...items, newItem])); // DOM is updated by the time th
 listRef.current.scrollTop = listRef.current.scrollHeight; // now safe to read/scroll
 ```
 
-`flushSync` defeats batching and hurts performance, so use it only when you truly must read or act on the DOM before the browser paints.
+### Proof: the DOM is genuinely updated before the next line, only with `flushSync`
+
+```tsx
+// src/__tests__/flushSyncSynchronousCommit.test.tsx
+import { useState, useRef } from 'react';
+import { flushSync } from 'react-dom';
+import { render, screen, act } from '@testing-library/react';
+
+function List({ onAfterUpdate }: { onAfterUpdate: (label: string, count: number) => void }) {
+  const [items, setItems] = useState(['a']);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  function addNoFlush() {
+    setItems((prev) => [...prev, 'b']);
+    // 🔴 React has NOT committed the DOM yet — this reads the OLD count.
+    onAfterUpdate('noFlush', listRef.current!.children.length);
+  }
+
+  function addWithFlush() {
+    flushSync(() => {
+      setItems((prev) => [...prev, 'b']);
+    });
+    // ✅ flushSync forced the commit — the DOM already has the new item.
+    onAfterUpdate('withFlush', listRef.current!.children.length);
+  }
+
+  return (
+    <div>
+      <button onClick={addNoFlush}>no-flush</button>
+      <button onClick={addWithFlush}>with-flush</button>
+      <ul ref={listRef}>
+        {items.map((it, i) => (
+          <li key={i}>{it}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+test('without flushSync, the DOM has not been updated by the line right after setState', () => {
+  const results: Array<[string, number]> = [];
+  render(<List onAfterUpdate={(label, count) => results.push([label, count])} />);
+
+  act(() => {
+    screen.getByText('no-flush').click();
+  });
+
+  expect(results).toEqual([['noFlush', 1]]); // still the OLD count — commit hasn't happened yet
+});
+
+test('flushSync forces the DOM to update before the next line runs', () => {
+  const results: Array<[string, number]> = [];
+  render(<List onAfterUpdate={(label, count) => results.push([label, count])} />);
+
+  act(() => {
+    screen.getByText('with-flush').click();
+  });
+
+  expect(results).toEqual([['withFlush', 2]]); // the NEW count — already committed
+});
+```
+
+```text
+✓ without flushSync, the DOM has not been updated by the line right after setState
+✓ flushSync forces the DOM to update before the next line runs
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`flushSync` defeats batching and hurts performance, so use it only when you truly must read or act on the DOM before the browser paints — react.dev is explicit that "using `flushSync` is uncommon, and using it often can significantly hurt the performance of your app."
+
+## Escape hatches checklist
+
+Before reaching for any of the tools on this page, work through this in order:
+
+1. **Can this stay declarative?** If the answer is "describe the desired state and let React render it," do that instead — every escape hatch below is a deliberate opt-out of React's normal guarantees.
+2. **Portal** — only when you need a *different DOM location* (stacking context, overflow) while staying in the same logical tree. Not a general-purpose "render somewhere else" tool.
+3. **Ref (+ `useImperativeHandle`)** — only for a genuinely imperative action (focus, scroll, play, measure) that has no natural state representation. If you're storing UI state in a ref "to avoid a re-render," that's usually a sign the value belongs in state.
+4. **`flushSync`** — only when a third-party API or the browser itself needs the DOM synchronously updated before your next line runs (print dialogs, scroll-to-just-added-item). Never reach for it just to "make an update happen sooner" inside pure React code.
+5. **Measure with `useLayoutEffect`, not `useEffect`**, whenever the very next thing you do is act on layout you just read — the timing difference is the whole point.
+
+## Mental Model
+
+Every tool on this page answers the same question differently: "React already knows how to keep the DOM in sync with state — where does that break down for me?" A portal breaks the assumption that *where you write JSX* is *where the DOM node lives*. A ref breaks the assumption that *all* interaction flows through props and state. `flushSync` breaks the assumption that *you never need to know exactly when* a commit happened. None of these change what React *is* — they are named, deliberate exceptions to specific guarantees, used only where the declarative model genuinely cannot express what you need.
+
+## Trade-offs
+
+| Escape hatch | What it buys you | What it costs |
+| --- | --- | --- |
+| `createPortal` | Renders past a clipping/stacking-context parent while keeping context + event bubbling | Two-file mental model (DOM location vs. React position); `stopPropagation` needed if bubbling surprises a consumer |
+| Ref / `useImperativeHandle` | Direct imperative control (focus, scroll, measure) with no natural declarative equivalent | Bypasses React's data flow — harder to reason about from props/state alone |
+| `flushSync` | Guarantees the DOM is updated by the very next line | Defeats batching for that update — real performance cost if overused |
+| `useLayoutEffect` for measuring | No paint flicker from measure-then-reposition | Runs synchronously before paint — a slow layout effect blocks the browser from painting |
+
+## Common Misconceptions
+
+- **"A portal moves a component out of the React tree."** Proven above: context still flows in, and click events still bubble through the *React* ancestors — only the DOM location changed.
+- **"Refs are for reading render output."** A ref you read during render can be stale or null; refs are for *imperative* actions after commit (or reading committed layout in `useLayoutEffect`), not a substitute for props/state during render.
+- **"`flushSync` makes React faster."** The opposite — proven above, it forces a synchronous commit that bypasses batching, which is normally a performance *win* you're deliberately giving up for one specific read.
+- **"`useEffect` and `useLayoutEffect` are interchangeable for measuring layout."** They fire at different times relative to paint; a measure-then-reposition inside `useEffect` can visibly flicker where the same code in `useLayoutEffect` cannot, because `useLayoutEffect` runs before the browser paints.
+
+## Reading AI-generated code
+
+When reviewing generated code that uses refs, portals, or `flushSync`, check for:
+
+- Is `flushSync` called inside a `useEffect` (or any place other than direct response to a browser/DOM API that specifically requires a synchronous read)? That's almost always unnecessary and a performance smell, not a fix.
+- Does a portal's content assume it is isolated from outer click handlers because it "moved to `document.body`"? Events still bubble through the *React* tree — that assumption needs `stopPropagation`, not surprise later.
+- Is a measurement (size, scroll position) taken in `useEffect` and then used to immediately reposition something? That belongs in `useLayoutEffect` to avoid a visible flicker.
+- Is `useImperativeHandle` exposing the *entire* DOM node instead of a narrow, specific set of methods (`focus`, `scrollIntoView`)? That defeats the point of using it over a plain ref.
+- Could whatever the ref/portal/`flushSync` is doing be expressed as ordinary state and a declarative render instead? That should always be considered first.
+
+<SpotTheBug code={`function ChatWindow({ messages }) {
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    flushSync(() => {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
+    });
+  }, [messages]);
+
+  return (
+    <ul ref={listRef}>
+      {messages.map((m) => <li key={m.id}>{m.text}</li>)}
+    </ul>
+  );
+}`}>
+`flushSync` is meant to wrap a **state update** so that its DOM commit happens synchronously before the next line reads the DOM — here it wraps a plain DOM mutation (`listRef.current.scrollTop = ...`) with no state update inside it at all, so it does nothing useful; `flushSync`'s entire purpose (forcing a *pending* commit to happen early) does not apply when there is no pending commit to force. Worse, this scroll-to-bottom logic runs in `useEffect`, which fires *after* the browser has already painted — on a long message list, the user can see the old scroll position for a frame before it jumps, exactly the flicker `useLayoutEffect` exists to prevent. The fix: drop `flushSync` entirely (there's no state update to flush) and move the scroll logic into `useLayoutEffect`, so it runs after the DOM commit but before paint.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-React gives you deliberate **escape hatches** for the rare imperative need: **`createPortal`** renders into a different DOM node (modals/tooltips) while staying logically in the React tree (context and events still flow through it); **refs** (+ `useImperativeHandle`) let a parent imperatively focus/scroll/play; and **`flushSync`** forces a synchronous DOM commit when you must read layout immediately. Use each sparingly — anything that can stay declarative should.
+React gives you deliberate **escape hatches** for the rare imperative need: **`createPortal`** renders into a different DOM node (modals/tooltips) while staying logically in the React tree — proven above, context and events both still cross that boundary; **refs** (+ `useImperativeHandle`) let a parent imperatively focus/scroll/play, and **`useLayoutEffect`** is where you measure layout right after a commit but before paint; and **`flushSync`** forces a synchronous DOM commit — proven above to genuinely happen before the very next line — for the rare case (a third-party API, a print dialog) that needs it. Use each sparingly and follow the checklist: anything that can stay declarative should.
 </Callout>
 
 export const quizEscape = [
@@ -85,6 +300,7 @@ export const quizEscape = [
       'Memoizes a component',
     ],
     answer: 1,
+    explain: 'A portal only changes where the DOM node physically lives — the rendered content stays a logical child of wherever the portal component is used in the React tree.',
   },
   {
     q: 'A click inside a portaled modal — where do its events bubble?',
@@ -95,16 +311,29 @@ export const quizEscape = [
       'Only to window',
     ],
     answer: 1,
+    explain: 'react.dev is explicit: events from portals propagate according to the React tree rather than the DOM tree — proven in the probe with a click reaching an ancestor whose DOM subtree does not actually contain the button.',
   },
   {
-    q: 'When should you reach for an imperative ref instead of props/state?',
+    q: 'Why measure layout in `useLayoutEffect` instead of `useEffect` when you are about to reposition something based on that measurement?',
     options: [
-      'For all data flow',
-      'For genuinely imperative actions like focusing an input, scrolling, or playing media',
-      'To avoid using hooks',
-      'To store render output',
+      'useLayoutEffect is simply faster to type',
+      '`useLayoutEffect` runs after the DOM commit but before the browser paints, so a measure-then-reposition does not visibly flicker the way it can in useEffect (which runs after paint)',
+      'useEffect cannot read the DOM at all',
+      'They are identical; it does not matter',
     ],
     answer: 1,
+    explain: 'The timing difference is the whole reason useLayoutEffect exists for this case: it lets you read committed layout and act on it before the user ever sees the pre-repositioned frame.',
+  },
+  {
+    q: '```tsx\nfunction addNoFlush() {\n  setItems(prev => [...prev, "b"]);\n  onAfterUpdate(listRef.current.children.length);\n}\n```\nWithout `flushSync`, what does `onAfterUpdate` receive, immediately after `setItems`?',
+    options: [
+      'The new, updated count — React always commits synchronously',
+      'The OLD count — React has not committed the DOM yet at that point in the same event handler',
+      'undefined, because listRef is null',
+      'It throws an error',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: without flushSync, the line right after setState still sees the pre-update DOM (count 1, not 2) — the commit happens later, after the handler returns.',
   },
   {
     q: 'What is `flushSync` for?',
@@ -115,6 +344,18 @@ export const quizEscape = [
       'Fetching data',
     ],
     answer: 1,
+    explain: 'Proven in the probe: wrapping the same setState call in flushSync makes the DOM already reflect the new count on the very next line, where without it the line still saw the old count.',
+  },
+  {
+    q: 'Per the escape hatches checklist in this lesson, what should you check FIRST before reaching for a portal, ref, or `flushSync`?',
+    options: [
+      'Whether the team has used it before',
+      'Whether the problem can stay fully declarative — describe the desired state and let React render it',
+      'Whether it is faster to type than the declarative version',
+      'Whether TypeScript allows it',
+    ],
+    answer: 1,
+    explain: 'Every escape hatch on this page is a deliberate opt-out of a specific React guarantee — the checklist puts "can this stay declarative?" first because that is almost always the simpler, more maintainable answer when it is available.',
   },
 ];
 

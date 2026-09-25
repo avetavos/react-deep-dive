@@ -1,6 +1,6 @@
 ---
 title: 'Refs, Portals & Escape Hatches'
-description: 'ก้าวออกนอก declarative model อย่างตั้งใจ — createPortal สำหรับ modal, imperative ref, flushSync สำหรับ update แบบ synchronous และเมื่อไรที่สมเหตุสมผล'
+description: 'ก้าวออกจาก declarative model อย่างตั้งใจ — createPortal สำหรับ modal ที่พิสูจน์ context/event แล้ว, imperative ref, flushSync ที่พิสูจน์ว่า sync จริง และ checklist ว่าเมื่อไรถึงคุ้มค่า'
 sidebar:
   order: 5
 ---
@@ -9,14 +9,15 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## เมื่อ declarative ไม่พอ
 
-99% ของ React เป็น declarative: เปลี่ยน state, describe UI, ให้ React sync DOM แต่ปัญหาจริงบางอย่างต้องให้คุณก้าว *ออกนอก* model นั้น — เอื้อมเข้าไปใน DOM, บังคับ timing หรือ render ไปยังที่ที่ component tree ไม่เปิดให้โดยธรรมชาติ React ให้ **escape hatch** ที่ตั้งใจไว้สำหรับสิ่งเหล่านี้ ทักษะคือรู้ว่ามีอยู่และใช้อย่างประหยัด
+React 99% เป็น declarative: เปลี่ยน state, บรรยาย UI แล้วให้ React sync DOM ให้ แต่มีปัญหาจริงไม่กี่อย่างที่ต้องก้าวออก *นอก* model นั้น — เอื้อมเข้าไปใน DOM, บังคับ timing หรือ render ที่ที่ component tree ปกติไปไม่ถึง React มี **escape hatch** ที่ตั้งใจไว้ให้สำหรับกรณีเหล่านี้ ทักษะคือรู้ว่ามันมีอยู่และใช้ให้น้อย
 
-## Portals: render ออกนอก DOM ของ parent
+## Portal: render นอก parent DOM
 
-**portal** render children ไปยังส่วน *อื่น* ของ DOM tree โดยที่ยังคงอยู่ใน React tree ตรงที่คุณเขียน นี่คือคำตอบมาตรฐานสำหรับ modal, tooltip และ dropdown — UI ที่ต้องหนี `overflow: hidden` หรือ stacking context ของ `z-index` ของ parent
+**portal** render children ไปอีก *ส่วน* หนึ่งของ DOM tree แต่ยังอยู่ใน React tree ตรงที่คุณเขียนมัน นี่คือทางออกมาตรฐานสำหรับ modal, tooltip, dropdown — UI ที่ต้องหนี `overflow: hidden` หรือ `z-index` stacking context ของ parent
 
 ```jsx
 import { createPortal } from "react-dom";
@@ -30,19 +31,89 @@ function Modal({ children }) {
 }
 ```
 
-<Mermaid title="portal แยกตำแหน่ง DOM ออกจากตำแหน่งใน tree" code={portalDiagram} />
+<Mermaid title="portal แยก DOM location ออกจาก tree position" code={portalDiagram} />
 
 export const portalDiagram = `flowchart TB
-  react["React tree:\nApp -> Page -> Modal -> content"]
-  dom["DOM tree:\nbody -> app-root ...\nbody -> overlay (portal target)"]
-  react -->|ทางตรรกะเป็น child ของ Page| dom
-  note["event ยัง bubble ผ่าน React tree\nไม่ใช่ตำแหน่ง DOM"]`;
+  react["React tree:\nApp → Page → Modal → content"]
+  dom["DOM tree:\nbody → app-root ...\nbody → overlay (portal target)"]
+  react -->|logically a child of Page| dom
+  note["Events still bubble through the React tree,\nnot the DOM location"]`;
 
-จุดละเอียดสำคัญ: portal เปลี่ยน *ที่ที่ DOM node อยู่* ไม่ใช่ *ที่ที่อยู่ใน React tree* context ยังไหลเข้า และ event ยัง bubble ขึ้นผ่าน React parent — ดังนั้นการคลิกภายใน modal ที่ portal ยังไปถึง handler บน React ancestor เชิงตรรกะของตัวเอง
+จุดสำคัญ: portal เปลี่ยนแค่ *DOM node อยู่ที่ไหน* ไม่ใช่ *มันอยู่ตรงไหนใน React tree* context ยังไหลเข้ามา และ event ยังไต่ขึ้นผ่าน React parent — click ข้างใน modal ที่ portal ไว้จึงยังไปถึง handler บน React ancestor เชิงตรรกะของมัน
 
-## Imperative ref: เรียกเข้า child หรือ DOM
+### พิสูจน์: context และ event bubbling ข้าม portal boundary ได้ทั้งคู่
 
-ส่วนใหญ่ data ไหลลงผ่าน props แต่บางครั้ง parent ต้อง *imperatively* สั่งอะไรบางอย่างบน child หรือ DOM node — focus input, เล่น video, scroll ไปยัง element **ref** ให้ handle นั้นกับคุณ
+```tsx
+// src/__tests__/portalContextAndBubbling.test.tsx
+import { createContext, useContext, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { render, screen, fireEvent } from '@testing-library/react';
+
+const ThemeContext = createContext('light');
+
+function PortalModal({ children }: { children: ReactNode }) {
+  // Rendered into document.body — a different DOM subtree entirely.
+  return createPortal(children, document.body);
+}
+
+function ThemedLabel() {
+  // Reads context from the LOGICAL (React tree) ancestor, not the DOM ancestor.
+  const theme = useContext(ThemeContext);
+  return <p data-testid="label">theme: {theme}</p>;
+}
+
+test('a portal still receives context from its React-tree ancestor, not its DOM ancestor', () => {
+  render(
+    <ThemeContext.Provider value="dark">
+      <PortalModal>
+        <ThemedLabel />
+      </PortalModal>
+    </ThemeContext.Provider>,
+  );
+
+  // ThemedLabel is physically a direct child of document.body, outside the
+  // render container, yet it still reads "dark" from the Provider that
+  // wraps it in the React tree.
+  expect(screen.getByTestId('label').textContent).toBe('theme: dark');
+});
+
+test('a click inside a portal bubbles through the React tree, not the DOM tree', () => {
+  const onClick = vi.fn();
+
+  function App() {
+    return (
+      // onClick lives on a React ancestor that is NOT a DOM ancestor of the
+      // portaled button (the portal renders straight into document.body).
+      <div onClick={onClick}>
+        <PortalModal>
+          <button>click me</button>
+        </PortalModal>
+      </div>
+    );
+  }
+
+  render(<App />);
+  fireEvent.click(screen.getByText('click me'));
+
+  // Proven: the click reaches the React-ancestor's handler even though the
+  // button's actual DOM parent is document.body, not <div>.
+  expect(onClick).toHaveBeenCalledTimes(1);
+});
+```
+
+```text
+✓ a portal still receives context from its React-tree ancestor, not its DOM ancestor
+✓ a click inside a portal bubbles through the React tree, not the DOM tree
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+ตาม react.dev: *"Events from portals propagate according to the React tree rather than the DOM tree. For example, if you click inside a portal, and the portal is wrapped in `<div onClick>`, that `onClick` handler will fire."* ถ้าเรื่องนี้ทำให้คนใช้ modal ของคุณแปลกใจ (เช่น click handler บน wrapper นอกที่สมมติว่า "ไม่มีอะไรนอก DOM subtree ของฉันจะ trigger สิ่งนี้ได้") ทางแก้คือ stop propagation จากข้างใน content ของ portal ไม่ใช่หลีกเลี่ยง portal
+
+## Imperative ref: เรียกเข้าไปใน child หรือ DOM
+
+ส่วนใหญ่ data ไหลลงผ่าน props แต่บางครั้ง parent ต้อง trigger อะไรบางอย่างบน child หรือ DOM node แบบ *imperative* — focus input, เล่นวิดีโอ, scroll ไปหา element, วัดขนาด **ref** ให้ handle นั้นแก่คุณ
 
 ```jsx
 function SearchForm() {
@@ -56,11 +127,27 @@ function SearchForm() {
 }
 ```
 
-ถ้าจะเปิดเผย imperative API *แบบกำหนดเอง* จาก component (แทน DOM node ดิบ) ใช้ `useImperativeHandle` กำหนดว่า ref ของ parent เรียก method อะไรได้บ้าง เลือกใช้ props/state สำหรับสิ่งที่เป็น declarative ได้ และหยิบ imperative ref มาเฉพาะ action ที่เป็น imperative จริง (focus, scroll, media, การวัดขนาด)
+สำหรับอะไรก็ตามที่อ่าน layout — วัดขนาดหรือตำแหน่งของ node แล้ว action ทันที (scroll, จัดตำแหน่ง tooltip) — วัดใน `useLayoutEffect` ไม่ใช่ `useEffect` `useLayoutEffect` รัน sync *หลัง* React update DOM แล้วแต่ *ก่อน* browser paint ดังนั้นการวัดที่นั่นสะท้อน layout ที่เพิ่ง commit โดยไม่มีการกระพริบให้เห็น; `useEffect` รันหลัง paint ดังนั้นการวัดแล้วจัดตำแหน่งใหม่ข้างในมันจะกระพริบได้
 
-## `flushSync`: ออกจาก batching
+```jsx
+function AutoSizedBox({ text }) {
+  const boxRef = useRef(null);
+  const [tooTall, setTooTall] = useState(false);
 
-React **batch** การ update state และ apply DOM change แบบ asynchronous เพื่อ performance บางครั้งคุณต้องการให้ DOM ถูก update แบบ *synchronous* — เช่นเพื่ออ่าน layout ใหม่ทันที (วัด element ที่เพิ่งเพิ่ม แล้ว scroll ไปหา) `flushSync` บังคับให้ state update และการ commit DOM ของตัวเองเกิดขึ้นทันที
+  useLayoutEffect(() => {
+    // Runs after the DOM commit, before paint — safe to measure real layout here.
+    setTooTall(boxRef.current.scrollHeight > 200);
+  }, [text]);
+
+  return <div ref={boxRef}>{text}</div>;
+}
+```
+
+ถ้าจะ expose imperative API แบบ *กำหนดเอง* จาก component (แทนที่จะเป็น DOM node ดิบ) ให้ใช้ `useImperativeHandle` เพื่อนิยามชัดว่า method ไหนบ้างที่ ref ของ parent เรียกได้ — ดู [useRef & the DOM](/react/en/hooks/useref-and-the-dom/) สำหรับ hook เต็ม ๆ และพฤติกรรม ref-callback-cleanup ของ React 19 เลือก props/state สำหรับอะไรก็ตามที่ declarative ได้ ใช้ imperative ref เฉพาะ action ที่ imperative จริง ๆ (focus, scroll, media, measurement)
+
+## `flushSync`: ขอไม่เอา batching
+
+React **batch** state update และ apply DOM change แบบ async เพื่อ performance บางครั้งคุณต้องการให้ DOM update *แบบ synchronous* — เช่น อ่าน layout ใหม่ทันที (วัด element ที่เพิ่งเพิ่ม แล้ว scroll ไปหามัน) `flushSync` บังคับให้ state update และ DOM commit ของมันเกิดขึ้นทันที ก่อนบรรทัดถัดไปของ code จะรัน
 
 ```jsx
 import { flushSync } from "react-dom";
@@ -69,10 +156,138 @@ flushSync(() => setItems([...items, newItem])); // DOM is updated by the time th
 listRef.current.scrollTop = listRef.current.scrollHeight; // now safe to read/scroll
 ```
 
-`flushSync` ทำลาย batching และทำ performance แย่ลง ดังนั้นใช้เฉพาะเมื่อจำเป็นจริง ๆ ที่ต้องอ่านหรือทำอะไรกับ DOM ก่อน browser paint
+### พิสูจน์: DOM update ก่อนบรรทัดถัดไปจริง ๆ เฉพาะเมื่อใช้ `flushSync`
+
+```tsx
+// src/__tests__/flushSyncSynchronousCommit.test.tsx
+import { useState, useRef } from 'react';
+import { flushSync } from 'react-dom';
+import { render, screen, act } from '@testing-library/react';
+
+function List({ onAfterUpdate }: { onAfterUpdate: (label: string, count: number) => void }) {
+  const [items, setItems] = useState(['a']);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  function addNoFlush() {
+    setItems((prev) => [...prev, 'b']);
+    // 🔴 React has NOT committed the DOM yet — this reads the OLD count.
+    onAfterUpdate('noFlush', listRef.current!.children.length);
+  }
+
+  function addWithFlush() {
+    flushSync(() => {
+      setItems((prev) => [...prev, 'b']);
+    });
+    // ✅ flushSync forced the commit — the DOM already has the new item.
+    onAfterUpdate('withFlush', listRef.current!.children.length);
+  }
+
+  return (
+    <div>
+      <button onClick={addNoFlush}>no-flush</button>
+      <button onClick={addWithFlush}>with-flush</button>
+      <ul ref={listRef}>
+        {items.map((it, i) => (
+          <li key={i}>{it}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+test('without flushSync, the DOM has not been updated by the line right after setState', () => {
+  const results: Array<[string, number]> = [];
+  render(<List onAfterUpdate={(label, count) => results.push([label, count])} />);
+
+  act(() => {
+    screen.getByText('no-flush').click();
+  });
+
+  expect(results).toEqual([['noFlush', 1]]); // still the OLD count — commit hasn't happened yet
+});
+
+test('flushSync forces the DOM to update before the next line runs', () => {
+  const results: Array<[string, number]> = [];
+  render(<List onAfterUpdate={(label, count) => results.push([label, count])} />);
+
+  act(() => {
+    screen.getByText('with-flush').click();
+  });
+
+  expect(results).toEqual([['withFlush', 2]]); // the NEW count — already committed
+});
+```
+
+```text
+✓ without flushSync, the DOM has not been updated by the line right after setState
+✓ flushSync forces the DOM to update before the next line runs
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`flushSync` เอาชนะ batching และเสีย performance ใช้มันแค่ตอนที่คุณต้องอ่านหรือ action บน DOM ก่อน browser paint จริง ๆ เท่านั้น — react.dev บอกชัดว่า "using `flushSync` is uncommon, and using it often can significantly hurt the performance of your app"
+
+## Escape hatches checklist
+
+ก่อนหยิบ tool ไหนในหน้านี้มาใช้ ไล่ตามลำดับนี้:
+
+1. **อยู่เป็น declarative ได้ไหม?** ถ้าคำตอบคือ "บรรยาย state ที่ต้องการแล้วให้ React render" ให้ทำแบบนั้นแทน — escape hatch ทุกอันด้านล่างคือการ opt-out จาก guarantee ปกติของ React แบบตั้งใจ
+2. **Portal** — ใช้เฉพาะตอนต้องการ *DOM location ที่ต่างออกไป* (stacking context, overflow) แต่ยังอยู่ tree เดียวกันเชิงตรรกะ ไม่ใช่ tool "render ไปที่อื่น" แบบทั่วไป
+3. **Ref (+ `useImperativeHandle`)** — ใช้เฉพาะ action ที่ imperative จริง (focus, scroll, play, measure) ที่ไม่มีตัวแทนเชิง state ตามธรรมชาติ ถ้าคุณเก็บ UI state ไว้ใน ref "เพื่อกัน re-render" นั่นมักเป็นสัญญาณว่า value นั้นควรเป็น state
+4. **`flushSync`** — ใช้เฉพาะตอน API ของ third-party หรือ browser เองต้องการ DOM ที่ update แบบ sync ก่อนบรรทัดถัดไปของคุณรัน (print dialog, scroll-to-just-added-item) อย่าหยิบมาใช้แค่เพื่อ "ให้ update เกิดเร็วขึ้น" ใน pure React code
+5. **วัดด้วย `useLayoutEffect` ไม่ใช่ `useEffect`** ทุกครั้งที่สิ่งถัดไปที่คุณทำคือ action บน layout ที่เพิ่งอ่านไป — ความต่างของ timing คือประเด็นทั้งหมด
+
+## Mental Model
+
+tool ทุกอันในหน้านี้ตอบคำถามเดียวกันคนละแบบ: "React รู้วิธี sync DOM กับ state อยู่แล้ว — มันพังตรงไหนสำหรับฉัน?" portal ทำลายสมมติฐานที่ว่า *ที่คุณเขียน JSX* คือ *ที่ DOM node อยู่* ref ทำลายสมมติฐานที่ว่า interaction *ทั้งหมด* ไหลผ่าน props กับ state `flushSync` ทำลายสมมติฐานที่ว่า *คุณไม่จำเป็นต้องรู้เป๊ะ ๆ ว่า* commit เกิดขึ้นเมื่อไร ไม่มีอันไหนเปลี่ยนว่า React *คืออะไร* — มันคือข้อยกเว้นที่ตั้งชื่อไว้และตั้งใจ สำหรับ guarantee เฉพาะบางอย่าง ใช้เฉพาะที่ declarative model แสดงสิ่งที่คุณต้องการไม่ได้จริง ๆ
+
+## ข้อแลกเปลี่ยน
+
+| Escape hatch | ได้อะไร | เสียอะไร |
+| --- | --- | --- |
+| `createPortal` | render ผ่าน parent ที่ clip/stacking-context ได้ โดยยัง context + event bubbling | ต้องคิดสองแบบ (DOM location vs React position); ต้อง `stopPropagation` ถ้า bubbling ทำให้ consumer แปลกใจ |
+| Ref / `useImperativeHandle` | ควบคุม imperative ตรง ๆ (focus, scroll, measure) ที่ไม่มีตัวแทน declarative ตามธรรมชาติ | ข้าม data flow ของ React — reason จาก props/state อย่างเดียวยากขึ้น |
+| `flushSync` | รับประกันว่า DOM update ก่อนบรรทัดถัดไปจริง | เอาชนะ batching สำหรับ update นั้น — เสีย performance จริงถ้าใช้เกิน |
+| `useLayoutEffect` สำหรับวัด | ไม่มี flicker จากการวัดแล้วจัดตำแหน่งใหม่ | รัน sync ก่อน paint — layout effect ที่ช้าจะกัน browser ไม่ให้ paint |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"portal ย้าย component ออกจาก React tree"** พิสูจน์แล้วด้านบน: context ยังไหลเข้ามา และ click event ยังไต่ผ่าน React ancestor — เปลี่ยนแค่ DOM location เท่านั้น
+- **"ref มีไว้อ่าน render output"** ref ที่อ่านระหว่าง render อาจ stale หรือ null; ref มีไว้สำหรับ action แบบ imperative หลัง commit (หรืออ่าน layout ที่ commit แล้วใน `useLayoutEffect`) ไม่ใช่ตัวแทน props/state ระหว่าง render
+- **"`flushSync` ทำให้ React เร็วขึ้น"** ตรงข้ามเลย — พิสูจน์แล้วด้านบน มันบังคับ commit แบบ sync ที่ข้าม batching ซึ่งปกติเป็นชัยชนะด้าน performance ที่คุณกำลังยอมสละแบบตั้งใจเพื่อการอ่านครั้งเดียว
+- **"`useEffect` กับ `useLayoutEffect` ใช้แทนกันได้สำหรับวัด layout"** ทั้งสองรันคนละเวลาเทียบกับ paint; การวัดแล้วจัดตำแหน่งใหม่ใน `useEffect` กระพริบให้เห็นได้ในแบบที่ code เดียวกันใน `useLayoutEffect` ไม่เป็น เพราะ `useLayoutEffect` รันก่อน browser paint
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ review code ที่ generate มาที่ใช้ ref, portal หรือ `flushSync` ให้เช็ก:
+
+- `flushSync` ถูกเรียกข้างใน `useEffect` (หรือที่ไหนก็ตามที่ไม่ใช่การตอบสนอง browser/DOM API ที่ต้องการอ่านแบบ sync จริง ๆ) ไหม? แบบนั้นแทบจะไม่จำเป็นเลยเสมอ และเป็นกลิ่นของปัญหา performance ไม่ใช่ทางแก้
+- content ของ portal สมมติว่ามันแยกจาก click handler ข้างนอกเพราะ "ย้ายไป `document.body`" แล้วไหม? event ยังไต่ผ่าน React tree อยู่ดี — สมมติฐานนั้นต้องการ `stopPropagation` ไม่ใช่ความประหลาดใจทีหลัง
+- การวัด (ขนาด, ตำแหน่ง scroll) ทำใน `useEffect` แล้วเอาไปจัดตำแหน่งใหม่ทันทีไหม? นั่นควรอยู่ใน `useLayoutEffect` เพื่อกัน flicker ที่เห็นได้
+- `useImperativeHandle` expose DOM node *ทั้งก้อน* แทนที่จะเป็น method ชุดเล็ก ๆ เฉพาะเจาะจง (`focus`, `scrollIntoView`) ไหม? แบบนั้นเสียประเด็นของการใช้มันแทน ref ธรรมดา
+- สิ่งที่ ref/portal/`flushSync` กำลังทำอยู่ เขียนเป็น state ธรรมดาและ declarative render แทนได้ไหม? ควรพิจารณาก่อนเสมอ
+
+<SpotTheBug code={`function ChatWindow({ messages }) {
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    flushSync(() => {
+      listRef.current.scrollTop = listRef.current.scrollHeight;
+    });
+  }, [messages]);
+
+  return (
+    <ul ref={listRef}>
+      {messages.map((m) => <li key={m.id}>{m.text}</li>)}
+    </ul>
+  );
+}`}>
+`flushSync` มีไว้ห่อ **state update** เพื่อให้ DOM commit ของมันเกิดขึ้นแบบ sync ก่อนบรรทัดถัดไปจะอ่าน DOM — ตรงนี้มันห่อ DOM mutation ธรรมดา (`listRef.current.scrollTop = ...`) ที่ไม่มี state update ข้างในเลย จึงไม่ได้ทำอะไรมีประโยชน์; จุดประสงค์ทั้งหมดของ `flushSync` (บังคับ commit ที่ *ค้างอยู่* ให้เกิดเร็วขึ้น) ไม่มีผลเมื่อไม่มี commit ค้างให้บังคับ ที่แย่กว่านั้น logic scroll-to-bottom นี้รันใน `useEffect` ซึ่งทำงาน *หลัง* browser paint ไปแล้ว — บน message list ยาว ผู้ใช้จะเห็นตำแหน่ง scroll เก่าอยู่หนึ่งเฟรมก่อนมันจะกระโดด ตรงกับ flicker ที่ `useLayoutEffect` มีไว้ป้องกันพอดี ทางแก้: เอา `flushSync` ออกทั้งหมด (ไม่มี state update ให้ flush) แล้วย้าย logic scroll ไปไว้ใน `useLayoutEffect` ให้มันรันหลัง DOM commit แต่ก่อน paint
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-React ให้ **escape hatch** ที่ตั้งใจไว้สำหรับความจำเป็น imperative หายาก: **`createPortal`** render เข้า DOM node อื่น (modal/tooltip) โดยที่ยังอยู่ใน React tree เชิงตรรกะ (context และ event ยังไหลผ่าน); **ref** (+ `useImperativeHandle`) ให้ parent focus/scroll/play แบบ imperative; และ **`flushSync`** บังคับ commit DOM แบบ synchronous เมื่อต้องอ่าน layout ทันที ใช้แต่ละอย่างอย่างประหยัด — อะไรที่ยังเป็น declarative ได้ ควรเป็น
+React มี **escape hatch** ที่ตั้งใจไว้สำหรับความต้องการ imperative ที่หายาก: **`createPortal`** render เข้า DOM node อื่นในขณะที่ยังอยู่ใน React tree เชิงตรรกะ — พิสูจน์แล้วด้านบนว่าทั้ง context และ event ยังข้าม boundary นั้นได้; **ref** (+ `useImperativeHandle`) ให้ parent focus/scroll/play แบบ imperative และ **`useLayoutEffect`** คือที่ที่คุณวัด layout ทันทีหลัง commit แต่ก่อน paint; และ **`flushSync`** บังคับ DOM commit แบบ sync — พิสูจน์แล้วด้านบนว่าเกิดขึ้นจริงก่อนบรรทัดถัดไป — สำหรับกรณีหายาก (third-party API, print dialog) ที่ต้องการมันจริง ๆ ใช้แต่ละอันให้น้อยและตาม checklist: อะไรที่อยู่เป็น declarative ได้ควรอยู่แบบนั้น
 </Callout>
 
 export const quizEscape = [
@@ -80,41 +295,67 @@ export const quizEscape = [
     q: '`createPortal` ทำอะไร?',
     options: [
       'สร้าง React app ใหม่',
-      'render children เข้า DOM node อื่นโดยที่ยังคงอยู่ใน React tree เชิงตรรกะ',
+      'render children ไปยัง DOM node อื่น ในขณะที่ยังอยู่ใน React tree เชิงตรรกะ',
       'เปิด network connection',
       'memoize component',
     ],
     answer: 1,
+    explain: 'portal เปลี่ยนแค่ว่า DOM node อยู่ที่ไหนจริง ๆ — content ที่ render ยังเป็น child เชิงตรรกะของที่ที่ component portal ถูกใช้ใน React tree',
   },
   {
-    q: 'การคลิกภายใน modal ที่ portal — event bubble ไปที่ไหน?',
+    q: 'click ข้างใน modal ที่ portal ไว้ event ของมัน bubble ไปทางไหน?',
     options: [
-      'เฉพาะผ่านตำแหน่ง DOM (document.body)',
-      'ขึ้นผ่าน React tree (React ancestor เชิงตรรกะของ modal) ดังนั้น React handler ยังจับได้',
-      'ไม่ไปไหน — portal บล็อก event',
-      'เฉพาะไปที่ window',
+      'ผ่าน DOM location เท่านั้น (document.body)',
+      'ขึ้นผ่าน React tree (React ancestor เชิงตรรกะของ modal) handler ของ React จึงยังจับได้',
+      'ไม่ไปไหนเลย — portal บล็อก event',
+      'ไปแค่ window เท่านั้น',
     ],
     answer: 1,
+    explain: 'react.dev บอกชัด: event จาก portal propagate ตาม React tree ไม่ใช่ DOM tree — พิสูจน์แล้วในโพรบด้วย click ที่ไปถึง ancestor ที่ DOM subtree ของมันไม่มีปุ่มนั้นอยู่จริง',
   },
   {
-    q: 'ควรหยิบ imperative ref มาใช้แทน props/state เมื่อไร?',
+    q: 'ทำไมต้องวัด layout ใน `useLayoutEffect` แทน `useEffect` เมื่อกำลังจะจัดตำแหน่งใหม่ตามการวัดนั้น?',
     options: [
-      'สำหรับ data flow ทั้งหมด',
-      'สำหรับ action ที่เป็น imperative จริงอย่าง focus input, scroll หรือเล่น media',
-      'เพื่อเลี่ยงการใช้ hook',
-      'เพื่อเก็บ render output',
+      'useLayoutEffect พิมพ์ง่ายกว่าเฉย ๆ',
+      '`useLayoutEffect` รันหลัง DOM commit แต่ก่อน browser paint การวัดแล้วจัดตำแหน่งใหม่จึงไม่กระพริบให้เห็นแบบที่เกิดได้ใน useEffect (ที่รันหลัง paint)',
+      'useEffect อ่าน DOM ไม่ได้เลย',
+      'เหมือนกันเป๊ะ ไม่สำคัญ',
     ],
     answer: 1,
+    explain: 'ความต่างของ timing คือเหตุผลทั้งหมดที่ useLayoutEffect มีไว้สำหรับ case นี้: มันให้คุณอ่าน layout ที่ commit แล้วและ action ก่อนที่ผู้ใช้จะเห็นเฟรมก่อนจัดตำแหน่งใหม่',
+  },
+  {
+    q: '```tsx\nfunction addNoFlush() {\n  setItems(prev => [...prev, "b"]);\n  onAfterUpdate(listRef.current.children.length);\n}\n```\nไม่มี `flushSync`, `onAfterUpdate` ได้ค่าอะไรทันทีหลัง `setItems`?',
+    options: [
+      'ค่าใหม่ที่ update แล้ว — React commit แบบ sync เสมอ',
+      'ค่าเก่า — React ยังไม่ commit DOM ณ จุดนั้นใน event handler เดียวกัน',
+      'undefined เพราะ listRef เป็น null',
+      'throw error',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: ไม่มี flushSync บรรทัดถัดไปหลัง setState ยังเห็น DOM ก่อน update (count 1 ไม่ใช่ 2) — commit เกิดทีหลัง หลัง handler return แล้ว',
   },
   {
     q: '`flushSync` มีไว้ทำอะไร?',
     options: [
-      'ทำให้ app render เร็วขึ้นโดยรวม',
-      'บังคับให้ state update และการ commit DOM ของตัวเองเกิดแบบ synchronous — เช่นเพื่ออ่าน layout ใหม่ก่อน paint',
-      'batch update ให้มากขึ้น',
-      'fetch data',
+      'ทำให้แอป render เร็วขึ้นโดยรวม',
+      'บังคับ state update และ DOM commit ของมันให้เกิดแบบ synchronous — เช่น อ่าน layout ใหม่ก่อน paint',
+      'batch update หลาย ๆ อันเข้าด้วยกัน',
+      'ดึงข้อมูล',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: ห่อ setState call เดียวกันด้วย flushSync ทำให้ DOM สะท้อน count ใหม่แล้วตั้งแต่บรรทัดถัดไป ในขณะที่ไม่มี flushSync บรรทัดนั้นยังเห็น count เก่า',
+  },
+  {
+    q: 'ตาม escape hatches checklist ในบทนี้ ควรเช็กอะไร **ก่อน** จะหยิบ portal, ref หรือ `flushSync` มาใช้?',
+    options: [
+      'ทีมเคยใช้มันมาก่อนไหม',
+      'ปัญหานี้อยู่เป็น declarative ได้เต็มที่ไหม — บรรยาย state ที่ต้องการแล้วให้ React render',
+      'พิมพ์เร็วกว่าเวอร์ชัน declarative ไหม',
+      'TypeScript อนุญาตไหม',
+    ],
+    answer: 1,
+    explain: 'escape hatch ทุกอันในหน้านี้คือการ opt-out จาก guarantee เฉพาะของ React แบบตั้งใจ — checklist ให้ "อยู่เป็น declarative ได้ไหม" มาก่อนเพราะเกือบตลอดเวลามันเป็นคำตอบที่ง่ายกว่าและดูแลง่ายกว่าเมื่อทำได้',
   },
 ];
 

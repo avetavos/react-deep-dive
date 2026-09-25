@@ -1,6 +1,6 @@
 ---
 title: 'Composition Patterns'
-description: 'pattern สำหรับ component ที่ reuse ได้ — composition ด้วย children, compound component, render props (และทำไม hook มาแทน) และ controlled vs uncontrolled'
+description: 'pattern การ reuse component — composition ด้วย children และ slot, compound component ที่มี typed context, render prop/children-as-a-function ด้วย generics, `as` prop แบบ polymorphic, ข้อควรระวังของ HOC และ controlled เทียบ uncontrolled'
 sidebar:
   order: 4
 ---
@@ -9,10 +9,11 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Composition คือ pattern พื้นฐาน
 
-คำตอบเรื่องการ reuse ของ React ไม่ใช่ inheritance แต่คือ **composition** แทนที่จะ extend component คุณส่ง content และ behavior *เข้าไป* ใน component รูปแบบง่ายที่สุดคือ prop `children`: component รับ JSX อะไรก็ได้ แล้วตัดสินใจว่าจะวางไว้ตรงไหน
+คำตอบของ React สำหรับการ reuse ไม่ใช่ inheritance — คือ **composition** แทนที่จะ extend component คุณส่ง content และ behavior เข้าไป *ข้างใน* มัน รูปแบบที่ง่ายที่สุดคือ prop `children`: component รับ JSX อะไรก็ได้แล้วตัดสินใจว่าจะวางไว้ตรงไหน
 
 ```jsx
 // A generic Card that doesn't know or care what's inside it.
@@ -31,11 +32,42 @@ function Card({ title, children }) {
 </Card>
 ```
 
-คุณส่ง JSX ผ่าน prop *ตัวไหนก็ได้* ไม่ใช่แค่ `children` — `<Layout sidebar={<Nav />} main={<Feed />} />` ก็คือ composition นี่คือวิธีเลี่ยง prop-drilling ลึก ๆ และ inheritance tree ที่แข็งทื่อ
+## Slot ผ่าน props: มากกว่าแค่ `children`
 
-## Compound components
+คุณส่ง JSX ผ่าน prop *ไหนก็ได้* ไม่ใช่แค่ `children` — component ที่มีหลาย region ของ content ที่แยกกันสามารถรับ prop หนึ่งตัวต่อ **slot** typed ให้แต่ละ region รับแค่ content ที่ render ได้เท่านั้น:
 
-เมื่อหลาย component ต้องทำงานร่วมกันและ **แชร์ state** pattern *compound component* จะเปิดเผยกลุ่มชิ้นส่วนที่ประสานงานกันผ่าน state ที่แชร์ (มักผ่าน context) — ส่วนผู้ใช้จัดวางชิ้นส่วนเหล่านั้นได้อย่างอิสระ
+```tsx
+// src/components/PageLayout.tsx
+import type { ReactNode } from 'react';
+
+export function PageLayout({
+  sidebar,
+  main,
+  footer,
+}: {
+  sidebar: ReactNode;
+  main: ReactNode;
+  footer?: ReactNode;
+}) {
+  return (
+    <div className="page">
+      <aside className="page__sidebar">{sidebar}</aside>
+      <main className="page__main">{main}</main>
+      {footer && <footer className="page__footer">{footer}</footer>}
+    </div>
+  );
+}
+```
+
+```jsx
+<PageLayout sidebar={<Nav />} main={<Feed />} footer={<Copyright />} />
+```
+
+นี่คือวิธีหลีกเลี่ยง prop-drilling ลึก ๆ และ inheritance tree ที่แข็งทื่อ: แต่ละ slot ก็แค่ prop ธรรมดา จึงถูก type ไว้ optional หรือ required เหมือน prop อื่น ๆ และ layout component ไม่ต้องรู้เลยว่าข้างในมีอะไรจริง ๆ
+
+## Compound component พร้อม typed context
+
+เมื่อ component หลายตัวต้องทำงานร่วมกันและ **share state** pattern *compound component* เปิด family ของชิ้นส่วนที่ประสานกันผ่าน state ที่แชร์ (มักผ่าน context) — ในขณะที่ consumer จัดเรียงมันได้อย่างอิสระ
 
 ```jsx
 // The consumer composes the pieces; Tabs shares state via context internally.
@@ -49,25 +81,109 @@ function Card({ title, children }) {
 </Tabs>
 ```
 
-ภายใน `Tabs` ให้ค่า active + setter ผ่าน context; `Tab` และ `TabPanel` อ่านด้วย `useContext` ผู้ใช้ได้ API ที่ clean และ declarative พร้อมควบคุม layout เต็มที่ โดยไม่ต้องร้อย props ผ่านทุกชิ้น นี่คือวิธีที่ library อย่าง Radix และ Headless UI จัดโครงสร้าง component
-
-<Mermaid title="compound component แชร์ state ผ่าน context" code={compoundDiagram} />
+<Mermaid title="compound component share state ผ่าน context" code={compoundDiagram} />
 
 export const compoundDiagram = `flowchart TB
-  tabs["Tabs (ให้ value + setValue ผ่าน context)"] --> list["TabList"]
-  list --> tab["Tab (อ่าน context, เรียก setValue)"]
-  tabs --> panel["TabPanel (อ่าน context, แสดงถ้า active)"]`;
+  tabs["Tabs (provides value + setValue via context)"] --> list["TabList"]
+  list --> tab["Tab (reads context, calls setValue)"]
+  tabs --> panel["TabPanel (reads context, shows if active)"]`;
 
-## Render props และทำไม hook มาแทนส่วนใหญ่
+ภายใน `Tabs` ให้ active value + setter ผ่าน context; `Tab` กับ `TabPanel` อ่านมันด้วย `useContext` consumer ได้ API ที่สะอาด declarative และควบคุม layout ได้เต็มที่ โดยไม่ต้อง thread prop ผ่านทุกชิ้นส่วน นี่คือวิธีที่ library อย่าง Radix และ Headless UI จัด structure component ของมัน
 
-**render prop** คือ prop ที่ค่าเป็น function ที่ return JSX — ให้ component แชร์ *logic* ส่วนผู้เรียกควบคุม *การ render*
+### พิสูจน์: shared state ผ่าน context และ guard ที่ typed กันการใช้ผิด
+
+```tsx
+// src/components/Tabs.tsx
+import { createContext, useContext, useState, type ReactNode } from 'react';
+
+type TabsContextValue = { active: string; setActive: (value: string) => void };
+const TabsContext = createContext<TabsContextValue | null>(null);
+
+function useTabsContext(component: string): TabsContextValue {
+  const ctx = useContext(TabsContext);
+  if (!ctx) throw new Error(`<${component}> must be rendered inside <Tabs>`);
+  return ctx;
+}
+
+export function Tabs({ defaultValue, children }: { defaultValue: string; children: ReactNode }) {
+  const [active, setActive] = useState(defaultValue);
+  return <TabsContext.Provider value={{ active, setActive }}>{children}</TabsContext.Provider>;
+}
+
+export function TabList({ children }: { children: ReactNode }) {
+  return <div role="tablist">{children}</div>;
+}
+
+export function Tab({ value, children }: { value: string; children: ReactNode }) {
+  const { active, setActive } = useTabsContext('Tab');
+  return (
+    <button role="tab" aria-selected={active === value} onClick={() => setActive(value)}>
+      {children}
+    </button>
+  );
+}
+
+export function TabPanel({ value, children }: { value: string; children: ReactNode }) {
+  const { active } = useTabsContext('TabPanel');
+  if (active !== value) return null;
+  return <div role="tabpanel">{children}</div>;
+}
+```
+
+```tsx
+// src/__tests__/tabsCompound.test.tsx
+import { render, screen, fireEvent } from '@testing-library/react';
+import { Tabs, TabList, Tab, TabPanel } from '../components/Tabs';
+
+test('compound components share active state through context, no prop drilling', () => {
+  render(
+    <Tabs defaultValue="a">
+      <TabList>
+        <Tab value="a">First</Tab>
+        <Tab value="b">Second</Tab>
+      </TabList>
+      <TabPanel value="a">Panel A</TabPanel>
+      <TabPanel value="b">Panel B</TabPanel>
+    </Tabs>,
+  );
+
+  expect(screen.getByText('Panel A')).toBeTruthy();
+  expect(screen.queryByText('Panel B')).toBeNull();
+
+  fireEvent.click(screen.getByText('Second'));
+
+  expect(screen.queryByText('Panel A')).toBeNull();
+  expect(screen.getByText('Panel B')).toBeTruthy();
+});
+
+test('a piece used outside <Tabs> throws with a clear error, proving the context requirement', () => {
+  function BrokenTab() {
+    return <Tab value="a">oops</Tab>;
+  }
+  expect(() => render(<BrokenTab />)).toThrow('<Tab> must be rendered inside <Tabs>');
+});
+```
+
+```text
+✓ compound components share active state through context, no prop drilling
+✓ a piece used outside <Tabs> throws with a clear error, proving the context requirement
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`TabsContextValue | null` (แทนที่จะให้ context มีค่า default ปลอม ๆ) คือสิ่งที่ทำให้ guard ของ `useTabsContext` เป็นไปได้ *และ* type-safe: TypeScript บังคับให้ทุกตัวที่อ่านต้องจัดการ case `null` และ error ที่ throw ให้ข้อความที่แม่นยำ action ได้ แทนที่จะเป็น "cannot read property of undefined" ที่งงในชั้นลึกกว่า
+
+## Render prop และทำไม hooks มาแทนที่ส่วนใหญ่
+
+**render prop** คือ prop ที่ค่าของมันเป็น function ที่คืน JSX — ให้ component share *logic* ในขณะที่ caller ควบคุม *การ render*
 
 ```jsx
 // Render prop: MouseTracker owns the logic, the caller renders.
 <MouseTracker render={({ x, y }) => <p>Cursor at {x}, {y}</p>} />
 ```
 
-render props เป็นวิธีคลาสสิกในการแชร์ stateful logic ก่อนมี hook วันนี้ **custom hook** ทำแบบเดียวกันได้ตรงกว่า — ไม่มี wrapper component ไม่มีการซ้อน:
+Render prop เป็นวิธีคลาสสิกในการ share stateful logic ก่อนมี hooks วันนี้ **custom hook** ทำแบบเดียวกันได้ตรงกว่า — ไม่มี wrapper component ไม่มีการซ้อน:
 
 ```jsx
 // The modern equivalent: a custom hook.
@@ -77,11 +193,200 @@ function Component() {
 }
 ```
 
-คุณยังจะ *เห็น* render props อยู่ (บาง library ใช้ และ `children`-เป็น-function ก็คืออันหนึ่ง) แต่สำหรับการแชร์ logic ของคุณเอง หยิบ custom hook มาก่อน
+คุณยัง *เห็น* render prop อยู่ (บาง library ใช้มัน และ `children`-as-a-function ก็เป็นหนึ่งในนั้น) แต่สำหรับ share logic ของตัวเอง ให้หยิบ custom hook ก่อน
 
-## Controlled vs uncontrolled
+### `children` เป็น function typed ด้วย generics
 
-input จะเป็น **controlled** เมื่อ React state เป็น single source of truth (`value` + `onChange`) และเป็น **uncontrolled** เมื่อ DOM ถือค่าไว้และคุณอ่านผ่าน ref (หรือใน React 19 อ่านจาก `FormData` ของ form ตอน submit)
+รูปแบบ render-prop ที่ยังอยู่รอดบ่อยที่สุดคือ `children` เองที่เป็น function — มีประโยชน์เมื่อ component ถือ **collection** และต้องการให้ caller ควบคุมว่าแต่ละ item render ยังไง โดยไม่ต้องเสีย type safety ว่า item นั้นคือ *อะไร* จริง ๆ:
+
+```tsx
+// src/components/DataList.tsx
+import type { ReactNode } from 'react';
+
+export function DataList<T>({
+  items,
+  children,
+}: {
+  items: T[];
+  children: (item: T, index: number) => ReactNode;
+}) {
+  return (
+    <ul>
+      {items.map((item, i) => (
+        <li key={i}>{children(item, i)}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+```tsx
+// src/__tests__/dataListGenerics.test.tsx
+import { render, screen } from '@testing-library/react';
+import { DataList } from '../components/DataList';
+
+test('DataList<T> infers T from `items` — string items give `item` a string type', () => {
+  render(<DataList items={['a', 'b']}>{(item) => <span>{item.toUpperCase()}</span>}</DataList>);
+  expect(screen.getByText('A')).toBeTruthy();
+  expect(screen.getByText('B')).toBeTruthy();
+});
+
+test('DataList<T> infers an object shape from `items` — no cast needed to read its fields', () => {
+  const items = [{ id: 1, label: 'One' }, { id: 2, label: 'Two' }];
+  render(<DataList items={items}>{(item, index) => <span>{index}:{item.label}</span>}</DataList>);
+  expect(screen.getByText('0:One')).toBeTruthy();
+  expect(screen.getByText('1:Two')).toBeTruthy();
+});
+```
+
+```text
+✓ DataList<T> infers T from `items` — string items give `item` a string type
+✓ DataList<T> infers an object shape from `items` — no cast needed to read its fields
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+สังเกตว่า `item.toUpperCase()` กับ `item.label` พิสูจน์อะไรตรงนี้: เพราะ `DataList` เป็น generic บน `T` TypeScript infer `T` จาก array ที่คุณส่งเป็น `items` แล้ว thread type นั้นเป๊ะ ๆ ไปยัง parameter ของ callback `children` — `string[]` ให้ `.toUpperCase()` ได้โดยไม่ต้อง cast และ object array ให้ `.label` ได้โดยไม่ต้อง cast เช่นกัน ใส่ shape ของ item ผิดแล้วนี่คือ compile error ไม่ใช่ความประหลาดใจตอน runtime
+
+## Polymorphic component: typing `as` prop
+
+component แบบ **polymorphic** render เป็น HTML element (หรือ component) ไหนก็ได้ที่ caller เลือกผ่าน `as` prop โดยยัง type-check prop *เฉพาะ* ของ element นั้น — `<Text as="a" href="...">` ควรต้องการ `href`; `<Text as="button" onClick={...}>` ควรต้องการ `onClick`; `<Text>` เปล่า ๆ ไม่ควรต้องการอันไหนเลย
+
+```tsx
+// src/components/PolymorphicText.tsx
+import type { ElementType, ComponentPropsWithoutRef, ReactNode } from 'react';
+
+type PolymorphicProps<E extends ElementType> = {
+  as?: E;
+  children?: ReactNode;
+} & Omit<ComponentPropsWithoutRef<E>, 'as' | 'children'>;
+
+export function Text<E extends ElementType = 'span'>({ as, children, ...rest }: PolymorphicProps<E>) {
+  const Component = as || 'span';
+  return <Component {...rest}>{children}</Component>;
+}
+```
+
+```tsx
+// src/__tests__/polymorphicText.test.tsx
+import { render, screen } from '@testing-library/react';
+import { Text } from '../components/PolymorphicText';
+
+test('renders as <span> by default', () => {
+  render(<Text>hello</Text>);
+  expect(screen.getByText('hello').tagName).toBe('SPAN');
+});
+
+test('as="a" renders an anchor and type-checks its own props (href)', () => {
+  render(<Text as="a" href="/docs">link</Text>);
+  const el = screen.getByText('link');
+  expect(el.tagName).toBe('A');
+  expect(el.getAttribute('href')).toBe('/docs');
+});
+
+test('as="button" accepts onClick, proving prop types follow the `as` element', () => {
+  const onClick = vi.fn();
+  render(
+    <Text as="button" onClick={onClick}>
+      click
+    </Text>,
+  );
+  screen.getByText('click').click();
+  expect(onClick).toHaveBeenCalledTimes(1);
+});
+```
+
+```text
+✓ renders as <span> by default
+✓ as="a" renders an anchor and type-checks its own props (href)
+✓ as="button" accepts onClick, proving prop types follow the `as` element
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+generic default `E extends ElementType = 'span'` คือสิ่งที่ทำให้ case ธรรมดาที่ไม่มี `as` ทำงานได้โดยไม่ต้องมีพิธีรีตองเพิ่ม และ `ComponentPropsWithoutRef<E>` คือสิ่งที่ derive prop set ที่ถูกต้องใหม่ทุกครั้งที่ `E` เปลี่ยน — component ตัวเดียวนี้ type-check ถูกต้องกับทุก HTML element ที่มันอาจ render เป็น โดยไม่ต้องมี overload ต่อ tag เอง
+
+## Higher-order component: ข้อควรระวังและทำไม hooks มาแทนที่ส่วนใหญ่
+
+**higher-order component (HOC)** คือ function ที่รับ component แล้วคืน component ใหม่ที่ห่อไว้ — วิธีก่อนยุค hooks ในการ share behavior ข้าม component (logging, subscription, prop ที่ inject เข้ามา) มีข้อควรระวังสองอย่างที่เจอบ่อยมากใน HOC code:
+
+1. **Ref forwarding** ref ที่ติดกับ component ที่ถูกห่อต้องถูก thread ผ่าน HOC อย่างชัดเจน — ไม่งั้นมันจะ resolve เป็น `null` แบบเงียบ ๆ สำหรับ caller
+2. **Display name** ถ้าไม่มี component ที่ถูก HOC ห่อทุกตัวจะโผล่ใน React DevTools เป็นชื่อ generic ของ wrapper ไม่ใช่ component ที่มันห่อจริง ทำให้ component tree อ่านไม่ออก
+
+```tsx
+// src/components/withLogging.tsx
+import type { Ref } from 'react';
+
+type InputProps = { placeholder?: string; ref?: Ref<HTMLInputElement> };
+
+function PlainInput({ placeholder, ref }: InputProps) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+
+// ❌ Broken: destructures `ref` out along with the rest of props, but never
+// passes it anywhere — the caller's ref is silently dropped.
+function withLoggingBroken(Wrapped: typeof PlainInput) {
+  return function Logged(props: InputProps) {
+    const { ref, ...rest } = props;
+    return <Wrapped {...rest} />;
+  };
+}
+
+// ✅ Fixed: forward `ref` straight through — React 19 treats it as a plain
+// prop, no forwardRef needed — and set a displayName for DevTools.
+function withLoggingFixed(Wrapped: typeof PlainInput) {
+  function Logged({ ref, ...rest }: InputProps) {
+    return <Wrapped {...rest} ref={ref} />;
+  }
+  Logged.displayName = `withLogging(${Wrapped.name})`;
+  return Logged;
+}
+
+export { PlainInput, withLoggingBroken, withLoggingFixed };
+```
+
+```tsx
+// src/__tests__/hocRefForwarding.test.tsx
+import { render } from '@testing-library/react';
+import { PlainInput, withLoggingBroken, withLoggingFixed } from '../components/withLogging';
+
+const LoggedBroken = withLoggingBroken(PlainInput);
+const LoggedFixed = withLoggingFixed(PlainInput);
+
+test('a HOC that does not forward ref leaves the caller\'s ref null', () => {
+  const captured: { current: HTMLInputElement | null } = { current: null };
+  render(<LoggedBroken ref={(node) => { captured.current = node; }} />);
+  expect(captured.current).toBeNull();
+});
+
+test('forwarding ref through the HOC gives the caller the real DOM node', () => {
+  const captured: { current: HTMLInputElement | null } = { current: null };
+  render(<LoggedFixed ref={(node) => { captured.current = node; }} />);
+  expect(captured.current).not.toBeNull();
+  expect(captured.current?.tagName).toBe('INPUT');
+});
+
+test('the fixed HOC sets a readable displayName instead of the generic wrapper name', () => {
+  expect(LoggedFixed.displayName).toBe('withLogging(PlainInput)');
+});
+```
+
+```text
+✓ a HOC that does not forward ref leaves the caller's ref null
+✓ forwarding ref through the HOC gives the caller the real DOM node
+✓ the fixed HOC sets a readable displayName instead of the generic wrapper name
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+ข้อควรระวังทั้งสองอย่างคือเหตุผลที่ **hooks มาแทนที่การใช้ HOC ส่วนใหญ่**: custom hook ไม่มี wrapper component เลย จึงไม่มี ref ให้เสียและไม่มี layer เพิ่มให้ต้องตั้งชื่อใน DevTools — logic ข้าม component อยู่ใน hook และ component ที่ใช้มันยังเป็นตัวมันเองเป๊ะ ๆ ใน tree
+
+## Controlled เทียบ uncontrolled
+
+form input เป็น **controlled** เมื่อ React state คือแหล่งความจริงเดียวของมัน (`value` + `onChange`) และเป็น **uncontrolled** เมื่อ DOM ถือค่าไว้และคุณอ่านมันผ่าน ref (หรือใน React 19 จาก `FormData` ของ form ตอน submit)
 
 ```jsx
 // Controlled: state drives the input; you can validate/transform on every keystroke.
@@ -93,52 +398,128 @@ const ref = useRef(null);
 <input defaultValue="Ada" ref={ref} />   // ref.current.value on submit
 ```
 
-ใช้ **controlled** เมื่อต้อง react หรือจำกัด input ระหว่างที่เปลี่ยน; ใช้ **uncontrolled** สำหรับ form ง่าย ๆ ที่สนใจแค่ค่าสุดท้าย (state น้อยกว่า, re-render น้อยกว่า)
+ใช้ **controlled** เมื่อต้อง react หรือ constrain input ขณะที่มันเปลี่ยน; **uncontrolled** สำหรับ form ง่าย ๆ ที่สนใจแค่ค่าสุดท้าย (state น้อยกว่า re-render น้อยกว่า)
+
+## Mental Model
+
+ทุก pattern ในหน้านี้คือท่าเดียวกัน: ตัดสินใจว่า *ใคร* เป็นเจ้าของแต่ละส่วนของ UI และ *ยังไง* ที่ชิ้นส่วนตกลง contract กัน `children`/slot ยกทั้ง subtree ให้ caller โดยไม่มี contract อะไรเกิน "render อะไรสักอย่าง" Compound component share contract ส่วนตัว (context) ระหว่าง family ของชิ้นส่วนที่กำหนดไว้ `children`-as-a-function กับ polymorphic `as` ผลัก contract เข้าไปใน *ระบบ type* เอง — caller กับ component ตกลงกันชัดเจนว่า shape ของ data หรือ prop อะไรไหลข้าม boundary ตรวจตอน compile แทนที่จะมาเจอตอน runtime HOC พยายาม inject behavior โดย *ไม่มี* contract กับ component ที่ถูกห่อเลย ซึ่งเป็นเหตุผลตรง ๆ ว่าทำไมมันต้องแพตช์มือ (ref forwarding, display name) ที่ hook ไม่ต้องคิดถึงเลย
+
+## ข้อแลกเปลี่ยน
+
+| Pattern | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| `children` / slot | การ reuse ที่ง่ายที่สุด; caller ควบคุม content เต็มที่ | ไม่มี state ร่วมระหว่างส่วนต่าง ๆ เว้นแต่จะเพิ่ม context |
+| Compound component | API declarative สะอาด; share state ไม่มี prop drilling | ชิ้นส่วนผูกกับ context ของ parent เฉพาะตัว; แยกใช้เดี่ยว ๆ ยาก |
+| `children` เป็น function (generics) | render ต่อ item แบบ type-safe โดย component เองไม่ต้องรู้อะไรเลย | พิธีรีตองมากกว่า prop `children: ReactNode` ธรรมดาเล็กน้อย |
+| Polymorphic `as` prop | component เดียว prop type ถูกต้องสำหรับทุก element ที่มัน render เป็นได้ | กลไก generic type อ่านและดูแลยากพอสมควร |
+| Higher-order component | ใช้ได้โดยไม่ต้องมี hooks; ห่อ class component ได้ | ต้องจัดการ ref forwarding และ display name เอง; เพิ่ม wrapper layer |
+| Custom hook (แทน HOC) | ไม่มี wrapper component ไม่มีข้อควรระวังเรื่อง ref/display-name | inject markup รอบ caller ไม่ได้ — share ได้แค่ logic/state |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`children` เป็นทางเดียวในการ compose component"** พิสูจน์แล้วด้านบน: prop ไหนก็ถือ JSX ได้ — slot ผ่าน named prop ก็เป็น composition พอ ๆ กับ `children`
+- **"Compound component ต้องใช้ prop drilling เพื่อ share state"** พิสูจน์แล้วด้านบน: ชิ้นส่วน share state ผ่าน context ที่ตั้งครั้งเดียวใน component รากของ family — ไม่ต้อง thread prop เลย
+- **"Generic component เสีย type safety พอรับ `children` เป็น function"** พิสูจน์แล้วด้านบน: TypeScript infer type ของ item ที่แน่นอนจาก `items` แล้ว carry เข้าไปใน parameter ของ callback — ไม่มี `any` เข้ามาเกี่ยวข้องเลย
+- **"HOC กับ custom hook ใช้แทนกันได้"** HOC ห่อ tree (เพิ่ม markup ได้ และมีข้อควรระวังเรื่อง ref/display-name ต้องจัดการ) hook share แค่ logic กับ state ไม่มีอะไรให้ห่อและไม่มีอะไรให้ forward
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ review code ที่ generate มาที่ใช้ pattern composition เหล่านี้ ให้เช็ก:
+
+- higher-order component destructure แล้วทิ้ง `ref` แทนที่จะ forward มันไหม? ref ของ caller จะเป็น `null` แบบเงียบ ๆ (พิสูจน์แล้วด้านบน)
+- component ที่ HOC ห่อมี `displayName` ตั้งไว้ไหม หรือมันจะโผล่ใน React DevTools ภายใต้ชื่อ generic ของ wrapper?
+- context ของ compound component ถูก type เป็น non-nullable ด้วยค่า default ปลอม ๆ ซ่อนบั๊ก "ใช้นอก parent" แทนที่จะ throw error ที่ชัดเจนไหม?
+- pattern แบบ render-prop หรือ HOC-based แทนที่ด้วย custom hook ธรรมดา เอา wrapper layer ที่ไม่จำเป็นออกได้ไหม?
+- component ที่อ้างว่า "polymorphic" (มี `as` prop) re-type prop ของตัวเองต่อ element จริงไหม หรือตกลงมาที่ `any`/prop type หลวมเกินไปที่จะรับ combination ที่ผิดได้ (เช่น `href` บน `button`)?
+
+<SpotTheBug code={`function withAnalytics(Wrapped) {
+  function Tracked(props) {
+    return <Wrapped {...props} />;
+  }
+  return Tracked;
+}
+
+const TrackedButton = withAnalytics(function Button({ ref, ...props }) {
+  return <button ref={ref} {...props} />;
+});
+
+function Toolbar() {
+  const buttonRef = useRef(null);
+  return <TrackedButton ref={buttonRef} onClick={() => buttonRef.current.focus()} />;
+}`}>
+`Tracked` spread `{...props}` เข้า `Wrapped` แต่ `ref` **ไม่ใช่** prop ธรรมดาที่การ spread จะส่งต่อให้อัตโนมัติแบบ prop จริง — `Tracked` เองไม่เคยประกาศ `ref` ใน parameter list ของตัวเองเลย ดังนั้น `ref` ที่ให้กับ `<TrackedButton ref={buttonRef} />` ถูกติดกับ `Tracked` ไม่ได้ thread ผ่านไปยัง `Button` ข้างใน `buttonRef.current` จบลงที่ชี้ไปยังอะไรก็ตามที่ `Tracked` expose (ไม่มีอะไรเลย เพราะมันเป็น function component ธรรมดาที่ไม่ประกาศ `ref` prop) แทนที่จะเป็น `<button>` DOM node จริง `buttonRef.current.focus()` จึง throw ทางแก้คือให้ `Tracked` รับและ forward `ref` อย่างชัดเจน เหมือน `withLoggingFixed` ด้านบนเป๊ะ: `function Tracked({ ref, ...props }) { return <Wrapped {...props} ref={ref} />; }`
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-React reuse ด้วย **composition** ไม่ใช่ inheritance: ส่ง JSX ผ่าน `children` หรือ prop ใดก็ได้ **compound component** ให้กลุ่มชิ้นส่วนแชร์ state ผ่าน context ส่วนผู้ใช้จัดวางได้อิสระ **render props** แชร์ logic แต่ถูกแทนที่ด้วย **custom hook** เป็นส่วนใหญ่แล้ว และ input เป็น **controlled** (state เป็น source of truth) หรือ **uncontrolled** (DOM เป็น) — เลือก controlled เมื่อต้อง react ต่อการเปลี่ยนแปลง, uncontrolled สำหรับ form ที่สนแค่ค่าสุดท้าย
+React reuse ผ่าน **composition** ไม่ใช่ inheritance — `children` และ named slot prop ยก content ให้ component โดยไม่มี contract อะไรเกิน "render อะไรสักอย่าง" **Compound component** share state ผ่าน context ให้ family ของชิ้นส่วนประสานกันได้โดยไม่มี prop drilling เลย — พิสูจน์แล้วด้านบน รวมถึง guard แบบ typed กันการใช้ชิ้นส่วนนอก parent ของมัน **`children` เป็น function** และ **polymorphic `as` prop** ผลัก contract นั้นเข้าไปในระบบ type เอง ทั้งคู่พิสูจน์แล้วด้านบนด้วย generic inference จริง **Higher-order component** ยังใช้ได้แต่ต้องจัดการ ref-forwarding กับ `displayName` เอง — พิสูจน์แล้วด้านบน — ซึ่งเป็นเหตุผลตรง ๆ ว่าทำไม **custom hook** มาแทนที่การใช้งานส่วนใหญ่ของมัน และ input เป็น **controlled** (state คือแหล่งความจริง) หรือ **uncontrolled** (DOM คือแหล่งความจริง)
 </Callout>
 
 export const quizComposition = [
   {
-    q: 'กลไกหลักของ React ในการ reuse คืออะไร?',
+    q: 'กลไกหลักของ React สำหรับการ reuse คืออะไร?',
     options: [
-      'class inheritance',
-      'composition — ส่ง content และ behavior เข้าไปใน component (เช่นผ่าน children)',
-      'global mixin',
+      'Class inheritance',
+      'Composition — ส่ง content และ behavior เข้าไปใน component (เช่นผ่าน children หรือ named slot prop)',
+      'Global mixin',
       'copy-paste component',
     ],
     answer: 1,
+    explain: 'React ไม่มี model การ reuse แบบ inheritance เลย — ทุก pattern การ reuse ในหน้านี้ (slot, compound component, render prop, HOC) คือ variation ของการส่ง content/behavior เข้าไปใน component แทนที่จะ extend มัน',
   },
   {
-    q: 'compound component (เช่น `<Tabs><Tab/></Tabs>`) มักแชร์ state อย่างไร?',
+    q: 'compound component (อย่าง `<Tabs><Tab/></Tabs>`) มักจะ share state ยังไง?',
     options: [
-      'global variable',
-      'ผ่าน context ที่ parent ให้ แล้วชิ้นส่วนอ่านด้วย useContext',
-      'prop-drill ผ่านทุกชั้น',
-      'แชร์ state ไม่ได้',
+      'ตัวแปร global',
+      'ผ่าน context ที่ parent ให้มา แล้วชิ้นส่วนอ่านด้วย useContext',
+      'prop-drilling ผ่านทุกชั้น',
+      'share state ไม่ได้',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: Tabs ให้ { active, setActive } ผ่าน context; Tab กับ TabPanel อ่านมันตรง ๆ ด้วย useContext โดยไม่มี prop thread ระหว่างกันเลย',
   },
   {
-    q: 'feature สมัยใหม่อะไรที่มาแทนการใช้ render props เพื่อแชร์ logic เป็นส่วนใหญ่?',
+    q: '```tsx\nfunction useTabsContext(name) {\n  const ctx = useContext(TabsContext);\n  if (!ctx) throw new Error(`<${name}> must be rendered inside <Tabs>`);\n  return ctx;\n}\n```\nทำไมถึง type `TabsContext` เป็น `TabsContextValue | null` แทนที่จะให้ค่า default ปลอม ๆ?',
     options: [
-      'higher-order component',
-      'custom hook',
-      'context อย่างเดียว',
-      'class component',
+      'ทำให้ code สั้นลง',
+      'ให้ TypeScript บังคับทุกตัวที่อ่านต้องจัดการ case ที่ไม่มี provider และให้ runtime throw error ที่แม่นยำ action ได้ แทนที่จะพังแบบงง ๆ ทีหลัง',
+      'context ที่เป็น null render เร็วกว่า',
+      'ไม่มีผลอะไรเลยทั้งสองแบบ',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: render <Tab> นอก <Tabs> throw ข้อความ "<Tab> must be rendered inside <Tabs>" เป๊ะ — ค่า default ปลอม ๆ จะซ่อนบั๊กนี้แทนที่จะแสดงให้เห็นชัด',
   },
   {
-    q: 'controlled input เป็นตัวเลือกที่ถูกเมื่อไร?',
+    q: '```tsx\nfunction DataList<T>({ items, children }: { items: T[]; children: (item: T) => ReactNode }) { /* ... */ }\n// used as:\n<DataList items={[{ id: 1, label: "One" }]}>{(item) => <span>{item.label}</span>}</DataList>\n```\n`item.label` type-check ได้โดยไม่ต้อง cast ได้ยังไง?',
     options: [
-      'เมื่อต้องการแค่ค่าสุดท้ายตอน submit',
-      'เมื่อต้อง react หรือจำกัด input ทุกครั้งที่เปลี่ยน (validation, formatting)',
-      'ไม่มีวัน — uncontrolled ดีกว่าเสมอ',
-      'เฉพาะ checkbox',
+      'ไม่ได้ — นี่จะเป็น type error',
+      'TypeScript infer T จาก array ที่ส่งมาเป็น items แล้ว thread type ที่ infer ได้นั้นเป๊ะ ๆ ไปยัง parameter ของ callback children',
+      'ReactNode มี property `.label` ให้อัตโนมัติ',
+      'เป็นเพราะ label บังเอิญเป็นคำสงวน',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: ส่ง array ของ object { id, label } ให้ item มี shape นั้นเป๊ะข้างใน children โดยไม่ต้อง cast และส่ง string[] แทนก็ให้ item.toUpperCase() ได้โดยไม่ต้อง cast เหมือนกัน — generic ตาม data จริง',
+  },
+  {
+    q: 'อะไรทำให้ `<Text as="a" href="/docs">` type-check `href` ถูกต้อง ในขณะที่ `<Text as="button" onClick={...}>` ต้องการ `onClick` แทน?',
+    options: [
+      'Text มี union มหึมาที่เขียนมือครอบทุก combination ของ prop',
+      '`ComponentPropsWithoutRef<E>` derive prop set ที่ถูกต้องใหม่ตาม element type E ที่ `as` prop ถูก instantiate ด้วย',
+      'TypeScript ไม่สนใจ prop type ของ polymorphic component',
+      'มันไม่ได้ type-check จริง — เช็กแค่ตอน runtime',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: ทั้งสามแบบ (span default, as="a" กับ href, as="button" กับ onClick) type-check และ render ถูกต้อง — ComponentPropsWithoutRef<E> คือสิ่งที่ให้ prop set ที่ถูกต้องต่อ element',
+  },
+  {
+    q: '```tsx\nfunction withLoggingBroken(Wrapped) {\n  return function Logged(props) {\n    const { ref, ...rest } = props;\n    return <Wrapped {...rest} />;\n  };\n}\n```\nจะเกิดอะไรขึ้นกับ `ref` ที่ส่งให้ component ที่ห่อด้วย HOC นี้?',
+    options: [
+      'ถูก forward ให้ Wrapped อัตโนมัติ',
+      'ถูกทิ้งแบบเงียบ ๆ — ref ของ caller ยังเป็น null เพราะถูก destructure ออกและไม่เคยส่งให้ Wrapped เลย',
+      'throw compile error',
+      'ไปติดกับ DOM node ของ Logged เอง',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: ref ที่ผ่าน withLoggingBroken ยังเป็น null หลัง render ในขณะที่ ref เดียวกันผ่าน withLoggingFixed (ที่ forward ref อย่างชัดเจน) resolve เป็น <input> DOM node จริงถูกต้อง',
   },
 ];
 

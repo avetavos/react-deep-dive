@@ -1,6 +1,6 @@
 ---
 title: 'Memoization in Practice'
-description: 'useMemo, useCallback, and React.memo — what each caches, the referential-equality pitfalls that break them, and why the React Compiler makes most of it unnecessary.'
+description: 'useMemo, useCallback, and React.memo — what each caches, the referential-equality pitfalls that break them, children-as-props, when memo is a net loss, and why the React Compiler makes most of this unnecessary.'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Three tools, three jobs
 
@@ -52,9 +53,221 @@ const style = useMemo(() => ({ color: "red" }), []);
 
 This is the crux: `React.memo` only pays off when *every* prop is referentially stable, which usually means memoizing the object/array/function props with `useMemo`/`useCallback`. Get one prop wrong and the memo does nothing.
 
-## The React Compiler changes the calculus
+### Proof: an inline function defeats `React.memo`; `useCallback` fixes it
 
-Manually keeping references stable is tedious and easy to get wrong. The **React Compiler** (React's build-time optimizer) analyzes your components and automatically memoizes values and components where it is safe — effectively applying `useMemo`/`useCallback`/`memo` for you, everywhere, without you writing them.
+```tsx
+// src/__tests__/inlineFunctionBreaksMemo.test.tsx
+import { memo, useState, useCallback } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(cleanup);
+
+let rowRenders = 0;
+
+const Row = memo(function Row({ onSelect }: { onSelect: () => void }) {
+  rowRenders++;
+  return <li onClick={onSelect}>row</li>;
+});
+
+test('a fresh inline function prop defeats React.memo — the child re-renders on every parent render', () => {
+  rowRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    // 🔴 a NEW function every render.
+    return <Row onSelect={() => setTick((t) => t + 1)} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(rowRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  expect(rowRenders).toBe(3); // memo did nothing — re-rendered every time
+});
+
+test('useCallback keeps the reference stable, so React.memo actually skips the re-render', () => {
+  rowRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    const onSelect = useCallback(() => setTick((t) => t + 1), []);
+    return <Row onSelect={onSelect} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(rowRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  expect(rowRenders).toBe(1); // stable reference — memo skips the re-render
+});
+```
+
+```text
+✓ a fresh inline function prop defeats React.memo — the child re-renders on every parent render
+✓ useCallback keeps the reference stable, so React.memo actually skips the re-render
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+## `useCallback` alone is not enough — the child must be memoized too
+
+`useCallback` only produces a stable *reference*. That reference only stops a re-render if something downstream actually checks it for equality — which means the component receiving it has to be wrapped in `React.memo`. A stable callback handed to a plain, non-memoized component changes nothing: that component re-renders whenever its parent does, exactly like any other child, regardless of how stable its props are.
+
+```tsx
+// src/__tests__/useCallbackNeedsMemoizedChild.test.tsx
+import { memo, useState, useCallback } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(cleanup);
+
+let plainRenders = 0;
+let memoRenders = 0;
+
+function PlainRow({ onSelect }: { onSelect: () => void }) {
+  plainRenders++;
+  return <li onClick={onSelect}>row</li>;
+}
+
+const MemoRow = memo(function MemoRow({ onSelect }: { onSelect: () => void }) {
+  memoRenders++;
+  return <li onClick={onSelect}>row</li>;
+});
+
+test('useCallback alone does not stop a re-render — the child must be memoized too', () => {
+  plainRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    const onSelect = useCallback(() => setTick((t) => t + 1), []);
+    // PlainRow is NOT wrapped in React.memo.
+    return <PlainRow onSelect={onSelect} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(plainRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  // A stable callback changes nothing here: a non-memoized component
+  // re-renders whenever its parent does, regardless of prop stability.
+  expect(plainRenders).toBe(3);
+});
+
+test('the same stable callback DOES stop a re-render once the child is wrapped in React.memo', () => {
+  memoRenders = 0;
+  function Parent() {
+    const [, setTick] = useState(0);
+    const onSelect = useCallback(() => setTick((t) => t + 1), []);
+    return <MemoRow onSelect={onSelect} />;
+  }
+  const { rerender } = render(<Parent />);
+  expect(memoRenders).toBe(1);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  expect(memoRenders).toBe(1); // memo + stable reference — the pairing works
+});
+```
+
+```text
+✓ useCallback alone does not stop a re-render — the child must be memoized too
+✓ the same stable callback DOES stop a re-render once the child is wrapped in React.memo
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`useCallback` and `React.memo` are inseparable: one supplies a stable reference, the other is what actually acts on it. Using either alone accomplishes nothing.
+
+## Children as props: skipping re-renders without memoizing anything
+
+The previous lesson mentioned "lift content by composition" as a structural fix — here is the proof. When a component holds its own state and renders `{children}` it received as a prop, that `children` value is the *exact same element reference* on every one of the component's own re-renders (its parent created that element once; the component holding the ticking state never recreates it). React's reconciler can bail out of that subtree entirely without even calling the child component's function again — no `React.memo`, no `useMemo`, no `useCallback` involved.
+
+```tsx
+// src/__tests__/childrenAsPropsStopsRerenders.test.tsx
+import { useState, type ReactNode } from 'react';
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(cleanup);
+
+let expensiveRenders = 0;
+
+function Expensive() {
+  expensiveRenders++;
+  return <p>expensive</p>;
+}
+
+// ❌ Ticker builds `<Expensive />` itself, inside its own render — every
+// tick re-creates it, so it re-renders along with Ticker.
+function TickerBuildsItsOwnChild() {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>tick: {tick}</button>
+      <Expensive />
+    </div>
+  );
+}
+
+// ✅ Ticker receives `children` from its OWN parent instead — its local
+// `tick` state changing does not touch that prop at all.
+function Ticker({ children }: { children: ReactNode }) {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>tick: {tick}</button>
+      {children}
+    </div>
+  );
+}
+
+test('Expensive built directly inside the ticking component re-renders on every tick', () => {
+  expensiveRenders = 0;
+  render(<TickerBuildsItsOwnChild />);
+  expect(expensiveRenders).toBe(1);
+
+  act(() => {
+    screen.getByText(/tick: 0/).click();
+  });
+  act(() => {
+    fireEvent.click(screen.getByText(/tick: 1/));
+  });
+
+  expect(expensiveRenders).toBe(3); // Expensive re-renders with every tick
+});
+
+test('the same component passed in as `children` does NOT re-render when the wrapper\'s OWN state ticks', () => {
+  expensiveRenders = 0;
+  render(
+    <Ticker>
+      <Expensive />
+    </Ticker>,
+  );
+  expect(expensiveRenders).toBe(1);
+
+  act(() => {
+    screen.getByText(/tick: 0/).click();
+  });
+  act(() => {
+    fireEvent.click(screen.getByText(/tick: 1/));
+  });
+
+  // Ticker re-rendered twice (its button label changed), but the `children`
+  // prop it holds is the exact same element reference both times — React
+  // bails out of that subtree entirely, so Expensive never re-renders.
+  expect(expensiveRenders).toBe(1);
+});
+```
+
+```text
+✓ Expensive built directly inside the ticking component re-renders on every tick
+✓ the same component passed in as `children` does NOT re-render when the wrapper's OWN state ticks
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+This trick only helps against re-renders caused by *the component holding `children`*. If whatever created that `children` element re-renders itself (its own ancestor), a new element is created and passed down again, and the usual propagation rules from the previous lesson apply.
+
+## `useMemo` for expensive derivations — and letting the compiler do it for you
+
+`useMemo` earns its keep on a **genuinely expensive** computation — sorting or filtering thousands of items, heavy math, building a derived data structure. The React Compiler changes who is expected to write that `useMemo`: see [Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/) for how the compiler reads a plain, un-memoized component and inserts the equivalent caching itself, at a finer grain than most hand-written code — that lesson shows the compiler's real output on exactly this kind of derivation.
 
 Once the compiler is enabled on a codebase, the guidance flips:
 
@@ -72,8 +285,67 @@ Until the compiler is universal, hand-memoization is still worth it for a few sp
 
 Outside those, memoizing usually costs more (memory + comparison + noise) than it saves. Measure.
 
+## When `React.memo` is a net loss
+
+`React.memo` is not free: every render still pays for the shallow prop comparison, and the memoized component now holds onto its last rendered output in memory. Wrapping a component in `memo` is a net loss when:
+
+- **The component is cheap to render anyway.** Comparing props costs about the same as just re-rendering a trivial component — you paid a cost and got nothing back.
+- **The props change on almost every render regardless.** If a memoized component's props are realistically never stable (e.g. it always receives fresh derived data), the comparison runs every time and never once pays off — it is pure overhead.
+- **Nobody kept the child's own props stable.** As shown above, `React.memo` on a component whose caller keeps passing inline objects/functions does the comparison work and then re-renders anyway — worse than not memoizing, since you now pay for the failed comparison *and* the full re-render.
+
+The rule of thumb: reach for `React.memo` on a component you have *profiled* as both expensive and prop-stable — not reflexively on everything.
+
+## Mental Model
+
+Think of `React.memo` as a **locked gate** in front of a component: it only opens (skips the re-render) if every prop presented at it is `===` to what it saw last time. `useMemo`/`useCallback` are the **keys** that make a value or function actually stay the same object across renders so the gate can recognize it. Passing `children` down from further up the tree is a third, gate-free path: the value never gets re-forged in the first place, so there is nothing for a "changed prop" check to even trip on.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `useMemo`/`useCallback` + `React.memo` (paired) | Skips re-rendering a genuinely expensive, stable-props subtree | Both sides must be applied correctly; miss one prop and the pairing does nothing |
+| Children as props | No memoization API at all; structural, cannot be "used wrong" | Only protects against the *holding* component's own re-renders, not its ancestors' |
+| Let the React Compiler do it | Finer-grained, always in sync with the code | Requires the toolchain; only covers statically-verifiable code |
+| Manual memoization everywhere | None | Comparison cost + memory on every render, for components that were often already cheap |
+
+## Common Misconceptions
+
+- **"Wrapping a component in `React.memo` always helps."** Proven above: if the props are not referentially stable, or the component was already cheap, `memo` adds a comparison cost and delivers no benefit — sometimes a net loss.
+- **"`useCallback` alone stops child re-renders."** Proven above: a stable reference does nothing unless the receiving component is itself wrapped in `React.memo` to actually check it.
+- **"Passing `children` down is just a syntax preference."** It is a real, measurable re-render optimization — proven above — that works with zero memoization APIs, because the element reference never changes in the first place.
+- **"The compiler makes all of this obsolete, so I don't need to understand it."** The compiler only transforms code it can statically verify follows the Rules of React; understanding *why* memoization works is still what tells you whether a specific piece of code is one the compiler can safely help with.
+
+## Reading AI-generated code
+
+When reviewing generated code that reaches for `useMemo`/`useCallback`/`React.memo`, check for:
+
+- Is a `React.memo` child receiving an inline object, array, or function literal from its caller? That silently defeats the memoization every render (proven above).
+- Is `useCallback` used on a callback passed to a component that is **not** itself wrapped in `React.memo`? The stable reference accomplishes nothing there.
+- Could the "expensive child" simply be restructured as `children` passed down from higher up, instead of reaching for `useMemo`/`React.memo` at all?
+- Is `React.memo` applied to a component that is cheap to render and/or whose props are realistically never stable — pure overhead with no payoff?
+- Does the project have the React Compiler configured, or is the code hand-writing memoization the compiler would otherwise handle more precisely? (See [Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/).)
+
+<SpotTheBug code={`const ExpensiveRow = React.memo(function ExpensiveRow({ item, onSelect }) {
+  return <li onClick={() => onSelect(item.id)}>{item.label}</li>;
+});
+
+function List({ items }) {
+  function handleSelect(id) {
+    console.log("selected", id);
+  }
+  return (
+    <ul>
+      {items.map((item) => (
+        <ExpensiveRow key={item.id} item={item} onSelect={handleSelect} />
+      ))}
+    </ul>
+  );
+}`}>
+Two separate problems stack here. First, `onSelect={() => onSelect(item.id)}` inside `ExpensiveRow` itself is irrelevant to the memo check (it runs after the prop comparison already passed or failed) — but `handleSelect` re-declared as a fresh function inside `List` on every render is exactly the bug: `List` passes a brand-new `onSelect` reference to every `ExpensiveRow` on every render, so `React.memo`'s shallow comparison fails every time and the memo never pays off, proven by the identical pattern in this lesson's first test (renderCount 1 → 3, not 1 → 1). The fix is `const handleSelect = useCallback((id) => console.log("selected", id), [])` in `List`, paired with `ExpensiveRow` already being memoized — exactly the pairing this lesson proves is required.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-`useMemo` caches a value, `useCallback` caches a function's identity, and `React.memo` skips a re-render on shallow-equal props — and the last two are a **pair**, because a fresh inline object/array/function defeats `React.memo`. But the **React Compiler** now auto-memoizes for you, so the modern default is to write clean, pure components and reserve manual memoization for the few cases a profiler still flags.
+`useMemo` caches a value, `useCallback` caches a function's identity, and `React.memo` skips a re-render on shallow-equal props — and the last two are a **pair**, proven above: a fresh inline object/array/function defeats `React.memo` every time, `useCallback` fixes it only when the receiving component is *also* memoized, and passing `children` down sidesteps the whole problem with no memoization API at all. `React.memo` is a **net loss** on cheap components or components whose props are never stable. The **React Compiler** now auto-memoizes most of this for you — see [Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/) — so the modern default is clean, pure components with manual memoization reserved for the cases a profiler still flags.
 </Callout>
 
 export const quizMemo = [
@@ -86,6 +358,7 @@ export const quizMemo = [
       'The DOM node',
     ],
     answer: 1,
+    explain: 'useCallback is useMemo specialized for functions — it returns the same function reference across renders as long as its dependencies have not changed.',
   },
   {
     q: 'Why does passing an inline `style={{ color: "red" }}` to a `React.memo` child defeat the memo?',
@@ -96,26 +369,51 @@ export const quizMemo = [
       'It does not — memo still skips',
     ],
     answer: 1,
+    explain: 'React.memo compares props by reference (shallow equality); a fresh object literal created on every render is a "different" prop every time even though its contents are identical.',
   },
   {
-    q: 'Once the React Compiler is enabled, what is the recommended default?',
+    q: '```tsx\nconst Row = memo(function Row({ onSelect }) { renderCount++; return <li onClick={onSelect} />; });\nfunction Parent() {\n  const [, setTick] = useState(0);\n  return <Row onSelect={() => setTick(t => t + 1)} />;\n}\n```\nAfter three renders of `Parent`, what is `renderCount` on `Row`?',
     options: [
-      'Wrap everything in useMemo and useCallback manually',
-      'Write clean, pure components and let the compiler auto-memoize; reserve manual memoization for edge cases',
-      'Stop using hooks',
-      'Disable memoization entirely',
+      '1 — React.memo always prevents extra renders',
+      '3 — a new arrow function is created every render, so the memo comparison fails every time',
+      '0 — Row never renders',
+      '3, but only in development mode',
     ],
     answer: 1,
+    explain: 'Proven in the probe: renderCount goes 1 → 3, not 1 → 1 — the inline arrow function is a new reference every render, so React.memo\'s shallow comparison never passes.',
   },
   {
-    q: 'Which is a genuinely good use of `useMemo` today?',
+    q: 'If a callback is wrapped in `useCallback` but the component receiving it is a plain function component (not wrapped in `React.memo`), does the re-render stop?',
     options: [
-      'Memoizing a simple string concatenation',
-      'Caching an expensive computation like sorting thousands of items',
-      'Wrapping every render value',
-      'Replacing state',
+      'Yes, useCallback alone is enough',
+      'No — a non-memoized component re-renders whenever its parent does, regardless of how stable its props are; the child must also be wrapped in React.memo',
+      'Yes, but only for class components',
+      'No, useCallback never has any effect',
     ],
     answer: 1,
+    explain: 'Proven in the probe: the plain (non-memoized) component re-rendered 3 times despite receiving a stable useCallback reference — pairing with React.memo is what actually stops it (1 render, same test).',
+  },
+  {
+    q: 'Why does passing a component in as `children` avoid re-renders, without any `useMemo`/`useCallback`/`React.memo`?',
+    options: [
+      'children props are always memoized automatically by React',
+      'The element was created once by an ancestor and handed down unchanged — the component holding local state re-renders itself but never recreates that element, so React bails out of that subtree',
+      'It does not — children always re-render like anything else',
+      'Because JSX children are strings, not objects',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: a component that renders `{children}` it received as a prop does not re-render that content when its OWN state changes, because the children element reference never changes — only when the ancestor that created it re-renders does the content update.',
+  },
+  {
+    q: 'When is wrapping a component in `React.memo` most likely a net loss?',
+    options: [
+      'When the component is expensive and its props are stable',
+      'When the component is cheap to render, or its props realistically change on almost every render anyway',
+      'Only for components with no props',
+      'Never — memo always helps',
+    ],
+    answer: 1,
+    explain: 'memo still pays the shallow-comparison cost on every render; if the component was already cheap, or the comparison never passes because props are never stable, that cost buys nothing back.',
   },
 ];
 

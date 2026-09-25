@@ -1,6 +1,6 @@
 ---
 title: 'Composition Patterns'
-description: 'The reusable-component patterns — composition with children, compound components, render props (and why hooks replaced them), and controlled vs uncontrolled.'
+description: 'The reusable-component patterns — composition with children and slots, compound components with typed context, render props/children-as-a-function with generics, the polymorphic `as` prop, HOC pitfalls, and controlled vs uncontrolled.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Composition is the base pattern
 
@@ -31,9 +32,40 @@ function Card({ title, children }) {
 </Card>
 ```
 
-You can pass JSX through *any* prop, not just `children` — `<Layout sidebar={<Nav />} main={<Feed />} />` is composition too. This is how you avoid deep prop-drilling and rigid inheritance trees.
+## Slots via props: more than one `children`
 
-## Compound components
+You can pass JSX through *any* prop, not just `children` — a component with several independent regions of content can accept one prop per **slot**, typed so each region only ever receives renderable content:
+
+```tsx
+// src/components/PageLayout.tsx
+import type { ReactNode } from 'react';
+
+export function PageLayout({
+  sidebar,
+  main,
+  footer,
+}: {
+  sidebar: ReactNode;
+  main: ReactNode;
+  footer?: ReactNode;
+}) {
+  return (
+    <div className="page">
+      <aside className="page__sidebar">{sidebar}</aside>
+      <main className="page__main">{main}</main>
+      {footer && <footer className="page__footer">{footer}</footer>}
+    </div>
+  );
+}
+```
+
+```jsx
+<PageLayout sidebar={<Nav />} main={<Feed />} footer={<Copyright />} />
+```
+
+This is how you avoid deep prop-drilling and rigid inheritance trees: each slot is just a normal prop, so it's typed, optional or required like any other, and the layout component never needs to know what's actually inside.
+
+## Compound components, with typed context
 
 When several components need to work together and **share state**, the *compound component* pattern exposes a family of pieces that coordinate through a shared (usually context-based) state — while the consumer arranges them freely.
 
@@ -49,14 +81,98 @@ When several components need to work together and **share state**, the *compound
 </Tabs>
 ```
 
-Internally, `Tabs` provides the active value + a setter via context; `Tab` and `TabPanel` read it with `useContext`. The consumer gets a clean, declarative API and full control over layout, without threading props through every piece. This is how libraries like Radix and Headless UI structure their components.
-
 <Mermaid title="Compound components share state through context" code={compoundDiagram} />
 
 export const compoundDiagram = `flowchart TB
   tabs["Tabs (provides value + setValue via context)"] --> list["TabList"]
   list --> tab["Tab (reads context, calls setValue)"]
   tabs --> panel["TabPanel (reads context, shows if active)"]`;
+
+Internally, `Tabs` provides the active value + a setter via context; `Tab` and `TabPanel` read it with `useContext`. The consumer gets a clean, declarative API and full control over layout, without threading props through every piece. This is how libraries like Radix and Headless UI structure their components.
+
+### Proof: shared state through context, and a typed guard against misuse
+
+```tsx
+// src/components/Tabs.tsx
+import { createContext, useContext, useState, type ReactNode } from 'react';
+
+type TabsContextValue = { active: string; setActive: (value: string) => void };
+const TabsContext = createContext<TabsContextValue | null>(null);
+
+function useTabsContext(component: string): TabsContextValue {
+  const ctx = useContext(TabsContext);
+  if (!ctx) throw new Error(`<${component}> must be rendered inside <Tabs>`);
+  return ctx;
+}
+
+export function Tabs({ defaultValue, children }: { defaultValue: string; children: ReactNode }) {
+  const [active, setActive] = useState(defaultValue);
+  return <TabsContext.Provider value={{ active, setActive }}>{children}</TabsContext.Provider>;
+}
+
+export function TabList({ children }: { children: ReactNode }) {
+  return <div role="tablist">{children}</div>;
+}
+
+export function Tab({ value, children }: { value: string; children: ReactNode }) {
+  const { active, setActive } = useTabsContext('Tab');
+  return (
+    <button role="tab" aria-selected={active === value} onClick={() => setActive(value)}>
+      {children}
+    </button>
+  );
+}
+
+export function TabPanel({ value, children }: { value: string; children: ReactNode }) {
+  const { active } = useTabsContext('TabPanel');
+  if (active !== value) return null;
+  return <div role="tabpanel">{children}</div>;
+}
+```
+
+```tsx
+// src/__tests__/tabsCompound.test.tsx
+import { render, screen, fireEvent } from '@testing-library/react';
+import { Tabs, TabList, Tab, TabPanel } from '../components/Tabs';
+
+test('compound components share active state through context, no prop drilling', () => {
+  render(
+    <Tabs defaultValue="a">
+      <TabList>
+        <Tab value="a">First</Tab>
+        <Tab value="b">Second</Tab>
+      </TabList>
+      <TabPanel value="a">Panel A</TabPanel>
+      <TabPanel value="b">Panel B</TabPanel>
+    </Tabs>,
+  );
+
+  expect(screen.getByText('Panel A')).toBeTruthy();
+  expect(screen.queryByText('Panel B')).toBeNull();
+
+  fireEvent.click(screen.getByText('Second'));
+
+  expect(screen.queryByText('Panel A')).toBeNull();
+  expect(screen.getByText('Panel B')).toBeTruthy();
+});
+
+test('a piece used outside <Tabs> throws with a clear error, proving the context requirement', () => {
+  function BrokenTab() {
+    return <Tab value="a">oops</Tab>;
+  }
+  expect(() => render(<BrokenTab />)).toThrow('<Tab> must be rendered inside <Tabs>');
+});
+```
+
+```text
+✓ compound components share active state through context, no prop drilling
+✓ a piece used outside <Tabs> throws with a clear error, proving the context requirement
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`TabsContextValue | null` (rather than defaulting the context to a fake value) is what makes `useTabsContext`'s runtime guard possible *and* type-safe: TypeScript forces every reader to handle the `null` case, and the thrown error gives a precise, actionable message instead of a confusing "cannot read property of undefined" deeper in the component.
 
 ## Render props, and why hooks replaced most of them
 
@@ -79,6 +195,195 @@ function Component() {
 
 You will still *see* render props (some libraries use them, and `children`-as-a-function is one), but for sharing your own logic, reach for a custom hook first.
 
+### `children` as a function, typed with generics
+
+The most common surviving render-prop shape is `children` itself being a function — useful when a component owns a **collection** and wants the caller to control how each item renders, without giving up type safety on what an item actually *is*:
+
+```tsx
+// src/components/DataList.tsx
+import type { ReactNode } from 'react';
+
+export function DataList<T>({
+  items,
+  children,
+}: {
+  items: T[];
+  children: (item: T, index: number) => ReactNode;
+}) {
+  return (
+    <ul>
+      {items.map((item, i) => (
+        <li key={i}>{children(item, i)}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+```tsx
+// src/__tests__/dataListGenerics.test.tsx
+import { render, screen } from '@testing-library/react';
+import { DataList } from '../components/DataList';
+
+test('DataList<T> infers T from `items` — string items give `item` a string type', () => {
+  render(<DataList items={['a', 'b']}>{(item) => <span>{item.toUpperCase()}</span>}</DataList>);
+  expect(screen.getByText('A')).toBeTruthy();
+  expect(screen.getByText('B')).toBeTruthy();
+});
+
+test('DataList<T> infers an object shape from `items` — no cast needed to read its fields', () => {
+  const items = [{ id: 1, label: 'One' }, { id: 2, label: 'Two' }];
+  render(<DataList items={items}>{(item, index) => <span>{index}:{item.label}</span>}</DataList>);
+  expect(screen.getByText('0:One')).toBeTruthy();
+  expect(screen.getByText('1:Two')).toBeTruthy();
+});
+```
+
+```text
+✓ DataList<T> infers T from `items` — string items give `item` a string type
+✓ DataList<T> infers an object shape from `items` — no cast needed to read its fields
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+Note what `item.toUpperCase()` and `item.label` prove here: because `DataList` is generic over `T`, TypeScript infers `T` from whatever array you pass as `items` and threads that exact type through to the `children` callback's parameter — a `string[]` gives you `.toUpperCase()` with no cast, and an object array gives you `.label` with no cast. Get the item's shape wrong and this is a compile error, not a runtime surprise.
+
+## Polymorphic components: typing the `as` prop
+
+A **polymorphic** component renders as whichever HTML element (or component) the caller picks via an `as` prop, while still type-checking that element's *own* specific props — `<Text as="a" href="...">` should require `href`; `<Text as="button" onClick={...}>` should require `onClick`; a plain `<Text>` shouldn't require either.
+
+```tsx
+// src/components/PolymorphicText.tsx
+import type { ElementType, ComponentPropsWithoutRef, ReactNode } from 'react';
+
+type PolymorphicProps<E extends ElementType> = {
+  as?: E;
+  children?: ReactNode;
+} & Omit<ComponentPropsWithoutRef<E>, 'as' | 'children'>;
+
+export function Text<E extends ElementType = 'span'>({ as, children, ...rest }: PolymorphicProps<E>) {
+  const Component = as || 'span';
+  return <Component {...rest}>{children}</Component>;
+}
+```
+
+```tsx
+// src/__tests__/polymorphicText.test.tsx
+import { render, screen } from '@testing-library/react';
+import { Text } from '../components/PolymorphicText';
+
+test('renders as <span> by default', () => {
+  render(<Text>hello</Text>);
+  expect(screen.getByText('hello').tagName).toBe('SPAN');
+});
+
+test('as="a" renders an anchor and type-checks its own props (href)', () => {
+  render(<Text as="a" href="/docs">link</Text>);
+  const el = screen.getByText('link');
+  expect(el.tagName).toBe('A');
+  expect(el.getAttribute('href')).toBe('/docs');
+});
+
+test('as="button" accepts onClick, proving prop types follow the `as` element', () => {
+  const onClick = vi.fn();
+  render(
+    <Text as="button" onClick={onClick}>
+      click
+    </Text>,
+  );
+  screen.getByText('click').click();
+  expect(onClick).toHaveBeenCalledTimes(1);
+});
+```
+
+```text
+✓ renders as <span> by default
+✓ as="a" renders an anchor and type-checks its own props (href)
+✓ as="button" accepts onClick, proving prop types follow the `as` element
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+The generic default `E extends ElementType = 'span'` is what makes the plain, `as`-less case work with no extra ceremony, and `ComponentPropsWithoutRef<E>` is what re-derives the correct prop set every time `E` changes — this single component type-checks correctly against every HTML element it could render as, without a manual overload per tag.
+
+## Higher-order components: pitfalls and why hooks replaced most of them
+
+A **higher-order component (HOC)** is a function that takes a component and returns a new, wrapped component — the pre-hooks way to share cross-cutting behavior (logging, subscriptions, injected props). Two pitfalls show up constantly in HOC code:
+
+1. **Ref forwarding.** A ref attached to the wrapped component has to be explicitly threaded through the HOC — otherwise it silently resolves to `null` for the caller.
+2. **Display name.** Without one, every HOC-wrapped component shows up in React DevTools as the wrapper's generic name, not the component it actually wraps, making the component tree unreadable.
+
+```tsx
+// src/components/withLogging.tsx
+import type { Ref } from 'react';
+
+type InputProps = { placeholder?: string; ref?: Ref<HTMLInputElement> };
+
+function PlainInput({ placeholder, ref }: InputProps) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+
+// ❌ Broken: destructures `ref` out along with the rest of props, but never
+// passes it anywhere — the caller's ref is silently dropped.
+function withLoggingBroken(Wrapped: typeof PlainInput) {
+  return function Logged(props: InputProps) {
+    const { ref, ...rest } = props;
+    return <Wrapped {...rest} />;
+  };
+}
+
+// ✅ Fixed: forward `ref` straight through — React 19 treats it as a plain
+// prop, no forwardRef needed — and set a displayName for DevTools.
+function withLoggingFixed(Wrapped: typeof PlainInput) {
+  function Logged({ ref, ...rest }: InputProps) {
+    return <Wrapped {...rest} ref={ref} />;
+  }
+  Logged.displayName = `withLogging(${Wrapped.name})`;
+  return Logged;
+}
+
+export { PlainInput, withLoggingBroken, withLoggingFixed };
+```
+
+```tsx
+// src/__tests__/hocRefForwarding.test.tsx
+import { render } from '@testing-library/react';
+import { PlainInput, withLoggingBroken, withLoggingFixed } from '../components/withLogging';
+
+const LoggedBroken = withLoggingBroken(PlainInput);
+const LoggedFixed = withLoggingFixed(PlainInput);
+
+test('a HOC that does not forward ref leaves the caller\'s ref null', () => {
+  const captured: { current: HTMLInputElement | null } = { current: null };
+  render(<LoggedBroken ref={(node) => { captured.current = node; }} />);
+  expect(captured.current).toBeNull();
+});
+
+test('forwarding ref through the HOC gives the caller the real DOM node', () => {
+  const captured: { current: HTMLInputElement | null } = { current: null };
+  render(<LoggedFixed ref={(node) => { captured.current = node; }} />);
+  expect(captured.current).not.toBeNull();
+  expect(captured.current?.tagName).toBe('INPUT');
+});
+
+test('the fixed HOC sets a readable displayName instead of the generic wrapper name', () => {
+  expect(LoggedFixed.displayName).toBe('withLogging(PlainInput)');
+});
+```
+
+```text
+✓ a HOC that does not forward ref leaves the caller's ref null
+✓ forwarding ref through the HOC gives the caller the real DOM node
+✓ the fixed HOC sets a readable displayName instead of the generic wrapper name
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+Both pitfalls are exactly why **hooks replaced most HOC usage**: a custom hook has no wrapper component at all, so there is no ref to lose and no extra layer to name in DevTools — the cross-cutting logic lives in the hook, and the component that uses it stays exactly itself in the tree.
+
 ## Controlled vs uncontrolled
 
 A form input is **controlled** when React state is its single source of truth (`value` + `onChange`), and **uncontrolled** when the DOM holds the value and you read it via a ref (or, in React 19, from the form's `FormData` on submit).
@@ -95,8 +400,58 @@ const ref = useRef(null);
 
 Use **controlled** when you need to react to or constrain input as it changes; **uncontrolled** for simple forms where you only care about the final value (less state, less re-rendering).
 
+## Mental Model
+
+Every pattern on this page is the same move: decide *who* owns a piece of the UI and *how* the pieces agree on a contract. `children`/slots hand a whole subtree to the caller with no contract beyond "renders something." Compound components share a private contract (context) among a fixed family of pieces. `children`-as-a-function and polymorphic `as` push the contract into the *type system* — the caller and the component negotiate exactly what shape of data or props flows across the boundary, checked at compile time instead of discovered at runtime. A HOC tries to inject behavior *without* a contract with the wrapped component at all, which is exactly why it needs manual patches (ref forwarding, display names) that a hook never has to think about.
+
+## Trade-offs
+
+| Pattern | Benefit | Cost |
+| --- | --- | --- |
+| `children` / slots | Simplest possible reuse; caller controls content fully | No shared state between the parts unless you add context |
+| Compound components | Clean declarative API; shared state with no prop drilling | Pieces are coupled to their specific parent's context; less portable alone |
+| `children` as a function (generics) | Type-safe per-item rendering the component itself never has to know about | Slightly more ceremony than a plain `children: ReactNode` prop |
+| Polymorphic `as` prop | One component, correct prop types for every element it can render as | The generic type machinery is non-trivial to read and maintain |
+| Higher-order component | Works without hooks; can wrap class components | Ref forwarding and display names must be handled by hand; adds a wrapper layer |
+| Custom hook (instead of a HOC) | No wrapper component, no ref/display-name pitfalls | Cannot inject markup around the caller — only shares logic/state |
+
+## Common Misconceptions
+
+- **"`children` is the only way to compose components."** Proven above: any prop can carry JSX — slots via named props are just as much composition as `children`.
+- **"Compound components need prop drilling to share state."** Proven above: the pieces share state through context, set up once inside the family's root component — no prop threading required.
+- **"Generic components lose type safety once you accept `children` as a function."** Proven above: TypeScript infers the exact item type from `items` and carries it into the callback parameter — there is no `any` involved.
+- **"A HOC and a custom hook are interchangeable."** A HOC wraps the tree (it can add markup, and it has ref/display-name pitfalls to manage); a hook only shares logic and state, with nothing to wrap and nothing to forward.
+
+## Reading AI-generated code
+
+When reviewing generated code that uses these composition patterns, check for:
+
+- Does a higher-order component destructure and drop `ref` instead of forwarding it? The caller's ref will silently be `null` (proven above).
+- Does a HOC-wrapped component have a `displayName` set, or will it show up in React DevTools under the wrapper's generic name?
+- Is a compound component's context typed as non-nullable with a fake default value, hiding the "used outside its parent" bug instead of throwing a clear error?
+- Could a render-prop or HOC-based pattern be replaced with a plain custom hook, removing an unnecessary wrapper layer entirely?
+- Does a component claiming to be "polymorphic" (an `as` prop) actually re-type its own props per element, or does it fall back to `any`/overly-loose prop types that would accept an invalid combination (like `href` on a `button`)?
+
+<SpotTheBug code={`function withAnalytics(Wrapped) {
+  function Tracked(props) {
+    return <Wrapped {...props} />;
+  }
+  return Tracked;
+}
+
+const TrackedButton = withAnalytics(function Button({ ref, ...props }) {
+  return <button ref={ref} {...props} />;
+});
+
+function Toolbar() {
+  const buttonRef = useRef(null);
+  return <TrackedButton ref={buttonRef} onClick={() => buttonRef.current.focus()} />;
+}`}>
+`Tracked` spreads `{...props}` onto `Wrapped`, but a `ref` is **not** an ordinary prop that spreading passes along automatically the way a real prop is — `Tracked` itself never declares `ref` in its own parameter list, so the `ref` given to `<TrackedButton ref={buttonRef} />` is attached to `Tracked`, not threaded through to the inner `Button`. `buttonRef.current` ends up pointing at whatever `Tracked` exposes (nothing, since it's a plain function component that doesn't declare a `ref` prop) rather than the actual `<button>` DOM node, so `buttonRef.current.focus()` throws. The fix is for `Tracked` to explicitly accept and forward `ref`, exactly like `withLoggingFixed` above: `function Tracked({ ref, ...props }) { return <Wrapped {...props} ref={ref} />; }`.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-React reuses through **composition**, not inheritance: pass JSX via `children` or any prop. **Compound components** let a family of pieces share state through context while the consumer arranges them freely. **Render props** share logic but have mostly been replaced by **custom hooks**. And inputs are **controlled** (state is the source of truth) or **uncontrolled** (the DOM is) — pick controlled when you must react to changes, uncontrolled for simple final-value forms.
+React reuses through **composition**, not inheritance — `children` and named slot props hand content to a component with no contract beyond "renders something." **Compound components** share state through context so a family of pieces coordinates with zero prop drilling — proven above, including a typed guard against using a piece outside its parent. **`children` as a function** and the **polymorphic `as` prop** push that contract into the type system itself, both proven above with real generic inference. **Higher-order components** still work but need manual ref-forwarding and `displayName` handling — proven above — which is exactly why **custom hooks** replaced most of their use cases. And inputs are **controlled** (state is the source of truth) or **uncontrolled** (the DOM is).
 </Callout>
 
 export const quizComposition = [
@@ -104,11 +459,12 @@ export const quizComposition = [
     q: 'What is React\'s primary mechanism for reuse?',
     options: [
       'Class inheritance',
-      'Composition — passing content and behavior into components (e.g. via children)',
+      'Composition — passing content and behavior into components (e.g. via children or named slot props)',
       'Global mixins',
       'Copy-pasting components',
     ],
     answer: 1,
+    explain: 'React has no inheritance-based reuse model — every reuse pattern on this page (slots, compound components, render props, HOCs) is a variation on passing content/behavior into a component rather than extending it.',
   },
   {
     q: 'How do compound components (like `<Tabs><Tab/></Tabs>`) usually share state?',
@@ -119,26 +475,51 @@ export const quizComposition = [
       'They cannot share state',
     ],
     answer: 1,
+    explain: 'Proven in the probe: Tabs provides { active, setActive } via context; Tab and TabPanel each read it directly with useContext, with no props threaded between them.',
   },
   {
-    q: 'What modern feature replaced most render-prop usage for sharing logic?',
+    q: '```tsx\nfunction useTabsContext(name) {\n  const ctx = useContext(TabsContext);\n  if (!ctx) throw new Error(`<${name}> must be rendered inside <Tabs>`);\n  return ctx;\n}\n```\nWhy type `TabsContext` as `TabsContextValue | null` instead of giving it a fake default value?',
     options: [
-      'Higher-order components',
-      'Custom hooks',
-      'Context only',
-      'Class components',
+      'It makes the code shorter',
+      'It lets TypeScript force every reader to handle the missing-provider case, and lets the runtime throw a precise, actionable error instead of failing confusingly later',
+      'null contexts render faster',
+      'It has no effect either way',
     ],
     answer: 1,
+    explain: 'Proven in the probe: rendering <Tab> outside <Tabs> throws the exact message "<Tab> must be rendered inside <Tabs>" — a fake default value would have hidden this bug instead of surfacing it clearly.',
   },
   {
-    q: 'When is a controlled input the right choice?',
+    q: '```tsx\nfunction DataList<T>({ items, children }: { items: T[]; children: (item: T) => ReactNode }) { /* ... */ }\n// used as:\n<DataList items={[{ id: 1, label: "One" }]}>{(item) => <span>{item.label}</span>}</DataList>\n```\nHow does `item.label` type-check with no cast?',
     options: [
-      'When you only need the final value on submit',
-      'When you need to react to or constrain the input on every change (validation, formatting)',
-      'Never — uncontrolled is always better',
-      'Only for checkboxes',
+      'It does not — this would be a type error',
+      'TypeScript infers T from the `items` array passed in, and threads that exact inferred type through to the `children` callback\'s parameter',
+      'ReactNode automatically has a `.label` property',
+      'Only because `label` happens to be a reserved word',
     ],
     answer: 1,
+    explain: 'Proven in the probe: passing an array of { id, label } objects gives `item` that exact shape inside children with no cast, and passing string[] instead gives item.toUpperCase() with no cast either — the generic follows the actual data.',
+  },
+  {
+    q: 'What makes `<Text as="a" href="/docs">` type-check `href` correctly, while `<Text as="button" onClick={...}>` requires `onClick` instead?',
+    options: [
+      'Text has a giant hand-written union of every possible prop combination',
+      '`ComponentPropsWithoutRef<E>` re-derives the correct prop set for whatever element type E the `as` prop is instantiated with',
+      'TypeScript ignores prop types for polymorphic components',
+      'It does not actually type-check — it is checked only at runtime',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: all three variants (default span, as="a" with href, as="button" with onClick) type-check and render correctly — ComponentPropsWithoutRef<E> is what supplies the right prop set per element.',
+  },
+  {
+    q: '```tsx\nfunction withLoggingBroken(Wrapped) {\n  return function Logged(props) {\n    const { ref, ...rest } = props;\n    return <Wrapped {...rest} />;\n  };\n}\n```\nWhat happens to a `ref` passed to a component wrapped with this HOC?',
+    options: [
+      'It is automatically forwarded to Wrapped',
+      'It is silently dropped — the caller\'s ref stays null because it is destructured out and never passed to Wrapped',
+      'It throws a compile error',
+      'It gets attached to the DOM node of Logged itself',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: a ref passed through withLoggingBroken stays null after render, while the same ref through withLoggingFixed (which explicitly forwards ref) correctly resolves to the real <input> DOM node.',
   },
 ];
 
