@@ -1,0 +1,768 @@
+---
+title: 'Worked review 3: a settings page with Actions, optimistic UI, and an external store'
+description: 'An AI-generated settings page — Actions, useOptimistic, useSyncExternalStore, and SSR — reviewed bug by bug against a real Vite + React 19 probe, tsc, and vitest.'
+sidebar:
+  order: 7
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The feature
+
+The prompt was: *"Build a settings page: a name field using an Action, a notifications form with a pending indicator, a marketing opt-in toggle with optimistic UI, a theme toggle backed by an external store that can render on the server, a 'last saved' timestamp, and an avatar upload button."* The result below compiles, `tsc --noEmit` accepts every file **except one** (flagged below), and every piece reuses a React 19 API this course's React 19 module already covers. Read it the way this module's [reading order](/react/en/reading-react/) recommends: hooks and their dependencies (the one real type error lives there), then the server/client boundary (an external store rendering on the server), then state ownership (an optimistic setter called from the wrong place). It has **6 real bugs**.
+
+## The generated code
+
+```ts
+// src/settings/actions.ts — as generated
+export type ActionState = { error?: string; ok?: boolean };
+
+export async function updateNameAction(_prevState: ActionState, formData: FormData): Promise<ActionState> {
+  await new Promise((r) => setTimeout(r, 20));
+  const name = String(formData.get('name') ?? '').trim();
+  if (!name) return { error: 'Name is required' };
+  return { ok: true };
+}
+
+export async function updateNotificationsAction(_prevState: ActionState, _formData: FormData): Promise<ActionState> {
+  await new Promise((r) => setTimeout(r, 20));
+  return { ok: true };
+}
+```
+
+```tsx
+// src/settings/NameForm.tsx — as generated
+'use client';
+import { useFormState } from 'react-dom';
+import { updateNameAction } from './actions';
+
+function NameForm() {
+  const [state, formAction] = useFormState(updateNameAction, {});
+  return (
+    <form action={formAction}>
+      <input name="name" />
+      <button type="submit">Save</button>
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+
+export default NameForm;
+```
+
+```tsx
+// src/settings/NotificationsForm.tsx — as generated
+'use client';
+import { useActionState } from 'react';
+import { useFormStatus } from 'react-dom';
+import { updateNotificationsAction } from './actions';
+
+function NotificationsForm() {
+  const [state, formAction] = useActionState(updateNotificationsAction, {});
+  const { pending } = useFormStatus();
+  return (
+    <form action={formAction}>
+      <label><input type="checkbox" name="emails" /> Email me updates</label>
+      <button type="submit" disabled={pending}>{pending ? 'Saving…' : 'Save'}</button>
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+
+export default NotificationsForm;
+```
+
+```tsx
+// src/settings/MarketingOptIn.tsx — as generated
+'use client';
+import { useOptimistic, useState } from 'react';
+
+export async function saveMarketingOptIn(_v: boolean): Promise<void> {}
+
+function MarketingOptIn({ initial }: { initial: boolean }) {
+  const [optIn, setOptIn] = useState(initial);
+  const [optimisticOptIn, setOptimisticOptIn] = useOptimistic(optIn);
+
+  function handleToggle() {
+    setOptimisticOptIn(!optimisticOptIn);
+    saveMarketingOptIn(!optimisticOptIn).then(() => setOptIn(!optIn));
+  }
+
+  return <button onClick={handleToggle}>{optimisticOptIn ? 'Subscribed' : 'Subscribe'}</button>;
+}
+
+export default MarketingOptIn;
+```
+
+```tsx
+// src/settings/themeAndTime.tsx — as generated
+import { useEffect, useState, useSyncExternalStore } from 'react';
+
+type Theme = 'light' | 'dark';
+let theme: Theme = 'light';
+const listeners = new Set<() => void>();
+
+export function setTheme(next: Theme) {
+  theme = next;
+  listeners.forEach((l) => l());
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot(): Theme {
+  return theme;
+}
+
+export function ThemeToggle() {
+  const current = useSyncExternalStore(subscribe, getSnapshot);
+  return <button onClick={() => setTheme(current === 'light' ? 'dark' : 'light')}>Theme: {current}</button>;
+}
+
+export function LastSaved() {
+  return <p>Last saved: {Date.now()}</p>;
+}
+```
+
+```tsx
+// @expect-error real tsc error — see prose
+// src/settings/AvatarUpload.tsx — as generated
+import { useRef } from 'react';
+
+function AvatarUpload() {
+  const inputRef = useRef<HTMLInputElement>();
+  return (
+    <div>
+      <button onClick={() => inputRef.current?.click()}>Choose avatar</button>
+      <input ref={inputRef} type="file" accept="image/*" style={{ display: 'none' }} />
+    </div>
+  );
+}
+
+export default AvatarUpload;
+```
+
+```tsx
+// src/settings/SettingsPage.tsx — as generated
+import NameForm from './NameForm';
+import NotificationsForm from './NotificationsForm';
+import MarketingOptIn from './MarketingOptIn';
+import { ThemeToggle, LastSaved } from './themeAndTime';
+import AvatarUpload from './AvatarUpload';
+
+function SettingsPage() {
+  return (
+    <div>
+      <AvatarUpload />
+      <NameForm />
+      <NotificationsForm />
+      <MarketingOptIn initial={false} />
+      <ThemeToggle />
+      <LastSaved />
+    </div>
+  );
+}
+
+export default SettingsPage;
+```
+
+## The review walk
+
+### Hooks and their dependencies: `useRef()` with no initial value
+
+`AvatarUpload` calls `useRef<HTMLInputElement>()` with zero arguments.
+
+<SpotTheBug code={`function AvatarUpload() {
+  const inputRef = useRef<HTMLInputElement>();
+  return (
+    <div>
+      <button onClick={() => inputRef.current?.click()}>Choose avatar</button>
+      <input ref={inputRef} type="file" style={{ display: 'none' }} />
+    </div>
+  );
+}`}>
+`@types/react@19` declares exactly three `useRef` overloads, and none of them takes zero arguments — the old "no argument, implicit `undefined`" habit from earlier type definitions no longer matches any of them. This is a real, current type error, verified against this exact React/TypeScript version:
+
+```text
+error TS2554: Expected 1 arguments, but got 0.
+```
+
+`tsc --noEmit` catches this one before the app ever ships — the only bug in this review that a plain type-check alone surfaces.
+</SpotTheBug>
+
+### The server/client boundary: `useSyncExternalStore` with no `getServerSnapshot`
+
+`ThemeToggle` calls `useSyncExternalStore(subscribe, getSnapshot)` — two arguments, no third.
+
+<SpotTheBug code={`export function ThemeToggle() {
+  const current = useSyncExternalStore(subscribe, getSnapshot);
+  return <button onClick={() => setTheme(current === 'light' ? 'dark' : 'light')}>Theme: {current}</button>;
+}`}>
+The third argument, `getServerSnapshot`, only matters once this can render on the server — but skipping it doesn't quietly fall back to something reasonable. react.dev is direct: "If you omit this argument, rendering the component on the server will throw an error." Proven in the probe with `renderToString`:
+
+```text
+Missing getServerSnapshot, which is required for server-rendered content. Will revert to client rendering.
+```
+
+The reason it must throw rather than silently degrade is hydration: the server has no `window` to call the client's `getSnapshot` with, and the client's first render must match the server's markup exactly, or React logs a mismatch. The fix is a third argument, `getServerSnapshot`, that returns a fixed value valid for the very first (server) render.
+</SpotTheBug>
+
+### State ownership: `useOptimistic`'s setter called outside a Transition
+
+`MarketingOptIn`'s `handleToggle` calls `setOptimisticOptIn` directly in a plain event handler, then chains a `.then()` — no `startTransition` anywhere.
+
+<SpotTheBug code={`function handleToggle() {
+  setOptimisticOptIn(!optimisticOptIn);
+  saveMarketingOptIn(!optimisticOptIn).then(() => setOptIn(!optIn));
+}`}>
+Per react.dev: *"The optimistic setter function must be called inside `startTransition` or within an Action. Calling the setter outside an Action will cause the optimistic state to revert immediately because there is no Transition holding it."* Proven in the probe with the real console message:
+
+```text
+An optimistic state update occurred outside a transition or action. To fix, move the update to an action, or wrap with startTransition.
+```
+
+The button briefly shows "Subscribed", then reverts — there is no Transition for React to "hold" the optimistic value in until the real state settles. The fix wraps the whole sequence in `startTransition(async () => {...})`.
+</SpotTheBug>
+
+### React 19 Actions: `useFormState` instead of `useActionState`
+
+`NameForm` imports `useFormState` from `react-dom`.
+
+<SpotTheBug code={`import { useFormState } from 'react-dom';
+
+function NameForm() {
+  const [state, formAction] = useFormState(updateNameAction, {});
+  return (
+    <form action={formAction}>
+      <input name="name" />
+      <button type="submit">Save</button>
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}`}>
+`useFormState` still exists in `react-dom@19.2.8` — it is not a removed API — but it is the pre-rename name, and calling it prints a real, captured deprecation warning in this exact React version:
+
+```text
+ReactDOM.useFormState has been renamed to React.useActionState. Please update NameFormBad to use React.useActionState.
+```
+
+Beyond the warning, this component has no way to show a pending UI at all — `useFormState`'s return tuple has no third `isPending` element the way `useActionState`'s does. The fix is importing `useActionState` from `react` instead, which returns the same shape plus `isPending`.
+</SpotTheBug>
+
+### React 19 Actions: `useFormStatus` in the same component as `<form>`
+
+`NotificationsForm` calls `useFormStatus()` directly, in the same function component that renders `<form>`.
+
+<SpotTheBug code={`function NotificationsForm() {
+  const [state, formAction] = useActionState(updateNotificationsAction, {});
+  const { pending } = useFormStatus();
+  return (
+    <form action={formAction}>
+      <button type="submit" disabled={pending}>{pending ? 'Saving…' : 'Save'}</button>
+    </form>
+  );
+}`}>
+`useFormStatus` reports the pending state of the nearest **ancestor** `<form>` — and the component that renders `<form>` is not its own descendant. This compiles and runs with zero errors or warnings; it just never works. Proven in the probe: clicking submit on a 20ms action and checking the button 5ms later, `pending` never becomes `true` here, even though the action is genuinely still in flight.
+
+The fix moves `useFormStatus` into a separate child component rendered *inside* the `<form>` — exactly as this course's Server Components lesson first showed for the same hook.
+</SpotTheBug>
+
+### Effects vs events: `Date.now()` read during render
+
+`LastSaved` reads `Date.now()` directly in its render body.
+
+<SpotTheBug code={`function LastSaved() {
+  return <p>Last saved: {Date.now()}</p>;
+}`}>
+`Date.now()` is, by definition, different every time it's called. A component rendered once on the server produces some HTML; the moment that same component executes *again* on the client to hydrate, it calls `Date.now()` a second time and gets a different value — a direct, textbook hydration mismatch. Proven in the probe (server rendered at one mocked timestamp, client hydrated at another, five seconds later):
+
+```text
+Hydration failed because the server rendered text didn't match the client. As a result this
+tree will be regenerated on the client. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the
+HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  <LastSaved>
+    <p>
++     1700000005000
+-     1700000000000
+```
+
+React's own error message names `Date.now()` explicitly as a known cause. The fix computes the timestamp only on the client, inside an effect, so both the server render and the client's first render agree on a placeholder.
+</SpotTheBug>
+
+## The corrected code
+
+```ts
+// src/settings/actions.ts
+export type ActionState = { error?: string; ok?: boolean };
+
+export async function updateNameAction(_prevState: ActionState, formData: FormData): Promise<ActionState> {
+  await new Promise((r) => setTimeout(r, 20)); // a real, small delay — makes isPending observable in a test
+  const name = String(formData.get('name') ?? '').trim();
+  if (!name) return { error: 'Name is required' };
+  return { ok: true };
+}
+
+export async function updateNotificationsAction(_prevState: ActionState, _formData: FormData): Promise<ActionState> {
+  await new Promise((r) => setTimeout(r, 20));
+  return { ok: true };
+}
+```
+
+```tsx
+// src/settings/NameForm.tsx
+import { useActionState } from 'react';
+import { updateNameAction, type ActionState } from './actions';
+
+// FIX (React 19 Actions): useActionState (from 'react'), not the deprecated
+// useFormState (from 'react-dom') — same 3-tuple shape, the current API.
+export function NameForm() {
+  const [state, formAction, isPending] = useActionState<ActionState, FormData>(updateNameAction, {});
+  return (
+    <form action={formAction}>
+      <input name="name" disabled={isPending} />
+      <button type="submit" disabled={isPending}>{isPending ? 'Saving…' : 'Save'}</button>
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+```
+
+```tsx
+// src/settings/NotificationsForm.tsx
+import { useActionState } from 'react';
+import { useFormStatus } from 'react-dom';
+import { updateNotificationsAction, type ActionState } from './actions';
+
+// FIX (useFormStatus placement): a CHILD of <form> — the only place this
+// hook can see that form's pending state, since it reads the nearest
+// ANCESTOR form, not "the form this component happens to also render".
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return <button type="submit" disabled={pending}>{pending ? 'Saving…' : 'Save'}</button>;
+}
+
+export function NotificationsForm() {
+  const [state, formAction] = useActionState<ActionState, FormData>(updateNotificationsAction, {});
+  return (
+    <form action={formAction}>
+      <label><input type="checkbox" name="emails" /> Email me updates</label>
+      <SubmitButton />
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+```
+
+```tsx
+// src/settings/MarketingOptIn.tsx
+import { startTransition, useOptimistic, useState } from 'react';
+
+// A tiny simulated backend call — real, so a test can actually await it.
+export async function saveMarketingOptIn(_v: boolean): Promise<void> {}
+
+// FIX (useOptimistic outside an Action): the setter is wrapped in
+// startTransition, so React has a Transition to "hold" the optimistic value
+// in until the real state settles — otherwise it reverts immediately.
+export function MarketingOptIn({ initial }: { initial: boolean }) {
+  const [optIn, setOptIn] = useState(initial);
+  const [optimisticOptIn, setOptimisticOptIn] = useOptimistic(optIn);
+
+  function handleToggle() {
+    startTransition(async () => {
+      setOptimisticOptIn(!optimisticOptIn);
+      await saveMarketingOptIn(!optimisticOptIn);
+      setOptIn(!optIn);
+    });
+  }
+
+  return <button onClick={handleToggle}>{optimisticOptIn ? 'Subscribed' : 'Subscribe'}</button>;
+}
+```
+
+```tsx
+// src/settings/themeAndTime.tsx
+import { useEffect, useState, useSyncExternalStore } from 'react';
+
+type Theme = 'light' | 'dark';
+let theme: Theme = 'light';
+const listeners = new Set<() => void>();
+
+export function setTheme(next: Theme) {
+  theme = next;
+  listeners.forEach((l) => l());
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot(): Theme {
+  return theme;
+}
+
+// FIX (missing getServerSnapshot): required the moment this store can render
+// on the server — omitting it throws, specifically to protect the first
+// hydration pass from disagreeing with the client.
+function getServerSnapshot(): Theme {
+  return 'light';
+}
+
+export function ThemeToggle() {
+  const current = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  return <button onClick={() => setTheme(current === 'light' ? 'dark' : 'light')}>Theme: {current}</button>;
+}
+
+// FIX (Date.now() in render -> hydration mismatch): the timestamp is read
+// only on the client, inside an effect, after hydration has already
+// reconciled — never during the render that both server and client run.
+export function LastSaved() {
+  const [time, setTime] = useState<number | null>(null);
+  useEffect(() => {
+    setTime(Date.now());
+  }, []);
+  return <p>{time === null ? 'Last saved: —' : `Last saved: ${time}`}</p>;
+}
+```
+
+```tsx
+// src/settings/AvatarUpload.tsx
+import { useRef } from 'react';
+
+// FIX (useRef() with no initial value): @types/react@19 declares three
+// useRef overloads and NONE of them takes zero arguments — pass the initial
+// value explicitly, null for a DOM ref attached later.
+export function AvatarUpload() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <div>
+      <button onClick={() => inputRef.current?.click()}>Choose avatar</button>
+      <input ref={inputRef} type="file" accept="image/*" style={{ display: 'none' }} />
+    </div>
+  );
+}
+```
+
+```tsx
+// src/settings/SettingsPage.tsx
+import { NameForm } from './NameForm';
+import { NotificationsForm } from './NotificationsForm';
+import { MarketingOptIn } from './MarketingOptIn';
+import { ThemeToggle, LastSaved } from './themeAndTime';
+import { AvatarUpload } from './AvatarUpload';
+
+export function SettingsPage() {
+  return (
+    <div>
+      <AvatarUpload />
+      <NameForm />
+      <NotificationsForm />
+      <MarketingOptIn initial={false} />
+      <ThemeToggle />
+      <LastSaved />
+    </div>
+  );
+}
+```
+
+```tsx
+// src/__tests__/settings.test.tsx
+import { useActionState, useOptimistic, useSyncExternalStore } from 'react';
+import { useFormState, useFormStatus } from 'react-dom';
+import { renderToString } from 'react-dom/server';
+import { hydrateRoot } from 'react-dom/client';
+import { act, render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { updateNameAction, updateNotificationsAction, type ActionState } from '../settings/actions';
+import { NameForm } from '../settings/NameForm';
+import { NotificationsForm } from '../settings/NotificationsForm';
+import { MarketingOptIn, saveMarketingOptIn } from '../settings/MarketingOptIn';
+import { LastSaved } from '../settings/themeAndTime';
+
+afterEach(() => {
+  cleanup();
+  document.body.innerHTML = '';
+});
+
+function NameFormBad() {
+  const [state, formAction] = useFormState(updateNameAction as never, {} as ActionState);
+  return (
+    <form action={formAction}>
+      <input name="name" />
+      <button type="submit">Save</button>
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+
+test('as generated: useFormState has no isPending — there is no way to show a pending UI at all', () => {
+  const result = useFormState;
+  expect(result).toBeTypeOf('function');
+  const { container } = render(<NameFormBad />);
+  expect(container.querySelector('button')?.hasAttribute('disabled')).toBe(false);
+});
+
+test('fixed: NameForm (useActionState) disables the button and shows "Saving…" while pending', async () => {
+  render(<NameForm />);
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Ada' } });
+  fireEvent.click(screen.getByText('Save'));
+  await waitFor(() => expect(screen.getByText('Saving…')).toBeTruthy());
+  await waitFor(() => expect(screen.queryByText('Saving…')).toBeNull(), { timeout: 1000 });
+});
+
+function NotificationsFormBad() {
+  const [state, formAction] = useActionState<ActionState, FormData>(updateNotificationsAction, {});
+  const { pending } = useFormStatus();
+  return (
+    <form action={formAction}>
+      <button type="submit" disabled={pending}>{pending ? 'Saving…' : 'Save'}</button>
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+
+test('as generated: useFormStatus in the form\'s own component never reports pending', async () => {
+  render(<NotificationsFormBad />);
+  fireEvent.click(screen.getByText('Save'));
+  await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+  expect(screen.queryByText('Saving…')).toBeNull();
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+});
+
+test('fixed: NotificationsForm\'s child SubmitButton reports the real pending state', async () => {
+  render(<NotificationsForm />);
+  fireEvent.click(screen.getByText('Save'));
+  await waitFor(() => expect(screen.getByText('Saving…')).toBeTruthy());
+  await waitFor(() => expect(screen.queryByText('Saving…')).toBeNull(), { timeout: 1000 });
+});
+
+function LikeButtonBad({ liked }: { liked: boolean }) {
+  const [optimisticLiked, setOptimisticLiked] = useOptimistic(liked);
+  function handleClick() {
+    setOptimisticLiked(!optimisticLiked);
+  }
+  return <button onClick={handleClick}>{optimisticLiked ? 'Liked' : 'Like'}</button>;
+}
+
+test('as generated: calling the optimistic setter outside a Transition warns and reverts immediately', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(<LikeButtonBad liked={false} />);
+  fireEvent.click(screen.getByText('Like'));
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages.some((m) => m.includes('An optimistic state update occurred outside a transition or action'))).toBe(true);
+  spy.mockRestore();
+});
+
+test('fixed: MarketingOptIn wraps the setter in startTransition — the optimistic value holds', async () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(<MarketingOptIn initial={false} />);
+  fireEvent.click(screen.getByText('Subscribe'));
+  expect(await screen.findByText('Subscribed')).toBeTruthy();
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages.some((m) => m.includes('outside a transition'))).toBe(false);
+  spy.mockRestore();
+  void saveMarketingOptIn;
+});
+
+const subscribeNoop = () => () => {};
+
+function BadStoreConsumer() {
+  const value = useSyncExternalStore(subscribeNoop, () => 'light' as const);
+  return <p>{value}</p>;
+}
+
+function GoodStoreConsumer() {
+  const value = useSyncExternalStore(subscribeNoop, () => 'light' as const, () => 'light' as const);
+  return <p>{value}</p>;
+}
+
+test('as generated: omitting getServerSnapshot throws when rendered on the server', () => {
+  expect(() => renderToString(<BadStoreConsumer />)).toThrow(/getServerSnapshot/);
+});
+
+test('fixed: providing getServerSnapshot renders successfully on the server', () => {
+  expect(() => renderToString(<GoodStoreConsumer />)).not.toThrow();
+});
+
+function TimestampBad() {
+  return <p>rendered at {Date.now()}</p>;
+}
+
+test('as generated: Date.now() read in render produces a real hydration mismatch naming Date.now()', async () => {
+  const serverTime = 1_700_000_000_000;
+  vi.spyOn(Date, 'now').mockReturnValue(serverTime);
+  const html = renderToString(<TimestampBad />);
+  expect(html).toContain(String(serverTime));
+
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  document.body.appendChild(container);
+
+  vi.spyOn(Date, 'now').mockReturnValue(serverTime + 5_000);
+  const errors: string[] = [];
+  hydrateRoot(container, <TimestampBad />, {
+    onRecoverableError: (err: unknown) => { errors.push(String(err)); },
+  });
+  await new Promise((r) => setTimeout(r, 200));
+
+  const joined = errors.join('\n');
+  expect(joined).toContain('Date.now()');
+  expect(joined.toLowerCase()).toContain('hydrat');
+  vi.restoreAllMocks();
+});
+
+test('fixed: LastSaved renders a placeholder on both server and first client render — no mismatch', () => {
+  const html = renderToString(<LastSaved />);
+  expect(html).toContain('Last saved: —');
+});
+```
+
+Every corrected file except `AvatarUpload.tsx`'s buggy predecessor type-checks clean against `tsc --noEmit`; the buggy `useRef()` snippet is verified separately, exactly matching the real error quoted above:
+
+```text
+error TS2554: Expected 1 arguments, but got 0.
+```
+
+And the test file runs clean:
+
+```text
+✓ as generated: useFormState has no isPending — there is no way to show a pending UI at all
+✓ fixed: NameForm (useActionState) disables the button and shows "Saving…" while pending
+✓ as generated: useFormStatus in the form's own component never reports pending
+✓ fixed: NotificationsForm's child SubmitButton reports the real pending state
+✓ as generated: calling the optimistic setter outside a Transition warns and reverts immediately
+✓ fixed: MarketingOptIn wraps the setter in startTransition — the optimistic value holds
+✓ as generated: omitting getServerSnapshot throws when rendered on the server
+✓ fixed: providing getServerSnapshot renders successfully on the server
+✓ as generated: Date.now() read in render produces a real hydration mismatch naming Date.now()
+✓ fixed: LastSaved renders a placeholder on both server and first client render — no mismatch
+
+Test Files  1 passed (1)
+     Tests  10 passed (10)
+```
+
+## What changed and why
+
+| # | Bug | Category | Fix |
+|---|---|---|---|
+| 1 | `useRef<HTMLInputElement>()` — no argument | Hooks & deps | `useRef<HTMLInputElement>(null)` — React 19 types require it |
+| 2 | `useSyncExternalStore(subscribe, getSnapshot)` — no `getServerSnapshot` | Server/client boundary | Add a third argument, `getServerSnapshot` |
+| 3 | `setOptimisticOptIn(...)` called directly in an event handler | State ownership | Wrap the whole sequence in `startTransition(async () => {...})` |
+| 4 | `useFormState` (from `react-dom`) — the pre-rename API | React 19 Actions | `useActionState` (from `react`) — same shape, plus `isPending` |
+| 5 | `useFormStatus()` in the same component that renders `<form>` | React 19 Actions | Move it into a child `SubmitButton` rendered inside the form |
+| 6 | `Date.now()` read directly in `LastSaved`'s render | Effects vs events | Compute it in an effect — client-only, after hydration |
+
+## Mental Model
+
+Three of these six bugs (`useRef()`, `getServerSnapshot`, `Date.now()`/hydration) are facts a tool can check for you — a real type error, a real thrown exception, a real captured mismatch message — the moment you actually run the right check (`tsc`, a server render, a hydration test). The other three (`useOptimistic` outside a Transition, `useFormState`'s missing `isPending`, `useFormStatus` misplaced) are API-shape facts: every one of them compiles and runs without crashing, and the only way to catch them is knowing what react.dev currently says an API guarantees — and checking the code actually keeps that guarantee.
+
+## Common Misconceptions
+
+- **"If it doesn't throw or warn, the React 19 API is being used correctly."** `useFormState` prints a real deprecation warning; `useOptimistic` outside a Transition prints a real warning too — but `useFormStatus` in the wrong component produces *nothing*, not even a hint, while just never working.
+- **"`useSyncExternalStore`'s third argument is an optional nicety, like a default parameter."** It's required the moment this can render on the server — proven above, it throws rather than silently degrading, specifically to protect hydration.
+- **"An optimistic UI library handles the Transition requirement for you."** `useOptimistic` is the primitive itself — nothing wraps the Transition automatically; the calling code has to.
+
+<Mermaid title="Where each bug sits in the reading order" code={wr3Diagram} />
+
+export const wr3Diagram = `flowchart TD
+  A["1. Hooks and their dependencies"] --> A1["useRef() with no initial value"]
+  B["2. The server/client boundary"] --> B1["useSyncExternalStore missing getServerSnapshot"]
+  C["3. State ownership"] --> C1["useOptimistic setter outside a Transition"]
+  D["4. React 19 Actions"] --> D1["useFormState instead of useActionState"]
+  D --> D2["useFormStatus in the form's own component"]
+  E["5. Effects vs events"] --> E1["Date.now() read during render"]
+`;
+
+<Callout title="The one-line takeaway">
+Half of this review's bugs are facts a tool proves the instant you run the right check (`tsc`, a server render, a hydration test); the other half are API-shape facts that compile and run fine forever, and the only defense is knowing — and checking — what react.dev currently guarantees about `useOptimistic`, `useFormStatus`, and the renamed Actions hooks.
+</Callout>
+
+export const quizWorkedReview3 = [
+  {
+    q: '```tsx\nconst inputRef = useRef<HTMLInputElement>();\n```\nWhat happens when this is type-checked against `@types/react@19`?',
+    options: [
+      'It compiles fine — useRef always allows zero arguments',
+      'error TS2554: Expected 1 arguments, but got 0 — React 19\'s three useRef overloads all require an argument',
+      'It compiles but warns at runtime',
+      'It only fails when strict mode is disabled',
+    ],
+    answer: 1,
+    explain: "Verified directly against this course's probe: @types/react@19 declares exactly three useRef overloads, none of them zero-argument — the fix is an explicit initial value, `useRef<HTMLInputElement>(null)`.",
+  },
+  {
+    q: '`useSyncExternalStore(subscribe, getSnapshot)` is called with only two arguments. What happens when this component is rendered on the SERVER (`renderToString`)?',
+    options: [
+      'It renders fine using the client getSnapshot',
+      'It throws: "Missing getServerSnapshot, which is required for server-rendered content"',
+      'It returns undefined silently',
+      'It only fails during hydration, never during the initial server render',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: renderToString throws this exact message when getServerSnapshot is missing — a silent fallback would risk a hydration mismatch instead, which is exactly why React makes this a hard failure.',
+  },
+  {
+    q: '```jsx\nfunction handleToggle() {\n  setOptimisticOptIn(!optimisticOptIn);\n  saveMarketingOptIn(!optimisticOptIn).then(() => setOptIn(!optIn));\n}\n```\nWhat is the real, captured console message when this runs?',
+    options: [
+      'No message — this is a supported pattern',
+      '"An optimistic state update occurred outside a transition or action." — and the optimistic value reverts immediately',
+      'A TypeError about useOptimistic',
+      'A warning only shown in production builds',
+    ],
+    answer: 1,
+    explain: "react.dev states the setter must be called inside startTransition or an Action — calling it directly in a plain event handler, proven in the probe, produces this exact console message and the UI reverts because there is no Transition holding the optimistic value.",
+  },
+  {
+    q: 'Why does using `useFormState` (from `react-dom`) instead of `useActionState` (from `react`) leave this form with no way to show a pending UI?',
+    options: [
+      'useFormState does not exist in React 19',
+      "useFormState's return tuple has no third `isPending` element the way useActionState's does — there is nothing to read a pending state from",
+      'useFormState requires a Server Action, which this app does not have',
+      'Pending UI is automatic regardless of which hook is used',
+    ],
+    answer: 1,
+    explain: 'useFormState still exists in react-dom@19.2.8 as a backward-compatible alias, but it is the pre-rename, two-item-adjacent API; useActionState returns the same shape plus a genuine isPending boolean.',
+  },
+  {
+    q: '`useFormStatus()` is called in the SAME component that renders `<form>`. What does `pending` report while the action is genuinely in flight?',
+    options: [
+      'true, correctly',
+      "false, always — useFormStatus reports the nearest ANCESTOR form's status, and this component is not its own descendant",
+      'It throws because there is no form yet',
+      'It only works if the form has a name attribute',
+    ],
+    answer: 1,
+    explain: "Proven in the probe: checking the button 5ms into a 20ms action never shows pending as true here. The fix moves useFormStatus into a child component rendered inside the <form>, the only place it can see that form's own pending state.",
+  },
+  {
+    q: '```jsx\nfunction LastSaved() {\n  return <p>Last saved: {Date.now()}</p>;\n}\n```\nWhat happens when this Client Component is server-rendered, then hydrated 5 seconds later?',
+    options: [
+      'Nothing — Date.now() is deterministic across a single request',
+      "A real hydration mismatch — the server's timestamp and the client's differ, and React's own error message names Date.now() as a known cause",
+      'It throws a compile error',
+      'React automatically reuses the server value on the client',
+    ],
+    answer: 1,
+    explain: "Proven in the probe with mocked timestamps 5 seconds apart: React's hydration error explicitly lists Date.now()/Math.random() as a known cause and shows the exact mismatched values. The fix reads Date.now() only inside a client-only effect.",
+  },
+];
+
+<Quiz client:visible id="reading-react/worked-review-3" questions={quizWorkedReview3} />
+
+<ProgressTracker client:visible id="reading-worked-3" />

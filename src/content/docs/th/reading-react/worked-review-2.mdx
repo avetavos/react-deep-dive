@@ -1,0 +1,869 @@
+---
+title: 'รีวิวเคสจริง 2: แดชบอร์ดที่มีการค้นหา transition และข้อมูลแบบ streaming'
+description: 'แดชบอร์ดที่ AI เขียนให้ — search, startTransition, use(), streaming metrics และ error boundary — ไล่รีวิวทีละบั๊กกับ Vite + React 19 probe จริง, tsc และ vitest'
+sidebar:
+  order: 6
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## ฟีเจอร์นี้คืออะไร
+
+โจทย์ที่ให้ AI คือ *"เพิ่มแดชบอร์ดโปรเจกต์: กล่องค้นหาที่ใช้ `use()`, แผงแสดงเมตริกแบบสดที่รีเฟรชเมื่อโปรเจกต์ที่เลือกเปลี่ยน, แผงรายละเอียดต่อโปรเจกต์ที่มีช่องโน้ตกับ list รายการที่เกี่ยวข้อง และปุ่มรีเฟรชที่ห่อด้วย error boundary"* ผลลัพธ์ด้านล่างคอมไพล์ผ่าน, `tsc --noEmit` ผ่านทุกไฟล์ และทุกส่วนก็ใช้แพทเทิร์นของ concurrent React ที่โมดูล Concurrent & Suspense ของคอร์สนี้สอนไปแล้ว อ่านตาม[ลำดับการอ่าน](/react/th/reading-react/)ของโมดูลนี้ที่ปรับให้เข้ากับฟีเจอร์แบบ concurrent: hooks กับ dependency, effect เทียบกับ event, และสมมติฐานเรื่อง memo/compiler ล้วนโผล่มาที่นี่ — แค่สวมคราบ `startTransition`, `use()` และ `useDeferredValue` แทน `useEffect` ธรรมดา โค้ดนี้มี **บั๊กจริง 6 จุด** ซึ่งไม่มีจุดไหนเลยที่ `tsc --noEmit` จับได้
+
+## โค้ดที่ AI สร้างให้
+
+```ts
+// src/dashboard/types.ts — as generated
+export type SearchResult = { id: string; title: string };
+export type Item = { id: string; title: string; related: string[] };
+```
+
+```ts
+// src/dashboard/search.ts — as generated
+import type { SearchResult } from './types';
+
+export function fetchResults(query: string): Promise<SearchResult[]> {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve([{ id: `${query}-1`, title: `Result for "${query}"` }]), 5);
+  });
+}
+
+export function logSearchAnalytics(query: string): Promise<void> {
+  return Promise.resolve(void query);
+}
+```
+
+```tsx
+// src/dashboard/SearchPanel.tsx — as generated
+import { Suspense, startTransition, use, useState } from 'react';
+import { fetchResults, logSearchAnalytics } from './search';
+
+function SearchResultsList({ query }: { query: string }) {
+  const results = use(fetchResults(query));
+  return <ul>{results.map((r) => <li key={r.id}>{r.title}</li>)}</ul>;
+}
+
+export function SearchPanel() {
+  const [query, setQuery] = useState('');
+  const [lastLogged, setLastLogged] = useState('');
+
+  function handleChange(next: string) {
+    startTransition(async () => {
+      setQuery(next);
+      await logSearchAnalytics(next);
+      setLastLogged(next);
+    });
+  }
+
+  return (
+    <div>
+      <input aria-label="search" onChange={(e) => handleChange(e.target.value)} />
+      <p>{lastLogged}</p>
+      <Suspense fallback={<p>Searching…</p>}>
+        <SearchResultsList query={query} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/dashboard/LiveMetrics.tsx — as generated
+import { useEffect, useState } from 'react';
+
+export function fetchMetric(projectId: string): Promise<number> {
+  const delayMs = projectId === 'slow' ? 30 : 5;
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(projectId === 'slow' ? 111 : 222), delayMs);
+  });
+}
+
+export function LiveMetrics({ projectId }: { projectId: string }) {
+  const [value, setValue] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetchMetric(projectId).then((result) => setValue(result));
+  }, [projectId]);
+
+  return <output>{value === null ? 'loading…' : value}</output>;
+}
+```
+
+```tsx
+// src/dashboard/ItemDetail.tsx — as generated
+import { useDeferredValue, useState } from 'react';
+import type { Item } from './types';
+
+export function ItemDetail({ item }: { item: Item }) {
+  const [notes, setNotes] = useState('');
+  const deferredRelated = useDeferredValue(item.related);
+
+  return (
+    <div>
+      <h3>{item.title}</h3>
+      <textarea aria-label="notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      <ul>{deferredRelated.map((r) => <li key={r}>{r}</li>)}</ul>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/dashboard/ErrorBoundary.tsx — as generated
+import { Component, type ReactNode } from 'react';
+
+type State = { error: Error | null };
+
+export class ErrorBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, State> {
+  state: State = { error: null };
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
+  }
+  render() {
+    if (this.state.error) return this.props.fallback;
+    return this.props.children;
+  }
+}
+```
+
+```tsx
+// src/dashboard/DangerZone.tsx — as generated
+export function refreshDashboardData(): void {
+  throw new Error('refresh failed: rate limited');
+}
+
+export function DangerZone() {
+  return <button onClick={refreshDashboardData}>Refresh data</button>;
+}
+```
+
+```tsx
+// src/dashboard/Dashboard.tsx — as generated
+import { useState } from 'react';
+import { SearchPanel } from './SearchPanel';
+import { LiveMetrics } from './LiveMetrics';
+import { ItemDetail } from './ItemDetail';
+import { ErrorBoundary } from './ErrorBoundary';
+import { DangerZone } from './DangerZone';
+import type { Item } from './types';
+
+const items: Item[] = [
+  { id: 'p1', title: 'Checkout funnel', related: ['Cart', 'Payments'] },
+  { id: 'p2', title: 'Onboarding', related: ['Signup', 'Activation'] },
+];
+
+export function Dashboard() {
+  const [selectedId, setSelectedId] = useState(items[0].id);
+  const selected = items.find((i) => i.id === selectedId)!;
+
+  return (
+    <div>
+      <SearchPanel />
+      <LiveMetrics projectId={selectedId} />
+      <div role="group">
+        {items.map((item) => (
+          <button key={item.id} onClick={() => setSelectedId(item.id)}>{item.title}</button>
+        ))}
+      </div>
+      <ItemDetail item={selected} />
+      <ErrorBoundary fallback={<p role="alert">Something went wrong.</p>}>
+        <DangerZone />
+      </ErrorBoundary>
+    </div>
+  );
+}
+```
+
+## ไล่รีวิวทีละบั๊ก
+
+### Hooks กับ dependency: `use()` ถูกเรียกด้วย promise ที่สร้างใหม่ทุกครั้งใน render
+
+`SearchResultsList` เรียก `fetchResults(query)` ตรง ๆ ใน render body เลย
+
+<SpotTheBug code={`function SearchResultsList({ query }) {
+  const results = use(fetchResults(query)); // a NEW promise every render
+  return <ul>{results.map((r) => <li key={r.id}>{r.title}</li>)}</ul>;
+}`}>
+`use()` ไม่ได้ fetch หรือ cache อะไรเลย — มันแค่อ่าน promise ที่คุณส่งให้เท่านั้น การเรียก `fetchResults(query)` ตรง ๆ ใน render สร้าง promise ใหม่ทุก render จริง ๆ ทำให้ component suspend ค้างไม่มีที่สิ้นสุดหรือ refetch ทุก render ขึ้นอยู่กับจังหวะเวลา พิสูจน์ใน probe แล้ว: เรียก fetch ที่ไม่มี cache สองครั้งด้วย query เดียวกัน ได้ promise แยกกัน**สองตัว** (เรียกจริงสองครั้ง) ในขณะที่เวอร์ชันที่มี cache คืน reference ของ promise ตัวเดียวกันทั้งสองครั้ง
+
+```text
+✓ as generated: calling the fetch directly in render builds a NEW promise every single call
+✓ fixed: getResultsPromise caches by query — the SAME promise reference comes back
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+วิธีแก้คือ cache promise ตาม query ไว้ใน `Map` เพื่อให้ render ซ้ำ ๆ (และการเรียก query เดิมซ้ำ ๆ) อ่าน promise ตัวเดียวกันที่กำลัง in-flight อยู่แล้ว
+</SpotTheBug>
+
+### Effect เทียบกับ event: `startTransition(async)` เสียลำดับความสำคัญหลัง `await`
+
+`handleChange` ห่อทุกอย่างด้วย `startTransition(async () => {...})` แล้วเรียก `setLastLogged(next)` หลัง `await logSearchAnalytics(next)`
+
+<SpotTheBug code={`function handleChange(next) {
+  startTransition(async () => {
+    setQuery(next); // before the first await — covered
+    await logSearchAnalytics(next);
+    setLastLogged(next); // after the await — NOT re-wrapped
+  });
+}`}>
+ส่วน troubleshooting ของ `useTransition` ใน react.dev บอกไว้ชัดเจนว่า มีแค่โค้ดที่อยู่**ก่อน** `await` ตัวแรกเท่านั้นที่นับเป็นส่วนหนึ่งของ transition โดยอัตโนมัติ `setLastLogged(next)` รันหลัง await และไม่ถูกห่อด้วย `startTransition` ของตัวเอง — มันเลยกลายเป็น update แบบเร่งด่วนธรรมดาไปเงียบ ๆ พิสูจน์ด้วยกลไกเดียวกับที่ update ที่ทำให้ suspend จะเจอจริง: `setState` ที่ทำให้ `Suspense` boundary suspend รันแบบเดียวกันทั้งแบบห่อใหม่และไม่ห่อใหม่ ถ้าไม่ห่อใหม่ boundary จะ fallback ไปหน้า loading ทันที ถ้าห่อใหม่ React จะคงเนื้อหาเดิมไว้บนจอระหว่างที่เนื้อหาใหม่โหลดอยู่เบื้องหลัง — ตรงตามสัญญาที่ `isPending` บอกไว้แต่บั๊กนี้แอบทำลายไปเงียบ ๆ
+
+```text
+✓ as generated: a setQuery after a bare await is NOT part of the transition — Suspense falls back immediately
+✓ fixed: re-wrapping setQuery after await keeps it part of the transition — old content stays, no fallback
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+วิธีแก้คือห่อ `startTransition(() => setLastLogged(next))` รอบ ๆ การเรียกหลัง `await` อีกชั้นหนึ่ง
+</SpotTheBug>
+
+### Effect เทียบกับ event: effect fetch ที่ไม่มีการ abort/จัดการ race
+
+`LiveMetrics` fetch เมตริกตาม `projectId` ใน `useEffect` โดยไม่มีการยกเลิกใด ๆ เลย
+
+<SpotTheBug code={`function LiveMetrics({ projectId }) {
+  const [value, setValue] = useState(null);
+  useEffect(() => {
+    fetchMetric(projectId).then((result) => setValue(result));
+  }, [projectId]);
+  return <output>{value === null ? 'loading…' : value}</output>;
+}`}>
+ถ้า `projectId` เปลี่ยนเร็ว (คลิกสลับโปรเจกต์ไปมา) request ที่เก่ากว่าและช้ากว่าอาจ resolve **หลัง** request ที่ใหม่กว่าและเร็วกว่า แล้วเขียนทับ state ที่สดใหม่ด้วยข้อมูลเก่า พิสูจน์ใน probe ด้วยคู่ request ที่ตั้งใจให้ช้าแล้วเร็ว (ตัวช้าเริ่มก่อนแต่จะ resolve ทีหลัง): สลับจากโปรเจกต์ที่ช้าไปโปรเจกต์ที่เร็ว ทำให้แผงยังแสดงค่าของโปรเจกต์ที่**ช้าและเก่าแล้ว**อยู่
+
+```text
+✓ as generated: a slow, stale response overwrites a newer, faster one
+✓ fixed: LiveMetrics aborts the previous request, so the fast response always wins
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+วิธีแก้คือ `AbortController` ที่สร้างในตัว effect แล้วยกเลิกใน cleanup — request เดิมของ `projectId` ก่อนหน้าจะถูกยกเลิกทันทีที่ `projectId` เปลี่ยนอีกครั้ง
+</SpotTheBug>
+
+### สมมติฐานเรื่อง memo/compiler: `useDeferredValue` ที่ไม่มี `initialValue`
+
+`ItemDetail` defer `item.related` ด้วย `useDeferredValue(item.related)` — ไม่มี argument ที่สอง
+
+<SpotTheBug code={`const deferredRelated = useDeferredValue(item.related);`}>
+ตั้งแต่ React 19 `useDeferredValue` รับ `initialValue` แบบไม่บังคับ ซึ่งใช้แค่ตอน render แรกของ component เท่านั้น react.dev บอกไว้ชัดเจนว่า **ถ้าไม่มี** ตัวนี้ "hook จะไม่ defer ระหว่าง render แรกเลย" — render แรกจะได้ค่าจริงตรง ๆ ไม่มีค่า placeholder ที่ถูก defer เลย พิสูจน์ใน probe แล้ว: render โดยไม่มี `initialValue` แสดง list รายการที่เกี่ยวข้องแบบเต็ม ๆ จริง ๆ ตั้งแต่ render แรกเลย (ไม่มีการ defer เกิดขึ้น); render `useDeferredValue(related, [])` แสดง placeholder ว่างเปล่าใน render แรกเดียวกันนั้นแทน
+
+```text
+✓ as generated: useDeferredValue(related) with no initialValue shows the REAL list on the first render
+✓ fixed: ItemDetail(useDeferredValue(related, [])) shows the empty placeholder on the first render
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+วิธีแก้คือ `useDeferredValue(item.related, [])` — placeholder ที่ถูกกำหนดไว้ชัดเจนและถูกสำหรับ render แรก ทันทีหลังจากที่ remount จาก key-reset ด้านล่างทำให้ component นี้เป็น instance ใหม่
+</SpotTheBug>
+
+### Key กับ identity: ไม่มี key บน per-item subtree — โน้ตร่างหลุดข้ามรายการ
+
+`Dashboard` render `<ItemDetail item={selected} />` โดยไม่มี `key` เลย — การสลับ `selectedId` จึง re-render `ItemDetail` instance*ตัวเดิม*ในที่เดิม
+
+<SpotTheBug code={`<ItemDetail item={selected} />`}>
+`ItemDetail` มี state ของตัวเอง (`notes`) ซึ่งไม่เกี่ยวอะไรกับ `item.title`/`item.related` เลย — React ไม่มีทางรู้ว่าควร reset มันหรือเปล่า ถ้าไม่มี `key` การสลับจากรายการหนึ่งไปอีกรายการก็แค่อัปเดต prop บน component instance*ตัวเดิม*เท่านั้น `notes` — ซึ่งเป็น state ที่ React ไม่มีเหตุผลจะไปแตะ — เลยแค่ตกทอดต่อไปเฉย ๆ พิสูจน์ใน probe แล้ว: พิมพ์โน้ตร่างตอนดูรายการ A สลับไปรายการ B แล้ว textarea ยังมีข้อความร่างตัวเดิมอยู่ ตอนนี้ผูกอยู่กับรายการที่ผิดไปแล้ว
+
+```text
+✓ as generated: without a key, switching items leaves the PREVIOUS notes draft on screen
+✓ fixed: key={item.id} forces a clean remount — the notes draft resets per item
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+วิธีแก้คือ `key={selected.id}` บน `ItemDetail` — กลไกเดียวกับ reset switch ที่บทเรียน Rendering & Reconciliation ของคอร์สนี้พิสูจน์ไว้: key ที่เปลี่ยนบังคับให้เกิด unmount + remount แบบสะอาด reset state ทุกอย่างของ subtree นั้นโดยตั้งใจ
+</SpotTheBug>
+
+### Effect เทียบกับ event: error boundary ไม่จับ throw ที่เกิดใน event handler
+
+ปุ่มของ `DangerZone` เรียก `refreshDashboardData` ตรง ๆ เป็น `onClick` โดยพึ่งพา `ErrorBoundary` ที่ห่ออยู่ใน `Dashboard`
+
+<SpotTheBug code={`export function DangerZone() {
+  return <button onClick={refreshDashboardData}>Refresh data</button>;
+}`}>
+error boundary จับ error ที่ throw ระหว่าง**การ render** (และใน lifecycle method) ของ component ที่อยู่ใต้มันเท่านั้น — ไม่เคยจับใน event handler เลย เพราะ event handler เป็นแค่ callback ของ JS ธรรมดาที่รันนอก render ของ React พิสูจน์ใน probe แล้ว: คลิกปุ่มที่ throw ตรง ๆ ใน `onClick` ซึ่งห่อด้วย error boundary จริง ไม่เคยแสดง fallback ของ boundary เลย — exception หลุดไปถึง global `error` event ของ browser เอง (`message: "handler-boom"`) ข้าม `getDerivedStateFromError` ไปเลย
+
+```text
+✓ as generated: a throw inside an onClick handler is NOT caught by the error boundary
+✓ fixed: DangerZone catches the same throw itself with try/catch and shows a local error
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+วิธีแก้คือจัดการ throw ตรงที่มันเกิดขึ้นจริง ๆ: `try/catch` ธรรมดาในตัว event handler เอง พร้อม local error state — error boundary ไม่มีทางเห็นมันอยู่แล้ว
+</SpotTheBug>
+
+## โค้ดที่แก้ไขแล้ว
+
+```ts
+// src/dashboard/types.ts
+export type SearchResult = { id: string; title: string };
+export type Item = { id: string; title: string; related: string[] };
+```
+
+```ts
+// src/dashboard/search.ts
+import type { SearchResult } from './types';
+
+export function fetchResults(query: string): Promise<SearchResult[]> {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve([{ id: `${query}-1`, title: `Result for "${query}"` }]), 5);
+  });
+}
+
+export function logSearchAnalytics(query: string): Promise<void> {
+  return Promise.resolve(void query);
+}
+
+const cache = new Map<string, Promise<SearchResult[]>>();
+
+// FIX (use() reading a stable promise): cached per query, never a fresh
+// promise on every render — use() only reads a promise, it never caches one.
+export function getResultsPromise(query: string): Promise<SearchResult[]> {
+  if (!query) return Promise.resolve([]);
+  if (!cache.has(query)) cache.set(query, fetchResults(query));
+  return cache.get(query)!;
+}
+```
+
+```tsx
+// src/dashboard/SearchPanel.tsx
+import { Suspense, startTransition, use, useState } from 'react';
+import { getResultsPromise, logSearchAnalytics } from './search';
+
+function SearchResultsList({ query }: { query: string }) {
+  const results = use(getResultsPromise(query));
+  return <ul>{results.map((r) => <li key={r.id}>{r.title}</li>)}</ul>;
+}
+
+export function SearchPanel() {
+  const [query, setQuery] = useState('');
+  const [lastLogged, setLastLogged] = useState('');
+
+  function handleChange(next: string) {
+    startTransition(async () => {
+      setQuery(next); // before the first await — genuinely part of the transition
+      await logSearchAnalytics(next);
+      // FIX (async transition pitfall): re-wrapped, so this stays low-priority
+      // instead of silently becoming an urgent update.
+      startTransition(() => setLastLogged(next));
+    });
+  }
+
+  return (
+    <div>
+      <input aria-label="search" onChange={(e) => handleChange(e.target.value)} />
+      <p data-testid="last-logged">{lastLogged}</p>
+      <Suspense fallback={<p data-testid="search-fallback">Searching…</p>}>
+        <SearchResultsList query={query} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/dashboard/LiveMetrics.tsx
+import { useEffect, useState } from 'react';
+
+// A tiny simulated backend, deliberately slower for one id, so a real
+// out-of-order response race can be reproduced deterministically in a test.
+export function fetchMetric(projectId: string, signal: AbortSignal): Promise<number> {
+  const delayMs = projectId === 'slow' ? 30 : 5;
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => resolve(projectId === 'slow' ? 111 : 222), delayMs);
+    signal.addEventListener('abort', () => {
+      clearTimeout(id);
+      reject(new DOMException('aborted', 'AbortError'));
+    });
+  });
+}
+
+// FIX (effect fetch race): an AbortController cancels the in-flight request
+// for the PREVIOUS projectId, so a slow, stale response can never overwrite
+// a newer, faster one.
+export function LiveMetrics({ projectId }: { projectId: string }) {
+  const [value, setValue] = useState<number | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setValue(null);
+    fetchMetric(projectId, controller.signal)
+      .then((result) => setValue(result))
+      .catch((err: Error) => {
+        if (err.name !== 'AbortError') throw err;
+      });
+    return () => controller.abort();
+  }, [projectId]);
+
+  return <output data-testid="metric">{value === null ? 'loading…' : value}</output>;
+}
+```
+
+```tsx
+// src/dashboard/ItemDetail.tsx
+import { useDeferredValue, useState } from 'react';
+import type { Item } from './types';
+
+// FIX (useDeferredValue misuse): initialValue is shown on this component's
+// very first render — the render right after the parent's key reset — so an
+// expensive related-items list never blocks that first paint.
+export function ItemDetail({ item }: { item: Item }) {
+  const [notes, setNotes] = useState(''); // FIX (missing key reset): resets
+  // per item ONLY because the parent renders this with key={item.id} — see Dashboard.tsx.
+  const deferredRelated = useDeferredValue(item.related, [] as string[]);
+
+  return (
+    <div>
+      <h3>{item.title}</h3>
+      <textarea aria-label="notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      <ul data-testid="related">{deferredRelated.map((r) => <li key={r}>{r}</li>)}</ul>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/dashboard/ErrorBoundary.tsx
+import { Component, type ReactNode } from 'react';
+
+type State = { error: Error | null };
+
+export class ErrorBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, State> {
+  state: State = { error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) return this.props.fallback;
+    return this.props.children;
+  }
+}
+```
+
+```tsx
+// src/dashboard/DangerZone.tsx
+import { useState } from 'react';
+
+// A tiny simulated backend call that always fails, standing in for a real
+// rate-limited/expired-session refresh — deterministic enough for a test.
+export function refreshDashboardData(): void {
+  throw new Error('refresh failed: rate limited');
+}
+
+// FIX (error boundaries don't catch event-handler throws): handle the throw
+// with a plain try/catch and local error state — an ErrorBoundary above this
+// component would never see it, because it never renders while throwing.
+export function DangerZone() {
+  const [error, setError] = useState<string | null>(null);
+
+  function handleRefresh() {
+    try {
+      refreshDashboardData();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  return (
+    <div>
+      <button onClick={handleRefresh}>Refresh data</button>
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
+```
+
+```tsx
+// src/dashboard/Dashboard.tsx
+import { useState } from 'react';
+import { SearchPanel } from './SearchPanel';
+import { LiveMetrics } from './LiveMetrics';
+import { ItemDetail } from './ItemDetail';
+import { ErrorBoundary } from './ErrorBoundary';
+import { DangerZone } from './DangerZone';
+import type { Item } from './types';
+
+const items: Item[] = [
+  { id: 'p1', title: 'Checkout funnel', related: ['Cart', 'Payments'] },
+  { id: 'p2', title: 'Onboarding', related: ['Signup', 'Activation'] },
+];
+
+export function Dashboard() {
+  const [selectedId, setSelectedId] = useState(items[0].id);
+  const selected = items.find((i) => i.id === selectedId)!;
+
+  return (
+    <div>
+      <SearchPanel />
+      <LiveMetrics projectId={selectedId} />
+      <div role="group">
+        {items.map((item) => (
+          <button key={item.id} onClick={() => setSelectedId(item.id)}>{item.title}</button>
+        ))}
+      </div>
+      {/* FIX (missing key reset): key={selected.id} forces a clean remount —
+          and a fresh `notes` draft — every time the selected item changes. */}
+      <ItemDetail key={selected.id} item={selected} />
+      <ErrorBoundary fallback={<p role="alert">Something went wrong.</p>}>
+        <DangerZone />
+      </ErrorBoundary>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/__tests__/dashboard.test.tsx
+import { Component, Suspense, startTransition, use, useDeferredValue, useEffect, useState, type ReactNode } from 'react';
+import { act, render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { getResultsPromise } from '../dashboard/search';
+import { LiveMetrics, fetchMetric } from '../dashboard/LiveMetrics';
+import { ItemDetail } from '../dashboard/ItemDetail';
+import { ErrorBoundary } from '../dashboard/ErrorBoundary';
+import { DangerZone } from '../dashboard/DangerZone';
+import type { Item } from '../dashboard/types';
+
+afterEach(cleanup);
+
+let fetchCallsBad = 0;
+function getResultsPromiseBad(query: string) {
+  fetchCallsBad++;
+  return Promise.resolve([{ id: '1', title: query }]);
+}
+
+test('as generated: calling the fetch directly in render builds a NEW promise every single call', () => {
+  fetchCallsBad = 0;
+  getResultsPromiseBad('react');
+  getResultsPromiseBad('react');
+  expect(fetchCallsBad).toBe(2);
+});
+
+test('fixed: getResultsPromise caches by query — the SAME promise reference comes back', () => {
+  const p1 = getResultsPromise('react');
+  const p2 = getResultsPromise('react');
+  expect(p1).toBe(p2);
+});
+
+function makeResource() {
+  const cache = new Map<string, Promise<string>>();
+  return (key: string) => {
+    if (!cache.has(key)) cache.set(key, new Promise((resolve) => setTimeout(() => resolve(`data:${key}`), 10)));
+    return cache.get(key)!;
+  };
+}
+
+function SearchContent({ resource, query }: { resource: (k: string) => Promise<string>; query: string }) {
+  const data = use(resource(query));
+  return <p data-testid="content">{data}</p>;
+}
+
+function SearchDemo({ rewrap }: { rewrap: boolean }) {
+  const resource = useState(() => makeResource())[0];
+  const [query, setQuery] = useState('a');
+  function runSearch() {
+    startTransition(async () => {
+      await Promise.resolve().then(() => Promise.resolve());
+      if (rewrap) {
+        startTransition(() => setQuery('b'));
+      } else {
+        setQuery('b');
+      }
+    });
+  }
+  return (
+    <div>
+      <button onClick={runSearch}>search</button>
+      <Suspense fallback={<p data-testid="fallback">loading…</p>}>
+        <SearchContent resource={resource} query={query} />
+      </Suspense>
+    </div>
+  );
+}
+
+test('as generated: a setQuery after a bare await is NOT part of the transition — Suspense falls back immediately', async () => {
+  await act(async () => { render(<SearchDemo rewrap={false} />); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(screen.getByTestId('content').textContent).toBe('data:a');
+
+  await act(async () => {
+    screen.getByText('search').click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(screen.getByTestId('fallback')).toBeTruthy();
+});
+
+test('fixed: re-wrapping setQuery after await keeps it part of the transition — old content stays, no fallback', async () => {
+  await act(async () => { render(<SearchDemo rewrap={true} />); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(screen.getByTestId('content').textContent).toBe('data:a');
+
+  await act(async () => {
+    screen.getByText('search').click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(screen.queryByTestId('fallback')).toBeNull();
+  expect(screen.getByTestId('content').textContent).toBe('data:a');
+});
+
+function LiveMetricsBad({ projectId }: { projectId: string }) {
+  const [value, setValue] = useState<number | null>(null);
+  useEffect(() => {
+    fetchMetric(projectId, new AbortController().signal).then((result) => setValue(result));
+  }, [projectId]);
+  return <output data-testid="metric-bad">{value === null ? 'loading…' : value}</output>;
+}
+
+test('as generated: a slow, stale response overwrites a newer, faster one', async () => {
+  const { rerender } = render(<LiveMetricsBad projectId="slow" />);
+  rerender(<LiveMetricsBad projectId="fast" />);
+  await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+  expect(screen.getByTestId('metric-bad').textContent).toBe('111');
+});
+
+test('fixed: LiveMetrics aborts the previous request, so the fast response always wins', async () => {
+  const { rerender } = render(<LiveMetrics projectId="slow" />);
+  rerender(<LiveMetrics projectId="fast" />);
+  await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+  expect(screen.getByTestId('metric').textContent).toBe('222');
+});
+
+class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) return <p data-testid="boundary-fallback">caught</p>;
+    return this.props.children;
+  }
+}
+
+function ThrowingButtonBad() {
+  function handleClick() {
+    throw new Error('handler-boom');
+  }
+  return <button onClick={handleClick}>go</button>;
+}
+
+test('as generated: a throw inside an onClick handler is NOT caught by the error boundary', async () => {
+  render(
+    <Boundary>
+      <ThrowingButtonBad />
+    </Boundary>,
+  );
+  const onWindowError = vi.fn((e: ErrorEvent) => { e.preventDefault(); });
+  window.addEventListener('error', onWindowError);
+  fireEvent.click(screen.getByText('go'));
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  window.removeEventListener('error', onWindowError);
+
+  expect(onWindowError).toHaveBeenCalled();
+  expect(String(onWindowError.mock.calls[0][0].error?.message ?? onWindowError.mock.calls[0][0].message)).toContain('handler-boom');
+  expect(screen.queryByTestId('boundary-fallback')).toBeNull();
+});
+
+test('fixed: DangerZone catches the same throw itself with try/catch and shows a local error', () => {
+  render(
+    <ErrorBoundary fallback={<p role="alert">boundary fallback</p>}>
+      <DangerZone />
+    </ErrorBoundary>,
+  );
+  fireEvent.click(screen.getByText('Refresh data'));
+  expect(screen.getByRole('alert').textContent).toBe('refresh failed: rate limited');
+});
+
+test('as generated: useDeferredValue(related) with no initialValue shows the REAL list on the first render', () => {
+  const seen: string[][] = [];
+  function RelatedBad({ related }: { related: string[] }) {
+    const deferred = useDeferredValue(related);
+    seen.push(deferred);
+    return null;
+  }
+  render(<RelatedBad related={['Cart', 'Payments']} />);
+  expect(seen[0]).toEqual(['Cart', 'Payments']);
+});
+
+test('fixed: ItemDetail(useDeferredValue(related, [])) shows the empty placeholder on the first render', () => {
+  const seen: string[][] = [];
+  function RelatedFixed({ related }: { related: string[] }) {
+    const deferred = useDeferredValue(related, [] as string[]);
+    seen.push(deferred);
+    return null;
+  }
+  render(<RelatedFixed related={['Cart', 'Payments']} />);
+  expect(seen[0]).toEqual([]);
+});
+
+test('sanity: ItemDetail renders the related list once React settles past the first render', () => {
+  const item: Item = { id: 'p1', title: 'Checkout', related: ['Cart', 'Payments'] };
+  render(<ItemDetail item={item} />);
+  expect(screen.getByTestId('related').textContent).toContain('Cart');
+});
+
+test('as generated: without a key, switching items leaves the PREVIOUS notes draft on screen', () => {
+  const a: Item = { id: 'a', title: 'A', related: [] };
+  const b: Item = { id: 'b', title: 'B', related: [] };
+  const { getByLabelText, rerender } = render(<ItemDetail item={a} />);
+  fireEvent.change(getByLabelText('notes'), { target: { value: 'draft for A' } });
+  rerender(<ItemDetail item={b} />);
+  expect((getByLabelText('notes') as HTMLTextAreaElement).value).toBe('draft for A');
+});
+
+test('fixed: key={item.id} forces a clean remount — the notes draft resets per item', () => {
+  const a: Item = { id: 'a', title: 'A', related: [] };
+  const b: Item = { id: 'b', title: 'B', related: [] };
+  const { getByLabelText, rerender } = render(<ItemDetail key={a.id} item={a} />);
+  fireEvent.change(getByLabelText('notes'), { target: { value: 'draft for A' } });
+  rerender(<ItemDetail key={b.id} item={b} />);
+  expect((getByLabelText('notes') as HTMLTextAreaElement).value).toBe('');
+});
+```
+
+Type-check ผ่านสะอาดกับ `tsc --noEmit` (strict, React 19 types) และรันผ่าน test ไฟล์ด้านบนได้จริง:
+
+```text
+✓ as generated: calling the fetch directly in render builds a NEW promise every single call
+✓ fixed: getResultsPromise caches by query — the SAME promise reference comes back
+✓ as generated: a setQuery after a bare await is NOT part of the transition — Suspense falls back immediately
+✓ fixed: re-wrapping setQuery after await keeps it part of the transition — old content stays, no fallback
+✓ as generated: a slow, stale response overwrites a newer, faster one
+✓ fixed: LiveMetrics aborts the previous request, so the fast response always wins
+✓ as generated: a throw inside an onClick handler is NOT caught by the error boundary
+✓ fixed: DangerZone catches the same throw itself with try/catch and shows a local error
+✓ as generated: useDeferredValue(related) with no initialValue shows the REAL list on the first render
+✓ fixed: ItemDetail(useDeferredValue(related, [])) shows the empty placeholder on the first render
+✓ sanity: ItemDetail renders the related list once React settles past the first render
+✓ as generated: without a key, switching items leaves the PREVIOUS notes draft on screen
+✓ fixed: key={item.id} forces a clean remount — the notes draft resets per item
+
+Test Files  1 passed (1)
+     Tests  13 passed (13)
+```
+
+## สิ่งที่เปลี่ยนและเหตุผล
+
+| # | บั๊ก | หมวด | วิธีแก้ |
+|---|---|---|---|
+| 1 | `use(fetchResults(query))` — promise ใหม่ทุก render | Hooks & deps | cache promise ตาม query ไว้ใน `Map` |
+| 2 | `setLastLogged(next)` ถูกเรียกหลัง `await` ใน `startTransition(async () => {...})` | Effects vs events | ห่อการเรียกหลัง await ด้วย `startTransition` ของตัวเองอีกชั้น |
+| 3 | effect fetch ตาม `projectId` โดยไม่มีการยกเลิก | Effects vs events | `AbortController` ที่ยกเลิกใน cleanup |
+| 4 | `useDeferredValue(item.related)` — ไม่มี `initialValue` | Memo/compiler assumptions | `useDeferredValue(item.related, [])` |
+| 5 | `<ItemDetail item={selected} />` — ไม่มี `key` | Keys & identity | `key={selected.id}` บังคับ remount แบบสะอาดต่อรายการ |
+| 6 | `onClick={refreshDashboardData}` — พึ่งพา `ErrorBoundary` ที่อยู่เหนือมัน | Effects vs events | `try/catch` ในตัว event handler เอง |
+
+## Mental Model
+
+ฟีเจอร์ concurrent ของ React (`startTransition`, `use()`, `useDeferredValue`) ยังคงสร้างอยู่บน primitive เดียวกับที่โมดูล Hooks ของคอร์สนี้สอนไปแล้ว — dependency array, การเปรียบเทียบ reference, state ของ component instance ของตัวเอง — มันแค่เอา primitive เหล่านั้นไปใช้กับ*เมื่อไร*และ*ลำดับไหน*ที่งานจะเกิดขึ้น ไม่ใช่แค่*อะไร*ที่จะถูก render บั๊กทุกจุดในรีวิวนี้คือรูปแบบความล้มเหลวที่คุ้นเคยแบบเดียวกัน (ค่าที่ค้าง, reference ที่เปลี่ยนทั้งที่ไม่ควรเปลี่ยน, state ที่ควร reset) แค่สวมคราบของ concurrent API เท่านั้นเอง
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`startTransition(async () => {...})` ทำให้ callback ทั้งก้อนกลายเป็น low-priority"** มีแค่โค้ดก่อน `await` ตัวแรกเท่านั้นที่นับเป็นส่วนหนึ่งของ transition โดยอัตโนมัติ — พิสูจน์ไปแล้วสองครั้งด้านบน (ทั้งห่อใหม่และไม่ห่อใหม่) กับ Suspense boundary จริง
+- **"error boundary ที่ห่อ component ป้องกันทุกอย่างที่ component นั้นทำ"** มันป้องกันแค่ error ตอน render ของ subtree นั้น — ไม่ใช่ click handler ไม่ใช่ promise ที่ reject นอก `use()` และไม่ใช่โค้ดของตัว boundary เอง
+- **"ถ้า prop ของ component ไม่เปลี่ยน state ภายในของมันก็ปลอดภัย"** state `notes` ของ `ItemDetail` ไม่เกี่ยวอะไรกับ `item.related`/`item.title` เลย — parent ต้อง opt-in การ reset ด้วย `key` เอง ไม่งั้น state ที่ควรเป็นของแต่ละรายการก็จะตกทอดต่อไปเงียบ ๆ
+
+<Mermaid title="แต่ละบั๊กอยู่ตรงไหนในลำดับการอ่าน" code={wr2Diagram} />
+
+export const wr2Diagram = `flowchart TD
+  A["1. Hooks and their dependencies"] --> A1["use() with a promise built in render"]
+  B["2. Effects vs events"] --> B1["startTransition(async) after await"]
+  B --> B2["effect fetch with no abort"]
+  B --> B3["error boundary vs event-handler throw"]
+  C["3. Memo/compiler assumptions"] --> C1["useDeferredValue with no initialValue"]
+  D["4. Keys and identity"] --> D1["missing key on a per-item subtree"]
+`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+API ของ concurrent React เอง (`startTransition`, `use()`, `useDeferredValue`) ไม่ได้ทำให้ไม่ต้องมีวินัยแบบเดียวกับที่คอร์สนี้สอนไปตลอด — reference ที่คงที่, dependency array ที่ถูกต้องจริง, `key` ที่ตั้งใจใส่ — มันแค่เอาวินัยนั้นไปใช้กับเรื่องจังหวะเวลาและลำดับความสำคัญด้วย ไม่ใช่แค่ผลลัพธ์ที่ออกมา
+</Callout>
+
+export const quizWorkedReview2 = [
+  {
+    q: '```tsx\nfunction SearchResultsList({ query }) {\n  const results = use(fetchResults(query));\n  return <ul>{results.map((r) => <li key={r.id}>{r.title}</li>)}</ul>;\n}\n```\nทำไมการเรียก `fetchResults(query)` ตรง ๆ ใน render ถึงเป็นบั๊ก ทั้งที่ `use()` จัดการเรื่อง Suspense ได้ถูกต้อง?',
+    options: [
+      'ไม่ใช่บั๊ก — use() cache promise ที่ได้รับมาให้อัตโนมัติ',
+      '`fetchResults(query)` สร้าง promise ใหม่ทุก render จริง ๆ — use() แค่อ่าน promise ที่ได้รับมาเท่านั้น มันไม่เคย cache หรือ dedupe การเรียกให้เลย',
+      'use() เรียกได้เฉพาะกับค่าที่ resolve แล้วเท่านั้น',
+      'โค้ดนี้ throw compile error',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ใน probe แล้ว: เรียก fetch ที่ไม่มี cache สองครั้งด้วย query เดียวกันได้ promise แยกกันสองตัว (เรียกจริงสองครั้ง) ส่วนเวอร์ชันที่มี cache (Map ตาม query) คืน reference ของ promise ตัวเดียวกันทั้งสองครั้ง',
+  },
+  {
+    q: '```jsx\nstartTransition(async () => {\n  setQuery(next);\n  await logSearchAnalytics(next);\n  setLastLogged(next); // not re-wrapped\n});\n```\n`setLastLogged(next)` เป็นส่วนหนึ่งของ transition หรือไม่?',
+    options: [
+      'ใช่ — async callback ทั้งก้อนคือ transition เดียว',
+      'ไม่ใช่ — มีแค่โค้ดก่อน `await` ตัวแรกเท่านั้นที่นับเป็นส่วนหนึ่งของ transition โดยอัตโนมัติ update นี้กลายเป็น update แบบเร่งด่วนธรรมดาไปเงียบ ๆ',
+      'ใช่ เฉพาะตอน isPending เป็น true เท่านั้น',
+      'ใช่ แต่เฉพาะ React 18 ไม่ใช่ React 19',
+    ],
+    answer: 1,
+    explain: 'ส่วน troubleshooting ของ useTransition ใน react.dev บอกไว้ตรงนี้ชัดเจน และพิสูจน์ไปแล้วด้านบนกับ Suspense boundary จริง: ถ้าไม่ห่อใหม่ boundary จะ fallback ทันที ถ้าใช้ startTransition(() => setLastLogged(next)) เนื้อหาเดิมยังอยู่บนจอ',
+  },
+  {
+    q: '`useEffect` fetch เมตริกตาม `projectId` แล้วเรียก `setValue` ใน `.then` โดยไม่มี `AbortController` เกิดอะไรขึ้นถ้าผู้ใช้สลับจากโปรเจกต์ที่ช้าไปโปรเจกต์ที่เร็ว?',
+    options: [
+      'ไม่มีอะไรเกิดขึ้น — React ละเลย response ที่เก่าให้อัตโนมัติ',
+      'response ของโปรเจกต์ที่ช้าอาจ resolve หลังตัวที่เร็วแล้วเขียนทับค่าที่สดใหม่ด้วยข้อมูลเก่า — พิสูจน์ด้วยคู่ request ที่ตั้งใจให้ช้าแล้วเร็ว',
+      'component throw error',
+      'fetch() ยกเลิก request ของโปรเจกต์ที่ช้าให้อัตโนมัติ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ใน probe แล้ว: สลับจาก projectId ที่ "ช้า" ไปที่ "เร็ว" โดยไม่มี AbortController ทำให้แผงยังแสดงค่าเก่าที่ช้าอยู่ — response ที่ช้า resolve ทีหลังแล้วเขียนทับค่าที่สดใหม่',
+  },
+  {
+    q: 'ตั้งแต่ React 19 `useDeferredValue(value, initialValue)` รับ argument ที่สอง การ*ไม่ใส่*มันเปลี่ยนอะไรใน render แรก?',
+    options: [
+      'ไม่เปลี่ยนอะไรเลยทั้งสองแบบ',
+      'ถ้าไม่มี initialValue hook จะไม่ defer เลยใน render แรก — มันคืนค่าจริงทันที พิสูจน์ด้วยการตรวจสอบว่า component เห็นอะไรจริง ๆ ใน render แรกนั้น',
+      'มัน throw type error',
+      'มันคืน undefined เสมอใน render แรก',
+    ],
+    answer: 1,
+    explain: 'react.dev บอกไว้ตรง ๆ: ถ้าไม่มี initialValue useDeferredValue จะไม่ defer ระหว่าง render แรก พิสูจน์ด้านบน: เวอร์ชันไม่มี initialValue render แรกแสดง list เต็ม ๆ จริง ส่วนเวอร์ชัน (value, []) render แรกแสดง placeholder ว่างเปล่าแทน',
+  },
+  {
+    q: '```jsx\n<ItemDetail item={selected} />\n```\n(ไม่มี `key`) `ItemDetail` มี state `notes` ของตัวเอง ไม่เกี่ยวกับ `item` เกิดอะไรขึ้นกับโน้ตที่พิมพ์ไว้เมื่อ `selected` เปลี่ยนเป็นรายการอื่น?',
+    options: [
+      'notes reset อัตโนมัติ เพราะ item เป็น object ใหม่',
+      'notes ยังอยู่เหมือนเดิม — React อัปเดต prop บน component instance*ตัวเดิม* และไม่มีเหตุผลจะไปแตะ state ที่ไม่มีความเชื่อมโยงเป็นเจ้าของด้วย',
+      'React throw error ว่า state ซ้ำกัน',
+      'notes reset ก็ต่อเมื่อ item.id เปลี่ยนชนิดด้วย',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ใน probe แล้ว: พิมพ์โน้ตร่างของรายการ A แล้วสลับไปรายการ B โดยไม่เปลี่ยน key ข้อความร่างตัวเดิมยังอยู่ใน textarea — ตอนนี้ผูกกับรายการที่ผิดไปแล้ว การเพิ่ม key={item.id} บังคับให้ remount แบบสะอาดแทน',
+  },
+  {
+    q: 'event handler `onClick` ของปุ่มหนึ่ง throw ตรง ๆ และปุ่มนั้นถูกห่อด้วย `ErrorBoundary` จริงที่มี `getDerivedStateFromError` เกิดอะไรขึ้นเมื่อคลิก?',
+    options: [
+      'boundary จับได้แล้วแสดง fallback ของมัน',
+      'boundary ไม่เคยเห็นมันเลย — event handler รันนอก render ของ React ทำให้ error หลุดไปถึง global error channel ของ browser เอง',
+      'React กลืน error ไปเงียบ ๆ',
+      'หน้าเว็บทั้งหน้า reload ใหม่',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ใน probe แล้ว: คลิกปุ่มทำให้เกิด window "error" event จริง (message: "handler-boom") — fallback ของ boundary ไม่เคย render เลย error boundary จับได้แค่ error ตอน render ของ subtree ใต้มันเท่านั้น ไม่เคยจับ throw ของ event handler เอง',
+  },
+];
+
+<Quiz client:visible id="reading-react/worked-review-2" questions={quizWorkedReview2} />
+
+<ProgressTracker client:visible id="reading-worked-2" />

@@ -1,0 +1,800 @@
+---
+title: 'Worked review 1: a todo app with filters, undo, and a stats panel'
+description: 'An AI-generated todo app — filters, an undo history, and a stats panel — reviewed bug by bug against a real Vite + React 19 probe, tsc, and vitest.'
+sidebar:
+  order: 5
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The feature
+
+The prompt was: *"Build a todo app with add/toggle, a filter bar (all/active/completed), an undo history, an auto-clear timer that sweeps completed items after a delay, and a stats panel showing the active count and percent done."* The result below is the kind of first draft an AI assistant hands back — it compiles, `tsc --noEmit` accepts every file, and every piece looks like something you have already seen in this course's Hooks and Foundations modules. Read it the way the [reading order](/react/en/reading-react/) in this module's index recommends: hooks and their dependencies first, then keys and identity, then state ownership, then effects vs events, then memo pairing. It has **6 real bugs**, none of which `tsc --noEmit` catches.
+
+## The generated code
+
+```ts
+// src/todos/types.ts — as generated
+export type Todo = { id: string; text: string; done: boolean };
+export type Filter = 'all' | 'active' | 'completed';
+```
+
+```ts
+// src/todos/useAutoClear.ts — as generated
+import { useEffect, useState } from 'react';
+import type { Todo } from './types';
+
+export function useAutoClear(todos: Todo[], onClear: (ids: string[]) => void) {
+  const [delayMs, setDelayMs] = useState(3000);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const stale = todos.filter((t) => t.done).map((t) => t.id);
+      if (stale.length) onClear(stale);
+    }, delayMs);
+    return () => clearInterval(id);
+  }, []); // empty deps — set up once, on mount
+  return { delayMs, setDelayMs };
+}
+```
+
+```tsx
+// src/todos/TodoItem.tsx — as generated
+import { memo } from 'react';
+import type { Todo } from './types';
+
+const TodoItem = memo(function TodoItem({
+  todo,
+  style,
+  onToggle,
+}: {
+  todo: Todo;
+  style: { opacity: number };
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <li style={style} onClick={() => onToggle(todo.id)}>
+      {todo.text}
+    </li>
+  );
+});
+
+export default TodoItem;
+```
+
+```tsx
+// src/todos/TodoList.tsx — as generated
+import TodoItem from './TodoItem';
+import type { Todo } from './types';
+
+function TodoList({ todos, onToggle }: { todos: Todo[]; onToggle: (id: string) => void }) {
+  return (
+    <ul>
+      {todos.map((todo, i) => (
+        <TodoItem key={i} todo={todo} style={{ opacity: todo.done ? 0.5 : 1 }} onToggle={onToggle} />
+      ))}
+    </ul>
+  );
+}
+
+export default TodoList;
+```
+
+```tsx
+// src/todos/StatsPanel.tsx — as generated
+import { useEffect, useMemo, useState } from 'react';
+import type { Todo } from './types';
+
+function StatsPanel({ todos }: { todos: Todo[] }) {
+  const activeCount = useMemo(() => todos.filter((t) => !t.done).length, []);
+  const [percentDone, setPercentDone] = useState(0);
+
+  useEffect(() => {
+    setPercentDone(todos.length === 0 ? 0 : Math.round(((todos.length - activeCount) / todos.length) * 100));
+  }, [todos, activeCount]);
+
+  return (
+    <dl>
+      <dt>Active</dt>
+      <dd>{activeCount}</dd>
+      <dt>Done</dt>
+      <dd>{percentDone}%</dd>
+    </dl>
+  );
+}
+
+export default StatsPanel;
+```
+
+```tsx
+// src/todos/TodoApp.tsx — as generated
+import { useState } from 'react';
+import { useAutoClear } from './useAutoClear';
+import TodoList from './TodoList';
+import StatsPanel from './StatsPanel';
+import type { Filter, Todo } from './types';
+
+let nextId = 1;
+
+function TodoApp() {
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [history, setHistory] = useState<Todo[][]>([]);
+
+  function addTodo(text: string) {
+    setHistory((h) => [...h, todos]);
+    setTodos((prev) => [...prev, { id: String(nextId++), text, done: false }]);
+  }
+
+  function toggleTodo(id: string) {
+    setHistory((h) => [...h, todos]);
+    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
+  }
+
+  function markAllDone() {
+    todos.forEach((t) => { t.done = true; });
+    setTodos(todos);
+  }
+
+  function undo() {
+    setHistory((h) => {
+      if (h.length === 0) return h;
+      setTodos(h[h.length - 1]);
+      return h.slice(0, -1);
+    });
+  }
+
+  function clearIds(ids: string[]) {
+    setTodos((prev) => prev.filter((t) => !ids.includes(t.id)));
+  }
+
+  useAutoClear(todos, clearIds);
+
+  const visible = todos.filter((t) => {
+    if (filter === 'active') return !t.done;
+    if (filter === 'completed') return t.done;
+    return true;
+  });
+
+  return (
+    <div>
+      <button onClick={() => addTodo(`Task ${nextId}`)}>Add</button>
+      <button onClick={markAllDone}>Mark all done</button>
+      <button onClick={undo} disabled={history.length === 0}>Undo</button>
+      <div role="group">
+        {(['all', 'active', 'completed'] as const).map((f) => (
+          <button key={f} aria-pressed={filter === f} onClick={() => setFilter(f)}>{f}</button>
+        ))}
+      </div>
+      <TodoList todos={visible} onToggle={toggleTodo} />
+      <StatsPanel todos={todos} />
+    </div>
+  );
+}
+
+export default TodoApp;
+```
+
+## The review walk
+
+### Hooks and their dependencies: a stale closure in the auto-clear interval
+
+`useAutoClear` sets up `setInterval` inside a `useEffect` with an **empty** dependency array — so the effect (and the closure the interval callback captures) runs exactly once, on mount.
+
+<SpotTheBug code={`export function useAutoClear(todos, onClear) {
+  const [delayMs, setDelayMs] = useState(3000);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const stale = todos.filter((t) => t.done).map((t) => t.id);
+      if (stale.length) onClear(stale);
+    }, delayMs);
+    return () => clearInterval(id);
+  }, []); // empty deps
+  return { delayMs, setDelayMs };
+}`}>
+The interval callback closes over the **mount-time** `todos` — an empty array, since the app starts with no todos. Adding a done todo later never recreates the interval (the dependency array is empty), so the callback keeps checking that original, empty array forever. Proven in the probe: render the hook, add a done todo, advance the fake timer past `delayMs`, and `onClear` is never called at all.
+
+```text
+✓ useAutoClearBad: the interval keeps reading the EMPTY todos array from mount, forever
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+The fix is `useEffectEvent` (React 19.2): extract the non-reactive read into an Effect Event, which always sees the latest `todos`/`onClear` without ever becoming a dependency of the effect itself.
+</SpotTheBug>
+
+### Hooks and their dependencies: `useMemo` on a trivial value, with an empty dependency array
+
+`StatsPanel`'s `activeCount` is a one-line filter over `todos` — cheap enough that it never needed `useMemo` at all. The AI-generated draft reaches for `useMemo` anyway, and gets the dependency array wrong the way `useMemo`/`useCallback` almost always get it wrong when added out of habit rather than need.
+
+<SpotTheBug code={`const activeCount = useMemo(() => todos.filter((t) => !t.done).length, []);`}>
+An empty dependency array means this memo is computed once, on the first render, and then frozen — `activeCount` never updates again no matter how `todos` changes afterward. Proven in the probe: render with one active todo (`activeCount` shows `1`), add a second active todo, and `activeCount` is still stuck at `1`.
+
+```text
+✓ StatsPanelBad: useMemo([]) freezes activeCount at its first-render value
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+The fix here isn't a corrected dependency array — it's deleting the `useMemo` entirely. `todos.filter(...).length` is cheap enough to compute during every render; wrapping it in `useMemo` added a second place for a dependency array to go stale, for zero performance benefit.
+</SpotTheBug>
+
+### Keys and identity: the array index as the list key
+
+`TodoList` uses the item's position in the array (`i`) as `key`, not a stable id from the data.
+
+<SpotTheBug code={`function TodoList({ todos, onToggle }) {
+  return (
+    <ul>
+      {todos.map((todo, i) => (
+        <TodoItem key={i} todo={todo} style={{ opacity: todo.done ? 0.5 : 1 }} onToggle={onToggle} />
+      ))}
+    </ul>
+  );
+}`}>
+As long as the list never reorders or has an item prepended, this looks completely fine. The moment an item is inserted at the front — exactly what "Undo" and reordering by filter can do — React matches the OLD row's internal state to whatever item now happens to sit at the same index, not to the item it was originally attached to. Proven in the probe with a stand-in checkbox row (an uncontrolled `checked` state, the same shape this bug takes in real forms): check the first row, prepend a new item, and the checked state stays on **position 0** — now a different item entirely.
+
+```text
+✓ key={index}: checking the first row, then prepending an item, bleeds the check to the WRONG row
+✓ key={todo.id}: the same reorder keeps the checked state on the correct row
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+The fix is `key={todo.id}` — a stable id from the data itself, never the row's current position in the array.
+</SpotTheBug>
+
+### State ownership: mutating `todos` before calling `setTodos`
+
+`markAllDone` really does update every todo's `done` field — but it mutates the array in place first.
+
+<SpotTheBug code={`function markAllDone() {
+  todos.forEach((t) => { t.done = true; });
+  setTodos(todos);
+}`}>
+Every item really is mutated (`done: true` in memory), but `setTodos(todos)` passes the **identical array reference** it already had. React's `Object.is` bail-out check sees no change and skips the re-render — the UI keeps showing "not done" until some unrelated state change forces a render, at which point the already-mutated data suddenly appears. Proven in the probe: click "Mark all done" on a component built exactly this way, and the rendered list still reads "not done" — the DOM never updated at all.
+
+```text
+✓ MarkAllDoneBad: mutating then setting the SAME array reference leaves the UI stale
+✓ TodoApp (fixed): markAllDone builds a new array of new objects, so the UI updates
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+The fix is `setTodos(todos.map((t) => ({ ...t, done: true })))` — a new array of new objects, so `Object.is` correctly sees a change.
+</SpotTheBug>
+
+### Effects vs events: syncing a derived stat through an effect
+
+`percentDone` is entirely computable from `todos.length` and `activeCount` — it needs no state and no effect of its own.
+
+<SpotTheBug code={`const [percentDone, setPercentDone] = useState(0);
+useEffect(() => {
+  setPercentDone(todos.length === 0 ? 0 : Math.round(((todos.length - activeCount) / todos.length) * 100));
+}, [todos, activeCount]);`}>
+Syncing a derived value with an effect adds an extra render on every change: the effect fires *after* the render that changed `todos`, with the OLD `percentDone` still showing, then a second render fires with the synced value. It also gives `percentDone` a second place to drift out of sync with the data it's derived from. Nothing here throws or warns — the number is eventually correct, just one render late every time.
+
+The fix is deriving it during render, no state and no effect at all: `const percentDone = todos.length === 0 ? 0 : Math.round(((todos.length - activeCount) / todos.length) * 100)`.
+</SpotTheBug>
+
+### Memo pairing: an inline style object defeats `React.memo`
+
+`TodoItem` is wrapped in `memo`, but `TodoList` builds a brand-new `{ opacity }` object literal on every render of the list — even when a specific todo's `done` value hasn't changed at all.
+
+<SpotTheBug code={`<TodoItem key={i} todo={todo} style={{ opacity: todo.done ? 0.5 : 1 }} onToggle={onToggle} />`}>
+`memo`'s shallow prop comparison always sees a "different" `style` prop, because it IS a different object every render — same shape, same values, different reference. `memo` never gets a chance to skip anything. Proven in the probe: three unrelated parent re-renders (nothing about the todo itself changed) produce three child re-renders with the inline-object version, and exactly one child render across the same three parent re-renders once `TodoItem` takes primitive props instead.
+
+```text
+✓ an inline style object defeats memo: 3 unrelated parent re-renders produce 3 child renders
+✓ TodoItem (fixed): primitive props let memo skip 2 of 3 unrelated parent re-renders
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+The fix is restructuring `TodoItem` to accept `text`/`done` as separate primitive props — primitives compare correctly by value, with no object reference to accidentally rebuild.
+</SpotTheBug>
+
+## The corrected code
+
+```ts
+// src/todos/types.ts
+export type Todo = { id: string; text: string; done: boolean };
+export type Filter = 'all' | 'active' | 'completed';
+```
+
+```ts
+// src/todos/useAutoClear.ts
+import { useEffect, useEffectEvent, useState } from 'react';
+import type { Todo } from './types';
+
+// FIX (stale closure): useEffectEvent always reads the LATEST todos/onClear
+// without becoming a reactive dependency of the effect.
+export function useAutoClear(todos: Todo[], onClear: (ids: string[]) => void) {
+  const [delayMs, setDelayMs] = useState(3000);
+
+  const tick = useEffectEvent(() => {
+    const stale = todos.filter((t) => t.done).map((t) => t.id);
+    if (stale.length) onClear(stale);
+  });
+
+  useEffect(() => {
+    const id = setInterval(tick, delayMs);
+    return () => clearInterval(id);
+  }, [delayMs]); // only delayMs is genuinely reactive here
+
+  return { delayMs, setDelayMs };
+}
+```
+
+```tsx
+// src/todos/TodoItem.tsx
+import { memo } from 'react';
+
+// FIX (memo pairing): primitive props (`text`, `done`) compare correctly by
+// value every render — no inline object literal for `memo` to be defeated by.
+export const TodoItem = memo(function TodoItem({
+  id,
+  text,
+  done,
+  onToggle,
+  onRender,
+}: {
+  id: string;
+  text: string;
+  done: boolean;
+  onToggle: (id: string) => void;
+  onRender?: () => void;
+}) {
+  onRender?.();
+  return (
+    <li style={{ opacity: done ? 0.5 : 1 }} onClick={() => onToggle(id)}>
+      {text}
+    </li>
+  );
+});
+```
+
+```tsx
+// src/todos/TodoList.tsx
+import { TodoItem } from './TodoItem';
+import type { Todo } from './types';
+
+// FIX (keys & identity): key={todo.id}, a stable id from the data — not the
+// row's current position, so state follows the right todo across a reorder.
+export function TodoList({
+  todos,
+  onToggle,
+  onRender,
+}: {
+  todos: Todo[];
+  onToggle: (id: string) => void;
+  onRender?: () => void;
+}) {
+  return (
+    <ul>
+      {todos.map((todo) => (
+        <TodoItem
+          key={todo.id}
+          id={todo.id}
+          text={todo.text}
+          done={todo.done}
+          onToggle={onToggle}
+          onRender={onRender}
+        />
+      ))}
+    </ul>
+  );
+}
+```
+
+```tsx
+// src/todos/StatsPanel.tsx
+import type { Todo } from './types';
+
+// FIX (hooks & deps + effects vs events): both numbers are cheap to compute
+// and are derived straight from `todos` during render — no useMemo (there
+// was nothing expensive enough to justify it) and no effect syncing a copy.
+export function StatsPanel({ todos }: { todos: Todo[] }) {
+  const activeCount = todos.filter((t) => !t.done).length;
+  const percentDone = todos.length === 0 ? 0 : Math.round(((todos.length - activeCount) / todos.length) * 100);
+
+  return (
+    <dl>
+      <dt>Active</dt>
+      <dd data-testid="active-count">{activeCount}</dd>
+      <dt>Done</dt>
+      <dd data-testid="percent-done">{percentDone}%</dd>
+    </dl>
+  );
+}
+```
+
+```tsx
+// src/todos/TodoApp.tsx
+import { useState } from 'react';
+import { useAutoClear } from './useAutoClear';
+import { TodoList } from './TodoList';
+import { StatsPanel } from './StatsPanel';
+import type { Filter, Todo } from './types';
+
+let nextId = 1;
+
+export function TodoApp({ onItemRender }: { onItemRender?: () => void }) {
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [history, setHistory] = useState<Todo[][]>([]);
+
+  function pushHistory(prev: Todo[]) {
+    setHistory((h) => [...h, prev]);
+  }
+
+  function addTodo(text: string) {
+    pushHistory(todos);
+    setTodos((prev) => [...prev, { id: String(nextId++), text, done: false }]);
+  }
+
+  function toggleTodo(id: string) {
+    pushHistory(todos);
+    setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
+  }
+
+  // FIX (state ownership): a NEW array of NEW objects, never the same
+  // reference `todos` already had — Object.is only skips a render when
+  // nothing actually changed, and here everything really did.
+  function markAllDone() {
+    pushHistory(todos);
+    setTodos((prev) => prev.map((t) => ({ ...t, done: true })));
+  }
+
+  function undo() {
+    setHistory((h) => {
+      if (h.length === 0) return h;
+      setTodos(h[h.length - 1]);
+      return h.slice(0, -1);
+    });
+  }
+
+  function clearIds(ids: string[]) {
+    pushHistory(todos);
+    setTodos((prev) => prev.filter((t) => !ids.includes(t.id)));
+  }
+
+  useAutoClear(todos, clearIds);
+
+  const visible = todos.filter((t) => {
+    if (filter === 'active') return !t.done;
+    if (filter === 'completed') return t.done;
+    return true;
+  });
+
+  return (
+    <div>
+      <button onClick={() => addTodo(`Task ${nextId}`)}>Add</button>
+      <button onClick={markAllDone}>Mark all done</button>
+      <button onClick={undo} disabled={history.length === 0}>Undo</button>
+      <div role="group">
+        {(['all', 'active', 'completed'] as const).map((f) => (
+          <button key={f} aria-pressed={filter === f} onClick={() => setFilter(f)}>{f}</button>
+        ))}
+      </div>
+      <TodoList todos={visible} onToggle={toggleTodo} onRender={onItemRender} />
+      <StatsPanel todos={todos} />
+    </div>
+  );
+}
+```
+
+```tsx
+// src/__tests__/todos.test.tsx
+import { memo, useEffect, useMemo, useState } from 'react';
+import { act, render, cleanup, fireEvent } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import type { Todo } from '../todos/types';
+import { useAutoClear } from '../todos/useAutoClear';
+import { TodoItem } from '../todos/TodoItem';
+import { StatsPanel } from '../todos/StatsPanel';
+import { TodoApp } from '../todos/TodoApp';
+
+afterEach(cleanup);
+
+function useAutoClearBad(todos: Todo[], onClear: (ids: string[]) => void) {
+  const [delayMs] = useState(3000);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const stale = todos.filter((t) => t.done).map((t) => t.id);
+      if (stale.length) onClear(stale);
+    }, delayMs);
+    return () => clearInterval(id);
+  }, []);
+}
+
+function AutoClearHarnessBad({ onClear }: { onClear: (ids: string[]) => void }) {
+  const [todos, setTodos] = useState<Todo[]>([]);
+  useAutoClearBad(todos, onClear);
+  return <button onClick={() => setTodos((t) => [...t, { id: 'x', text: 'done one', done: true }])}>add done</button>;
+}
+
+function AutoClearHarnessFixed({ onClear }: { onClear: (ids: string[]) => void }) {
+  const [todos, setTodos] = useState<Todo[]>([]);
+  useAutoClear(todos, onClear);
+  return <button onClick={() => setTodos((t) => [...t, { id: 'x', text: 'done one', done: true }])}>add done</button>;
+}
+
+test('useAutoClearBad: the interval keeps reading the EMPTY todos array from mount, forever', () => {
+  vi.useFakeTimers();
+  const onClear = vi.fn();
+  const { getByRole } = render(<AutoClearHarnessBad onClear={onClear} />);
+  act(() => { getByRole('button').click(); });
+  act(() => { vi.advanceTimersByTime(3000); });
+  expect(onClear).not.toHaveBeenCalled();
+  vi.useRealTimers();
+});
+
+test('useAutoClear (useEffectEvent fix): the interval reads the LATEST todos every tick', () => {
+  vi.useFakeTimers();
+  const onClear = vi.fn();
+  const { getByRole } = render(<AutoClearHarnessFixed onClear={onClear} />);
+  act(() => { getByRole('button').click(); });
+  act(() => { vi.advanceTimersByTime(3000); });
+  expect(onClear).toHaveBeenCalledWith(['x']);
+  vi.useRealTimers();
+});
+
+function StatsPanelBad({ todos }: { todos: Todo[] }) {
+  const activeCount = useMemo(() => todos.filter((t) => !t.done).length, []);
+  const [percentDone, setPercentDone] = useState(0);
+  useEffect(() => {
+    setPercentDone(todos.length === 0 ? 0 : Math.round(((todos.length - activeCount) / todos.length) * 100));
+  }, [todos, activeCount]);
+  return (
+    <dl>
+      <dt>Active</dt>
+      <dd data-testid="active-count">{activeCount}</dd>
+      <dt>Done</dt>
+      <dd data-testid="percent-done">{percentDone}%</dd>
+    </dl>
+  );
+}
+
+test('StatsPanelBad: useMemo([]) freezes activeCount at its first-render value', () => {
+  const { getByTestId, rerender } = render(<StatsPanelBad todos={[{ id: '1', text: 'a', done: false }]} />);
+  expect(getByTestId('active-count').textContent).toBe('1');
+  rerender(<StatsPanelBad todos={[{ id: '1', text: 'a', done: false }, { id: '2', text: 'b', done: false }]} />);
+  expect(getByTestId('active-count').textContent).toBe('1');
+});
+
+test('StatsPanel (fixed): both numbers are derived fresh from todos every render', () => {
+  const { getByTestId, rerender } = render(<StatsPanel todos={[{ id: '1', text: 'a', done: false }]} />);
+  expect(getByTestId('active-count').textContent).toBe('1');
+  rerender(<StatsPanel todos={[{ id: '1', text: 'a', done: false }, { id: '2', text: 'b', done: false }]} />);
+  expect(getByTestId('active-count').textContent).toBe('2');
+});
+
+function RowBad({ label }: { label: string }) {
+  const [checked, setChecked] = useState(false);
+  return <label><input type="checkbox" checked={checked} onChange={() => setChecked((c) => !c)} />{label}</label>;
+}
+
+function ListBad({ items }: { items: { id: string; label: string }[] }) {
+  return <ul>{items.map((item, i) => <li key={i}><RowBad label={item.label} /></li>)}</ul>;
+}
+
+function ListGood({ items }: { items: { id: string; label: string }[] }) {
+  return <ul>{items.map((item) => <li key={item.id}><RowBad label={item.label} /></li>)}</ul>;
+}
+
+test('key={index}: checking the first row, then prepending an item, bleeds the check to the WRONG row', () => {
+  const items = [{ id: 'a', label: 'Alpha' }, { id: 'b', label: 'Bravo' }];
+  const { container, rerender } = render(<ListBad items={items} />);
+  fireEvent.click(container.querySelectorAll('input')[0]);
+  rerender(<ListBad items={[{ id: 'z', label: 'Zulu' }, ...items]} />);
+  const states = Array.from(container.querySelectorAll('input')).map((el) => (el as HTMLInputElement).checked);
+  expect(states).toEqual([true, false, false]);
+});
+
+test('key={todo.id}: the same reorder keeps the checked state on the correct row', () => {
+  const items = [{ id: 'a', label: 'Alpha' }, { id: 'b', label: 'Bravo' }];
+  const { container, rerender } = render(<ListGood items={items} />);
+  fireEvent.click(container.querySelectorAll('input')[0]);
+  rerender(<ListGood items={[{ id: 'z', label: 'Zulu' }, ...items]} />);
+  const states = Array.from(container.querySelectorAll('input')).map((el) => (el as HTMLInputElement).checked);
+  expect(states).toEqual([false, true, false]);
+});
+
+function MarkAllDoneBad({ initial }: { initial: Todo[] }) {
+  const [todos, setTodos] = useState<Todo[]>(initial);
+  function markAllDone() {
+    todos.forEach((t) => { t.done = true; });
+    setTodos(todos);
+  }
+  return (
+    <div>
+      <button onClick={markAllDone}>Mark all done</button>
+      <ul>{todos.map((t) => <li key={t.id}>{t.text} — {t.done ? 'done' : 'not done'}</li>)}</ul>
+    </div>
+  );
+}
+
+test('MarkAllDoneBad: mutating then setting the SAME array reference leaves the UI stale', () => {
+  const { getByRole, getAllByRole } = render(
+    <MarkAllDoneBad initial={[{ id: '1', text: 'Task', done: false }]} />,
+  );
+  fireEvent.click(getByRole('button'));
+  expect(getAllByRole('listitem')[0].textContent).toContain('not done');
+});
+
+test('TodoApp (fixed): markAllDone builds a new array of new objects, so the UI updates', () => {
+  const { getByText, getAllByRole } = render(<TodoApp />);
+  fireEvent.click(getByText('Add'));
+  fireEvent.click(getByText('Mark all done'));
+  const items = getAllByRole('listitem');
+  expect(items.length).toBeGreaterThan(0);
+  items.forEach((li) => expect(li.style.opacity).toBe('0.5'));
+});
+
+const RowBadMemo = memo(function RowBadMemo({ style, text, onRender }: { style: { opacity: number }; text: string; onRender: () => void }) {
+  onRender();
+  return <li style={style}>{text}</li>;
+});
+
+function ParentBad({ todo, onRender }: { todo: Todo; onRender: () => void }) {
+  return <RowBadMemo style={{ opacity: todo.done ? 0.5 : 1 }} text={todo.text} onRender={onRender} />;
+}
+
+test('an inline style object defeats memo: 3 unrelated parent re-renders produce 3 child renders', () => {
+  const onRender = vi.fn();
+  const todo: Todo = { id: '1', text: 'a', done: false };
+  const { rerender } = render(<ParentBad todo={todo} onRender={onRender} />);
+  rerender(<ParentBad todo={todo} onRender={onRender} />);
+  rerender(<ParentBad todo={todo} onRender={onRender} />);
+  expect(onRender).toHaveBeenCalledTimes(3);
+});
+
+test('TodoItem (fixed): primitive props let memo skip 2 of 3 unrelated parent re-renders', () => {
+  const onRender = vi.fn();
+  const todo: Todo = { id: '1', text: 'a', done: false };
+  const stableOnToggle = () => {};
+  function Parent() {
+    return <TodoItem id={todo.id} text={todo.text} done={todo.done} onToggle={stableOnToggle} onRender={onRender} />;
+  }
+  const { rerender } = render(<Parent />);
+  rerender(<Parent />);
+  rerender(<Parent />);
+  expect(onRender).toHaveBeenCalledTimes(1);
+});
+```
+
+Type-checked clean against `tsc --noEmit` (strict, `noUnusedLocals`/`noUnusedParameters`, React 19 types) and run against the exact test file above:
+
+```text
+✓ useAutoClearBad: the interval keeps reading the EMPTY todos array from mount, forever
+✓ useAutoClear (useEffectEvent fix): the interval reads the LATEST todos every tick
+✓ StatsPanelBad: useMemo([]) freezes activeCount at its first-render value
+✓ StatsPanel (fixed): both numbers are derived fresh from todos every render
+✓ key={index}: checking the first row, then prepending an item, bleeds the check to the WRONG row
+✓ key={todo.id}: the same reorder keeps the checked state on the correct row
+✓ MarkAllDoneBad: mutating then setting the SAME array reference leaves the UI stale
+✓ TodoApp (fixed): markAllDone builds a new array of new objects, so the UI updates
+✓ an inline style object defeats memo: 3 unrelated parent re-renders produce 3 child renders
+✓ TodoItem (fixed): primitive props let memo skip 2 of 3 unrelated parent re-renders
+
+Test Files  1 passed (1)
+     Tests  10 passed (10)
+```
+
+## What changed and why
+
+| # | Bug | Category | Fix |
+|---|---|---|---|
+| 1 | `setInterval` effect with `[]` deps closes over the mount-time `todos` forever | Hooks & deps | `useEffectEvent` to read the latest `todos`/`onClear` without becoming a dependency |
+| 2 | `useMemo(() => todos.filter(...).length, [])` freezes `activeCount` | Hooks & deps | Delete the `useMemo` — the computation is cheap enough to run every render |
+| 3 | `key={i}` on a reorderable list | Keys & identity | `key={todo.id}` — a stable id from the data |
+| 4 | `todos.forEach(t => t.done = true); setTodos(todos)` — same reference | State ownership | `setTodos(todos.map(t => ({ ...t, done: true })))` — a new array of new objects |
+| 5 | `percentDone` synced through a `useEffect` | Effects vs events | Derive it during render — no state, no effect |
+| 6 | An inline `{ opacity }` object passed to a `memo`-wrapped `TodoItem` | Memo pairing | Primitive `text`/`done` props — nothing for a fresh object reference to defeat |
+
+## Mental Model
+
+All six of these bugs compile clean and every one of them looks plausible reading the code once. None of them throw, none of them warn, and none of them are caught by `tsc --noEmit` — every single one is a claim about *behavior over time* (across a reorder, across a tick, across an unrelated re-render) that a single render can never disprove. That is exactly why this review ran a real Vite + React probe with fake timers, reorders, and render counters instead of reasoning about the code from the page.
+
+## Common Misconceptions
+
+- **"It compiles and the list renders correctly, so it's fine."** Every bug in this review produces a perfectly normal-looking list on the very first render. All six only show up on a *second* interaction: a tick, a reorder, an unrelated re-render, or a state change three renders later.
+- **"`useMemo`/`useCallback` are free insurance — more memoization is always safer."** `useMemo([])` here didn't just waste the memoization; the wrong-forever dependency array turned a working computation into a frozen, stale one. Wrapping something in `useMemo` needs its OWN correctness check, not just a check on the thing being memoized.
+- **"A `key` on every list item means the list identity is handled."** `key={i}` genuinely is a key — it just isn't a *stable* one. React's dev-mode "missing key" warning never fires here, because a key really is present.
+
+<Mermaid title="Where each bug sits in the reading order" code={wr1Diagram} />
+
+export const wr1Diagram = `flowchart TD
+  A["1. Hooks and their dependencies"] --> A1["setInterval effect with [] deps"]
+  A --> A2["useMemo([]) on a trivial value"]
+  B["2. Keys and identity"] --> B1["key={index} on a reorderable list"]
+  C["3. State ownership"] --> C1["mutate todos, then setTodos(todos)"]
+  D["4. Effects vs events"] --> D1["percentDone synced through useEffect"]
+  E["5. Memo pairing"] --> E1["inline style object defeats memo"]
+`;
+
+<Callout title="The one-line takeaway">
+Every bug in this review compiles clean, warns about nothing, and looks correct on the first render — because each one is a claim about behavior across time (a tick, a reorder, an unrelated re-render) that only a real running probe, not a read-through, can actually check.
+</Callout>
+
+export const quizWorkedReview1 = [
+  {
+    q: "```tsx\nuseEffect(() => {\n  const id = setInterval(() => {\n    const stale = todos.filter((t) => t.done).map((t) => t.id);\n    if (stale.length) onClear(stale);\n  }, delayMs);\n  return () => clearInterval(id);\n}, []);\n```\nWhy does this interval never clear a todo that was marked done AFTER the component mounted?",
+    options: [
+      'setInterval always runs in a global scope with no closures',
+      'The empty dependency array means the effect (and the closure the interval captures) runs exactly once — the callback keeps reading the mount-time `todos`, forever',
+      'onClear is called but does nothing',
+      'React throws a warning that gets swallowed',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: adding a done todo after mount never triggers onClear, because the interval callback closes over the original, empty todos array from the render that set up the effect.',
+  },
+  {
+    q: '`activeCount` is computed with `useMemo(() => todos.filter((t) => !t.done).length, [])`. What happens to `activeCount` after the FIRST render?',
+    options: [
+      'It recomputes correctly on every render, same as without useMemo',
+      'It freezes at its first-render value — the empty dependency array means it is never recomputed again',
+      'It throws a type error',
+      'It recomputes only when the component unmounts',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: rendering with one active todo shows activeCount=1; adding a second active todo still shows activeCount=1 — stuck at the first render.',
+  },
+  {
+    q: "```jsx\n{todos.map((todo, i) => (\n  <TodoItem key={i} todo={todo} />\n))}\n```\nWhat is observed when the first row is checked and then a new item is PREPENDED to the list?",
+    options: [
+      'Nothing changes — index keys work fine as long as a key is present',
+      'The checked state stays on position 0 — now a different todo entirely, proven with a reorder test',
+      'React throws a duplicate-key error',
+      'The whole list remounts and loses all state',
+    ],
+    answer: 1,
+    explain: 'key={i} ties internal state to a POSITION, not an identity. Prepending an item shifts every other item to a new index, so React reattaches the old state to whatever item now sits at that same index.',
+  },
+  {
+    q: "```ts\nfunction markAllDone() {\n  todos.forEach((t) => { t.done = true; });\n  setTodos(todos);\n}\n```\nWhy does the UI keep showing \"not done\" right after calling this?",
+    options: [
+      'forEach does not actually run the callback',
+      '`setTodos(todos)` passes the SAME array reference the state already had — React\'s Object.is bail-out sees no change and skips the re-render, even though every item was really mutated',
+      'markAllDone throws a runtime error',
+      'The bug only appears in StrictMode',
+    ],
+    answer: 1,
+    explain: "Proven in the probe: clicking 'Mark all done' on a component built exactly this way leaves the rendered list reading 'not done' — the mutation happened in memory, but the same-reference setTodos call never triggers a re-render.",
+  },
+  {
+    q: 'Why is syncing `percentDone` through a `useEffect` (reading `todos`/`activeCount`, calling `setPercentDone`) considered a bug even though the number is eventually correct?',
+    options: [
+      'It is not a bug — effects are the right tool for any derived value',
+      'It adds an extra render every time `todos` changes (old value shows first, then the effect fires and a second render shows the synced value), and gives the value a second place to drift out of sync',
+      'useEffect cannot read state at all',
+      'It causes an infinite loop',
+    ],
+    answer: 1,
+    explain: "You probably don't need an effect for this: percentDone is fully derivable from todos.length and activeCount during render, with no state and no effect needed at all — the effect version is correct but always one render late and doubles the places this value lives.",
+  },
+  {
+    q: '```jsx\n<TodoItem key={i} todo={todo} style={{ opacity: todo.done ? 0.5 : 1 }} />\n```\n`TodoItem` is wrapped in `React.memo`. What happens on an unrelated parent re-render where no todo actually changed?',
+    options: [
+      'memo skips the re-render, since todo.done did not change',
+      'TodoItem re-renders anyway — the inline `{ opacity }` object is a brand-new reference every render, so memo\'s shallow comparison always sees a "different" prop',
+      'React throws because objects cannot be passed as props',
+      'The style is simply ignored',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: 3 unrelated parent re-renders produce 3 child re-renders with the inline-object version, and exactly 1 child render across the same 3 parent re-renders once TodoItem takes primitive text/done props instead.',
+  },
+];
+
+<Quiz client:visible id="reading-react/worked-review-1" questions={quizWorkedReview1} />
+
+<ProgressTracker client:visible id="reading-worked-1" />
