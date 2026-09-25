@@ -1,6 +1,6 @@
 ---
 title: 'Context'
-description: 'createContext และ useContext, เมื่อไร Context เป็นเครื่องมือที่ถูก และเมื่อไรกลับทำร้าย performance, การ split context และทำไม Context ไม่ใช่ state manager'
+description: 'createContext และ useContext/use, React 19 render <Context> ตรง ๆ เป็น provider, provider value identity เทียบกับ memo, การ split context และทำไม Context ไม่มี selector'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Context: teleport ค่าลงไปทั้ง subtree
 
@@ -38,11 +39,128 @@ function Button() {
 
 `Button` ได้ `theme` ไม่ว่าจะอยู่ลึกแค่ไหน และไม่มี component ตรงกลางต้องส่งต่อค่านั้น นี่คือทางแก้ prop drilling เมื่อ composition เอื้อมไปถึง consumer ไม่ได้
 
+## React 19: `<Context>` *คือ* provider เอง
+
+ก่อน React 19 วิธีเดียวที่จะ provide ค่า context คือ `<ThemeContext.Provider value={...}>` React 19 ให้ render context object เองเป็น component ได้เลย — `<ThemeContext value={...}>` — และมันทำหน้าที่เป็น provider [เอกสาร `createContext`](https://react.dev/reference/react/createContext#provider) บอกตรง ๆ ว่า
+
+> Starting in React 19, you can render `<SomeContext>` as a provider. In older versions of React, use `<SomeContext.Provider>`.
+
+`.Provider` ไม่ได้ถูกลบ — ทั้งสองแบบ provide context เหมือนกัน — แต่โค้ดใหม่ควรเลือกแบบสั้นก่อน
+
+```tsx
+// src/components/ThemeApp.tsx
+import { createContext, useContext, useState } from 'react';
+
+export const ThemeContext = createContext('light');
+
+export function ThemeApp() {
+  const [theme, setTheme] = useState('dark');
+  return (
+    // React 19: <ThemeContext> itself is the provider — no `.Provider`.
+    <ThemeContext value={theme}>
+      <ThemeLabel />
+      <button onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}>
+        toggle
+      </button>
+    </ThemeContext>
+  );
+}
+
+function ThemeLabel() {
+  const theme = useContext(ThemeContext);
+  return <span>{theme}</span>;
+}
+```
+
+```tsx
+// src/__tests__/context-direct-provider.test.tsx
+import { render, screen, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { ThemeApp } from '../components/ThemeApp';
+
+afterEach(cleanup);
+
+test('React 19 renders <Context> directly as its own provider — no .Provider needed', () => {
+  render(<ThemeApp />);
+  expect(screen.getByText('dark')).toBeInTheDocument();
+});
+```
+
+```text
+✓ React 19 renders <Context> directly as its own provider — no .Provider needed
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## `use(Context)`: อ่าน context แบบมีเงื่อนไข
+
+`useContext` ต้องถูกเรียกแบบไม่มีเงื่อนไขที่ top level ของ component เหมือน Hook ทั่วไป `use` อ่าน context แบบเดียวกัน แต่[เอกสาร `use`](https://react.dev/reference/react/use) บอกชัดว่ามันตัดข้อจำกัดนั้นออก
+
+> Unlike `useContext`, `use` can be called within loops and conditional statements like `if`.
+
+นั่นสำคัญสำหรับ component ที่ต้องการค่า context แค่ตาม branch เดียว — ด้วย `useContext` คุณต้องอ่านมันแบบไม่มีเงื่อนไข (แล้วอาจไม่ได้ใช้ หรือต้อง restructure component) แต่ด้วย `use` คุณอ่านมันตรงจุดที่ต้องการพอดี
+
+```tsx
+// src/components/ConditionalThemeReader.tsx
+import { createContext, use } from 'react';
+
+export const LabelContext = createContext('light');
+
+export function ConditionalThemeReader({ show }: { show: boolean }) {
+  let label = 'hidden';
+  if (show) {
+    // Unlike useContext, `use` is allowed inside a conditional block.
+    label = use(LabelContext);
+  }
+  return <span>{label}</span>;
+}
+```
+
+```tsx
+// src/__tests__/use-context-conditional.test.tsx
+import { render, screen, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { ConditionalThemeReader, LabelContext } from '../components/ConditionalThemeReader';
+
+afterEach(cleanup);
+
+test('use(Context) reads the value when the conditional branch runs', () => {
+  render(
+    <LabelContext value="dark">
+      <ConditionalThemeReader show={true} />
+    </LabelContext>,
+  );
+  expect(screen.getByText('dark')).toBeInTheDocument();
+});
+
+test('use(Context) is simply never called when the branch does not run', () => {
+  render(
+    <LabelContext value="dark">
+      <ConditionalThemeReader show={false} />
+    </LabelContext>,
+  );
+  expect(screen.getByText('hidden')).toBeInTheDocument();
+});
+```
+
+```text
+✓ use(Context) reads the value when the conditional branch runs
+✓ use(Context) is simply never called when the branch does not run
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`use` ยังคงค้นหาขึ้นไปหา provider ที่ใกล้ที่สุด *เหนือ* component ที่เรียกมัน เหมือน `useContext` ทุกอย่าง — แค่ไม่ถูกตรึงให้อยู่บนสุดของ function เท่านั้น
+
 ## เมื่อไร Context เหมาะ — และเมื่อไรกลับเจ็บ
 
 Context ถูกออกแบบมาสำหรับค่าที่ **แชร์กว้างและเปลี่ยนไม่บ่อย**: theme, user/auth ปัจจุบัน, locale, config ของ design-system สิ่งที่หลาย component อ่านแต่เปลี่ยนน้อย
 
-จุดที่ต้องระวังคือ performance: **เมื่อ value ของ provider เปลี่ยน ทุก consumer จะ re-render** — และ React หยุดการ re-render นั้นด้วย `memo` ไม่ได้ เพราะ consumer subscribe context โดยตรง
+จุดที่ต้องระวังคือ performance: **เมื่อ value ของ provider เปลี่ยน ทุก consumer จะ re-render** — และ React หยุดการ re-render นั้นด้วย `memo` ไม่ได้ เพราะ consumer subscribe context โดยตรง [เอกสาร `useContext`](https://react.dev/reference/react/useContext#caveats) ระบุเป็น caveat ตรง ๆ
+
+> React automatically re-renders all the children that use a particular context starting from the provider that receives a different `value`. [...] Skipping re-renders with `memo` does not prevent the children receiving fresh context values.
 
 <Mermaid title="value ของ context เปลี่ยนทีทำให้ทุก consumer re-render" code={ctxDiagram} />
 
@@ -54,10 +172,101 @@ export const ctxDiagram = `flowchart TB
 
 ดังนั้นการเอา state ที่ **เปลี่ยนเร็ว** (เช่นค่าที่ update ทุก keystroke หรือทุก animation frame) ไปใส่ context กว้าง ๆ ตัวเดียวคือกับดัก performance — จะ re-render ทั้ง subtree ตลอดเวลา
 
-มีสองวิธีบรรเทา:
+### พิสูจน์: provider value ใหม่ทำให้ memoized consumer re-render ทุกครั้ง
 
-- **Split context.** แยกค่าที่ไม่เกี่ยวกันไว้คนละ provider เพื่อให้การเปลี่ยนตัวหนึ่งไม่ re-render consumer ของอีกตัว การ split ที่พบบ่อย: context หนึ่งสำหรับ *state* และอีกหนึ่งสำหรับ *dispatch/updater* (updater stable อยู่แล้ว ดังนั้น component ที่ dispatch อย่างเดียวจะไม่ re-render)
-- **ทำให้ value stable.** memoize object `value` ของ provider เพื่อไม่ให้ได้ reference ใหม่ทุกครั้งที่ parent render
+กับดักนี้แนบเนียนเพราะไม่ต้องการให้ *ข้อมูล* เปลี่ยนเลยด้วยซ้ำ — object literal ใหม่ที่มี field เหมือนเดิมทุกอย่างก็พอแล้ว เพราะ React เทียบ `value` ของ provider ด้วย reference (`Object.is`) ไม่ใช่ deep equality
+
+```tsx
+// src/components/LabelProvider.tsx
+import { createContext, useContext, useState, useMemo, memo } from 'react';
+
+type Ctx = { label: string };
+export const LabelContext = createContext<Ctx>({ label: '' });
+
+export const Consumer = memo(function Consumer({ onRender }: { onRender: () => void }) {
+  const { label } = useContext(LabelContext);
+  onRender();
+  return <span>{label}</span>;
+});
+
+export function UnstableValueApp({ onChildRender }: { onChildRender: () => void }) {
+  const [tick, setTick] = useState(0);
+  // ❌ A brand-new object every render — even though `label` never changes.
+  return (
+    <LabelContext value={{ label: 'fixed' }}>
+      <Consumer onRender={onChildRender} />
+      <button onClick={() => setTick((t) => t + 1)}>{tick}</button>
+    </LabelContext>
+  );
+}
+
+export function StableValueApp({ onChildRender }: { onChildRender: () => void }) {
+  const [tick, setTick] = useState(0);
+  // ✅ Memoized — same reference across renders, so memo can bail out.
+  const value = useMemo(() => ({ label: 'fixed' }), []);
+  return (
+    <LabelContext value={value}>
+      <Consumer onRender={onChildRender} />
+      <button onClick={() => setTick((t) => t + 1)}>{tick}</button>
+    </LabelContext>
+  );
+}
+```
+
+```tsx
+// src/__tests__/context-value-identity.test.tsx
+import { render, screen, cleanup, act } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { UnstableValueApp, StableValueApp } from '../components/LabelProvider';
+
+afterEach(cleanup);
+
+test('an inline provider value re-renders a memoized consumer on every unrelated update', () => {
+  let renders = 0;
+  render(<UnstableValueApp onChildRender={() => renders++} />);
+  const baseline = renders;
+
+  act(() => { screen.getByRole('button').click(); });
+  act(() => { screen.getByRole('button').click(); });
+
+  // Two unrelated parent re-renders (the tick counter) still re-rendered the
+  // memoized consumer twice, because it got a brand-new context value object
+  // both times — memo cannot see past the reference change.
+  expect(renders - baseline).toBe(2);
+});
+
+test("a useMemo'd provider value lets memo bail the consumer out", () => {
+  let renders = 0;
+  render(<StableValueApp onChildRender={() => renders++} />);
+  const baseline = renders;
+
+  act(() => { screen.getByRole('button').click(); });
+  act(() => { screen.getByRole('button').click(); });
+
+  // Same two clicks, but the context value's reference never changes, so
+  // memo bails the consumer out of both re-renders.
+  expect(renders - baseline).toBe(0);
+});
+```
+
+```text
+✓ an inline provider value re-renders a memoized consumer on every unrelated update
+✓ a useMemo'd provider value lets memo bail the consumer out
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+มีสองวิธีบรรเทาบั๊กกลุ่มนี้:
+
+- **Split context.** แยกค่าที่ไม่เกี่ยวกันไว้คนละ provider เพื่อให้การเปลี่ยนตัวหนึ่งไม่ re-render consumer ของอีกตัว การ split ที่พบบ่อย: context หนึ่งสำหรับ *state* และอีกหนึ่งสำหรับ *dispatch/updater* (updater stable อยู่แล้ว ดังนั้น component ที่ dispatch อย่างเดียวจะไม่ re-render) — บท `useReducer` จะสร้าง pattern นี้แบบเต็ม ๆ
+- **ทำให้ value stable.** memoize object `value` ของ provider (`useMemo`) เพื่อไม่ให้ได้ reference ใหม่ทุกครั้งที่ parent render ตามที่พิสูจน์ไว้ข้างบน
+
+## Context ไม่มี selector
+
+การ split context เป็นการแก้แบบ manual ตอน design-time — คุณตัดสินใจไว้ล่วงหน้าว่า field ไหนอยู่ provider ไหน สิ่งที่ Context ทำ*ไม่ได้*คือให้ consumer หนึ่งไปแบบไดนามิก subscribe แค่ "field `x` ของ object นี้" ในขณะที่อีกตัว subscribe แค่ "field `y`" จาก context *เดียวกัน*: การเปลี่ยน value ของ provider ตัวไหนก็ตามทำให้ทุก consumer ของ context นั้น re-render หมด ไม่ว่า consumer ตัวนั้นจะอ่าน field ไหนจริง ๆ ก็ตาม
+
+selector ของ external store (`useStore(s => s.x)`) re-render component แค่เมื่อ *ส่วนที่เลือก* เปลี่ยน โดยเทียบค่าที่แคบกว่านั้นแทนที่จะเทียบทั้ง store Context ไม่มีกลไกแบบนี้ — มันเทียบทั้ง reference ของ `value` เมื่อแอปมี consumer หลายตัวที่แต่ละตัวสนใจ slice แคบ ๆ คนละส่วนของ value ก้อนใหญ่ที่เปลี่ยนบ่อย นั่นคือสัญญาณให้ข้าม Context ไปหา external store (บทถัดไป)
 
 ## Context ไม่ใช่ state manager
 
@@ -70,8 +279,59 @@ function AuthProvider({ children }) {
 }
 ```
 
+## Mental Model
+
+มองว่า context เป็น **การกระจายเสียงวิทยุ** ไม่ใช่ตู้จดหมาย: provider ส่ง `value` หนึ่งค่า และทุก component ที่จูนคลื่นเดียวกัน (ทุกการเรียก `useContext`/`use` กับ context นั้น ไม่ว่าจะอยู่ที่ไหนข้างล่าง) รับสัญญาณเดียวกันพร้อมกัน ไม่ว่าจะอยากได้ update ครั้งนี้หรือไม่ก็ตาม ไม่มีทางกระจายเสียงแยกความถี่ย่อยภายในสถานีเดียวได้ — นั่นคือความหมายของ "ไม่มี selector" ถ้าผู้ฟังแต่ละคนต้องการความถี่ update ต่างกัน คุณต้องแยกสถานี (split context) หรือใช้เครื่องรับที่ออกแบบมาเพื่อสิ่งนั้นโดยเฉพาะ (selector ของ external store)
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| `<Context>` provider ตรง ๆ (React 19) | สั้นกว่า ไม่ต้องจำ `.Provider` | ต้องใช้ React 19+; เวอร์ชันเก่ายังต้องใช้ `.Provider` |
+| `use(Context)` | เรียกแบบมีเงื่อนไข/ใน loop ได้ | คุ้นเคยน้อยกว่า `useContext` เล็กน้อย; caveat การค้นหาขึ้นไปยังเหมือนเดิม |
+| Context กว้างตัวเดียว | ตั้งค่าง่าย | value เปลี่ยนตัวไหนก็ re-render ทุก consumer, `memo` ช่วยไม่ได้ |
+| Split context (state กับ dispatch) | consumer ที่ dispatch อย่างเดียวไม่ re-render เลย | ต้อง wire provider เพิ่ม |
+| Provider value ผ่าน `useMemo` | กัน re-render จาก object literal ใหม่ | ต้องดูแล dependency array อีกหนึ่งจุด |
+| External store (บทถัดไป) | selector ต่อ slice จริง ๆ | อยู่นอก React; ต้องเรียนรู้ API เพิ่ม |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`memo` บน consumer ป้องกันมันจาก context update ได้"** ไม่ได้ — `memo` เช็กแค่ props การเปลี่ยน value ของ context ทำให้ทุก consumer re-render ไม่ว่าจะมี `memo` หรือไม่ ตามที่ react.dev ระบุตรง ๆ และพิสูจน์แล้วข้างบน
+- **"ถ้า *ข้อมูล* ข้างใน value object ไม่เปลี่ยน consumer จะไม่ re-render"** จะ re-render ถ้า value เป็น object literal ใหม่ — React เทียบ value ของ provider ด้วย reference ไม่ใช่ deep equality
+- **"Split context เหมือนกับ selector"** Split เป็นการตัดสินใจแบบ manual ตอน compile-time ว่า field ไหนอยู่ไหน ส่วน selector เลือก slice ของ value *ก้อนเดียว* แบบไดนามิกตอนอ่าน — Context ไม่มีกลไกแบบนั้น
+- **"Context แทนที่ `useState`/`useReducer` ได้"** มันแค่ขนส่งสิ่งที่ `useState`/`useReducer` คำนวณไว้แล้ว — state ยังอยู่ใน component ที่เป็น provider
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ review component ที่เป็น Provider ที่ generate มา ให้เช็กสิ่งเหล่านี้ก่อนเชื่อมัน:
+
+- JSX ของ provider สร้าง prop `value` แบบ inline (`value={{ ... }}` หรือ `value={[a, b]}`) แทนที่จะส่ง variable ที่เก็บไว้ใน `useMemo`/`useState` ไหม? นั่นคือ reference ใหม่ทุก render และทุก consumer จะ re-render — แม้จะห่อด้วย `memo` ก็ตาม
+- context เดียวถือทั้งข้อมูลที่เปลี่ยนช้า (เช่น user ที่ login) และข้อมูลที่เปลี่ยนเร็ว (เช่นตำแหน่ง cursor สด หรือทุก keystroke ของฟอร์ม) ไหม? สิ่งนี้ควรถูก split เป็นสอง context หรือย้ายไป external store
+- โค้ดสมมติว่าห่อ consumer ด้วย `memo` จะหยุดมันจาก re-render ตอน context เปลี่ยนไหม? มันหยุดไม่ได้ — ตรวจว่า *value ของ provider* stable หรือเปล่าแทนการเพิ่ม `memo` ที่ consumer
+- `use(Context)` ถูกเรียกในที่ที่ `useContext` ก็ใช้ได้ปกติ (call แบบไม่มีเงื่อนไขที่ top level) ไหม? ทั้งสองแบบถูกต้องเหมือนกันตรงนั้น — แต่ถ้าเห็น `use` อยู่ใน `if`/loop นั่นคือเหตุผลที่ต้องใช้ `use` ไม่ใช่ `useContext` ไม่ใช่ความผิดพลาด
+- component อ่าน context value ทั้งก้อนแค่เพื่อโชว์ field เดียวไหม ทั้งที่ `useReducer` + split context (หรือ selector ของ external store) จะแยกมันออกจาก update ที่ไม่เกี่ยวได้?
+
+<SpotTheBug code={`function CartProvider({ children }) {
+  const [items, setItems] = useState([]);
+  const [user, setUser] = useState(null);
+
+  return (
+    <CartContext
+      value={{
+        items,
+        user,
+        addItem: (item) => setItems((prev) => [...prev, item]),
+      }}
+    >
+      {children}
+    </CartContext>
+  );
+}`}>
+object `value` ถูกสร้างแบบ inline ทุก render ของ `CartProvider` — object ใหม่เสมอ แม้ว่าทั้ง `items` และ `user` จะไม่ได้เปลี่ยนเลยก็ตาม ทุก consumer ของ `CartContext` จะ re-render ทุกครั้งที่ `CartProvider` re-render ไม่ว่าจะด้วยเหตุผลอะไร (เช่น parent ที่ไม่เกี่ยวข้อง update state) และ `memo` บน consumer เหล่านั้นหยุดมันไม่ได้ ตรงตามที่พิสูจน์แล้วข้างบนด้วย `UnstableValueApp` ทางแก้คือ `useMemo(() => ({ items, user, addItem }), [items, user, addItem])` (พร้อมห่อ `addItem` เองด้วย `useCallback`) — ตอนนี้ value จะได้ reference ใหม่ก็ต่อเมื่อ `items` หรือ `user` เปลี่ยนจริง ๆ เท่านั้น
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-Context teleport ค่าไปยัง descendant ตัวไหนก็ได้ผ่าน `useContext` แก้ prop drilling สำหรับข้อมูลที่ **แชร์กว้างและเปลี่ยนช้า** (theme, auth, locale) แต่ทุก consumer จะ re-render เมื่อ value ของ provider เปลี่ยน — และ `memo` หยุดไม่ได้ — ดังนั้นเอา state ที่เปลี่ยนเร็วออกจาก context กว้าง ๆ, **split context** (มักเป็น state กับ dispatch) และ memoize value Context เป็น *ขนส่ง* ไม่ใช่ state manager: state ยังอยู่ใน `useState`/`useReducer`
+Context teleport ค่าไปยัง descendant ตัวไหนก็ได้ผ่าน `useContext` หรือ `use` ที่ยืดหยุ่นกว่า (เรียกในเงื่อนไข/loop ได้) และ React 19 ให้ render `<Context>` เองเป็น provider ได้เลย มันแก้ prop drilling สำหรับข้อมูลที่ **แชร์กว้างและเปลี่ยนช้า** — แต่ทุก consumer จะ re-render เมื่อ provider value เปลี่ยน reference, `memo` หยุดไม่ได้ และ Context **ไม่มี selector** สำหรับแยก slice ทำให้ value stable ด้วย `useMemo`, **split context** (มักเป็น state กับ dispatch) และหันไป external store เมื่อ consumer แต่ละตัวต้องการความถี่ update ต่างกัน Context เป็น *ขนส่ง* ไม่ใช่ state manager: state ยังอยู่ใน `useState`/`useReducer`
 </Callout>
 
 export const quizCtx = [
@@ -84,6 +344,7 @@ export const quizCtx = [
       'จัด style ให้ component',
     ],
     answer: 1,
+    explain: 'Context เป็นกลไกขนส่ง: มันส่งค่าไปยัง descendant ที่อ่านมัน โดยข้ามทุก component ตรงกลางที่ไม่เกี่ยวข้อง',
   },
   {
     q: 'เกิดอะไรกับ consumer เมื่อ value ของ context provider เปลี่ยน?',
@@ -94,6 +355,7 @@ export const quizCtx = [
       'เฉพาะ consumer ตัวแรกที่ re-render',
     ],
     answer: 1,
+    explain: 'react.dev ระบุตรง ๆ: React re-render children ทุกตัวที่ใช้ context นั้นเริ่มจาก provider ลงไป และ memo ไม่ได้ป้องกันไม่ให้มันได้ value ใหม่',
   },
   {
     q: 'ทำไม Context ถึง "ไม่ใช่ state manager"?',
@@ -104,6 +366,7 @@ export const quizCtx = [
       'รันบน server',
     ],
     answer: 1,
+    explain: 'Context ไม่เคยถือ state เอง — useState หรือ useReducer ใน component ที่เป็น provider เป็นตัวคำนวณ value นั้น Context แค่ส่งค่านั้นลงไป',
   },
   {
     q: 'อะไรคือวิธีบรรเทา performance ของ context re-render ที่ดี?',
@@ -114,6 +377,40 @@ export const quizCtx = [
       'ใช้ index เป็น key',
     ],
     answer: 1,
+    explain: 'การ split แยก update ที่ไม่เกี่ยวกันออกจากกัน และการ memoize value กัน reference ใหม่ไม่ให้ trigger re-render ตอนที่ไม่มีอะไรเปลี่ยนจริง ๆ',
+  },
+  {
+    q: '`use(Context)` ทำอะไรได้ที่ `useContext(Context)` ทำไม่ได้?',
+    options: [
+      'อ่าน context จาก Server Component',
+      'ถูกเรียกแบบมีเงื่อนไข ภายใน `if` หรือ loop',
+      'subscribe แค่ field เดียวของ context value',
+      'ข้าม provider ที่ใกล้ที่สุดไปอ่านตัวที่ไกลกว่า',
+    ],
+    answer: 1,
+    explain: 'react.dev บอกชัดเจน: ต่างจาก useContext, use เรียกภายใน loop และ conditional statement อย่าง if ได้ — ทั้งคู่ยังค้นหาขึ้นไปหา provider ที่ใกล้ที่สุดเหมือนกัน',
+  },
+  {
+    q: '```tsx\nconst value = useMemo(() => ({ label: \'fixed\' }), []);\nreturn (\n  <LabelContext value={value}>\n    <Consumer onRender={onChildRender} />\n    <button onClick={() => setTick((t) => t + 1)}>{tick}</button>\n  </LabelContext>\n);\n```\nคลิกปุ่มสองครั้ง — `Consumer` ที่ห่อด้วย `memo` re-render กี่ครั้ง?',
+    options: [
+      'สองครั้ง ครั้งละหนึ่งคลิก',
+      'ศูนย์ครั้ง — value ที่ memoize ไว้ได้ reference เดิมเสมอ memo จึงหยุดมันได้',
+      'มันจะ throw error',
+      'ครั้งเดียว เฉพาะคลิกแรก',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: เมื่อ value ถูกเก็บใน useMemo ด้วย dependency array ว่าง reference ของมันไม่เปลี่ยนเลย จำนวน render ของ Consumer ที่ memoize ไว้จึงไม่ขยับเลยตลอดสองคลิก',
+  },
+  {
+    q: '```tsx\nreturn (\n  <LabelContext value={{ label: \'fixed\' }}>\n    <Consumer onRender={onChildRender} />\n    <button onClick={() => setTick((t) => t + 1)}>{tick}</button>\n  </LabelContext>\n);\n```\nคลิกแบบเดิม แต่ value เป็น object literal inline ที่ถูกสร้างทุก render `Consumer` ที่ memoize ไว้ re-render กี่ครั้งจากสองคลิก?',
+    options: [
+      'ศูนย์ครั้ง — memo ป้องกันไว้',
+      'สองครั้ง — reference object ใหม่ทุก render ทำให้ memo ใช้ไม่ได้เลย',
+      'ครั้งเดียว',
+      'ขึ้นอยู่กับว่า label เปลี่ยนหรือเปล่า',
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วในโพรบ: แม้ค่าของ label เอง ('fixed') จะไม่เปลี่ยนเลย แต่ object literal เป็น reference ใหม่ทุก render ทั้งสองคลิกจึง re-render consumer ที่ memoize ไว้",
   },
 ];
 

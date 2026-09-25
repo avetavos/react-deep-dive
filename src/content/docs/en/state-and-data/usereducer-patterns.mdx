@@ -1,6 +1,6 @@
 ---
 title: 'useReducer Patterns'
-description: 'useReducer for complex state transitions, reducer purity, and the context + reducer pattern for app-wide state without a library.'
+description: 'useReducer in depth — reducer purity and the StrictMode double-invoke, lazy init, discriminated-union actions with TS exhaustiveness, useActionState vs useReducer, and the context + reducer pattern.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## From many setStates to one reducer
 
@@ -58,7 +59,303 @@ Reach for `useReducer` over `useState` when:
 - **You want the logic in one testable place** — a reducer is a plain function you can unit-test with no React at all: `reducer(state, action)` in, `nextState` out.
 - **Actions document intent** — `dispatch({ type: "checkout_failed" })` reads better than a pile of setters, and gives you a log of *what happened*.
 
-Reducer purity is the same rule as render: given the same state and action, return the same next state, with **no side effects** and **no mutation** (return new objects/arrays).
+## Proof: a reducer must be pure — StrictMode calls it twice
+
+`useReducer` has the exact same purity contract as `useState`'s updater form, and Strict Mode enforces it the same way: in development, it calls your reducer **twice** for each dispatch (with the same state and action) to help surface reducers with side effects — but only commits the result of one call.
+
+```tsx
+// src/components/ReducerStrict.tsx
+import { StrictMode, useReducer } from 'react';
+
+type Action = { type: 'inc' };
+
+export function makeReducer(log: number[]) {
+  return function reducer(state: number, action: Action) {
+    log.push(state);
+    switch (action.type) {
+      case 'inc':
+        return state + 1;
+      default:
+        return state;
+    }
+  };
+}
+
+export function Counter({ log }: { log: number[] }) {
+  const [count, dispatch] = useReducer(makeReducer(log), 0);
+  return <button onClick={() => dispatch({ type: 'inc' })}>{count}</button>;
+}
+
+export function StrictCounter({ log }: { log: number[] }) {
+  return (
+    <StrictMode>
+      <Counter log={log} />
+    </StrictMode>
+  );
+}
+```
+
+```tsx
+// src/__tests__/reducer-strict.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { Counter, StrictCounter } from '../components/ReducerStrict';
+
+afterEach(cleanup);
+
+test('without StrictMode, the reducer runs once per dispatch', () => {
+  const log: number[] = [];
+  render(<Counter log={log} />);
+  act(() => { screen.getByRole('button').click(); });
+  expect(log).toEqual([0]);
+  expect(screen.getByRole('button').textContent).toBe('1');
+});
+
+test('StrictMode calls the reducer twice with the same state, but commits once', () => {
+  const log: number[] = [];
+  render(<StrictCounter log={log} />);
+  act(() => { screen.getByRole('button').click(); });
+  // Called twice with the SAME starting state (0, 0) — not (0, 1) — proving
+  // it's a double-invoke for purity-checking, not a real double-dispatch.
+  expect(log).toEqual([0, 0]);
+  expect(screen.getByRole('button').textContent).toBe('1');
+});
+```
+
+```text
+✓ without StrictMode, the reducer runs once per dispatch
+✓ StrictMode calls the reducer twice with the same state, but commits once
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+Reducer purity is the same rule as render: given the same state and action, return the same next state, with **no side effects** and **no mutation** (return new objects/arrays). The log proves *why* that matters — both StrictMode calls saw the identical starting state `0`, so any side effect in the reducer (a `console.log`, an analytics call, pushing into an array from outer scope) fires twice for one dispatch.
+
+## Proof: mutating state in a reducer doesn't just risk duplicates — it can silently stop rendering
+
+The [`useReducer` reference](https://react.dev/reference/react/useReducer) shows this exact mistake and names the mechanism directly: "Mutating state directly causes React to ignore the update because `Object.is` comparison determines that the next state is equal to the previous state":
+
+```js
+function reducer(state, action) {
+  switch (action.type) {
+    case 'added_todo': {
+      // 🚩 Mistake: mutating state
+      state.todos.push({ id: nextId++, text: action.text });
+      return state;
+    }
+    // ...
+  }
+}
+```
+
+This is worse than it looks. Because the reducer returns the exact same top-level object reference, React's bail-out check (`Object.is(prevState, nextState)`) says "nothing changed" — so it can skip re-rendering entirely, even though the array was mutated in place underneath.
+
+```tsx
+// src/components/ImpureReducer.tsx
+import { StrictMode, useReducer } from 'react';
+
+type Todo = { id: number; text: string };
+type State = { todos: Todo[] };
+type Action = { type: 'added_todo'; text: string };
+
+let nextId = 0;
+
+// ❌ Impure: mutates state.todos directly instead of returning a new array.
+function impureReducer(state: State, action: Action): State {
+  switch (action.type) {
+    case 'added_todo': {
+      state.todos.push({ id: nextId++, text: action.text });
+      return state;
+    }
+    default:
+      return state;
+  }
+}
+
+// ✅ Pure: returns a new state object/array every time.
+function pureReducer(state: State, action: Action): State {
+  switch (action.type) {
+    case 'added_todo': {
+      return { todos: [...state.todos, { id: nextId++, text: action.text }] };
+    }
+    default:
+      return state;
+  }
+}
+
+export function StrictImpureApp() {
+  const [state, dispatch] = useReducer(impureReducer, { todos: [] });
+  return (
+    <StrictMode>
+      <button onClick={() => dispatch({ type: 'added_todo', text: 'a' })}>add</button>
+      <span data-testid="count">{state.todos.length}</span>
+    </StrictMode>
+  );
+}
+
+export function StrictPureApp() {
+  const [state, dispatch] = useReducer(pureReducer, { todos: [] });
+  return (
+    <StrictMode>
+      <button onClick={() => dispatch({ type: 'added_todo', text: 'a' })}>add</button>
+      <span data-testid="count">{state.todos.length}</span>
+    </StrictMode>
+  );
+}
+```
+
+```tsx
+// src/__tests__/impure-reducer.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { StrictImpureApp, StrictPureApp } from '../components/ImpureReducer';
+
+afterEach(cleanup);
+
+test('the impure, mutating reducer never re-renders — the count stays stuck', () => {
+  render(<StrictImpureApp />);
+  act(() => { screen.getByRole('button').click(); });
+  // Same top-level state reference returned every time → React bails out of
+  // the re-render entirely, so the DOM never reflects the mutation.
+  expect(screen.getByTestId('count').textContent).toBe('0');
+});
+
+test('the pure reducer correctly re-renders once per dispatch, even under StrictMode', () => {
+  render(<StrictPureApp />);
+  act(() => { screen.getByRole('button').click(); });
+  expect(screen.getByTestId('count').textContent).toBe('1');
+});
+```
+
+```text
+✓ the impure, mutating reducer never re-renders — the count stays stuck
+✓ the pure reducer correctly re-renders once per dispatch, even under StrictMode
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+The mutation didn't just risk a visible glitch — because `Object.is` sees the same reference coming back, React silently skips the update altogether, and the button's displayed count never advances past `0` no matter how many times you click it. Reducer purity isn't a style preference here: mutating and returning the same reference can make dispatch appear to do nothing.
+
+## Lazy initialization for `useReducer`
+
+Like `useState`, `useReducer` accepts a third argument: an initializer function, called only once, with the second argument as its input. Use it when computing the initial state is expensive.
+
+```tsx
+// src/components/LazyInitReducer.tsx
+import { useReducer } from 'react';
+
+type State = { count: number };
+type Action = { type: 'inc' };
+
+function reducer(state: State, action: Action): State {
+  switch (action.type) {
+    case 'inc':
+      return { count: state.count + 1 };
+    default:
+      return state;
+  }
+}
+
+export function createInitialState(seed: number, calls: number[]): State {
+  calls.push(seed); // records every time this actually runs
+  return { count: seed };
+}
+
+export function LazyInitCounter({ seed, calls }: { seed: number; calls: number[] }) {
+  const [state, dispatch] = useReducer(reducer, seed, (s) => createInitialState(s, calls));
+  return <button onClick={() => dispatch({ type: 'inc' })}>{state.count}</button>;
+}
+```
+
+```tsx
+// src/__tests__/lazy-init-reducer.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { LazyInitCounter } from '../components/LazyInitReducer';
+
+afterEach(cleanup);
+
+test('the initializer function runs exactly once, no matter how many dispatches follow', () => {
+  const calls: number[] = [];
+  render(<LazyInitCounter seed={10} calls={calls} />);
+  act(() => { screen.getByRole('button').click(); });
+  act(() => { screen.getByRole('button').click(); });
+  expect(calls).toEqual([10]);
+  expect(screen.getByRole('button').textContent).toBe('12');
+});
+```
+
+```text
+✓ the initializer function runs exactly once, no matter how many dispatches follow
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+`useReducer(reducer, seed, createInitialState)` calls `createInitialState(seed)` once, on the first render, and ignores it afterward — exactly like `useState(() => expensive())`, but with the initial argument passed through instead of closed over.
+
+## Discriminated-union actions: let `tsc` catch a missing case
+
+Typing `Action` as a **discriminated union** (each variant has a distinct literal `type` field) lets TypeScript narrow `action` inside each `case`, and lets you add an **exhaustiveness check** in `default` that fails to compile if a case is ever left unhandled:
+
+```ts
+type Action =
+  | { type: 'increment' }
+  | { type: 'decrement' }
+  | { type: 'reset'; to: number };
+
+function reducer(state: { count: number }, action: Action) {
+  switch (action.type) {
+    case 'increment':
+      return { count: state.count + 1 };
+    case 'decrement':
+      return { count: state.count - 1 };
+    default: {
+      // If every case above were handled, `action` would be narrowed to
+      // `never` here. Leaving out `reset` makes this assignment fail.
+      const exhaustive: never = action;
+      return exhaustive;
+    }
+  }
+}
+```
+
+```text
+error TS2322: Type '{ type: "reset"; to: number; }' is not assignable to type 'never'.
+```
+
+That's the real `tsc --strict` output for the snippet above with `case 'reset'` left out — captured from the probe, not paraphrased. Add the missing case and the error disappears:
+
+```tsx
+// src/components/ExhaustiveReducer.tsx
+type Action =
+  | { type: 'increment' }
+  | { type: 'decrement' }
+  | { type: 'reset'; to: number };
+
+export function reducer(state: { count: number }, action: Action): { count: number } {
+  switch (action.type) {
+    case 'increment':
+      return { count: state.count + 1 };
+    case 'decrement':
+      return { count: state.count - 1 };
+    case 'reset':
+      return { count: action.to };
+    default: {
+      const exhaustive: never = action;
+      return exhaustive;
+    }
+  }
+}
+```
+
+This check costs one line and catches a real, common mistake — add a fourth action variant six months from now, forget to handle it in every reducer that switches on it, and `tsc` refuses to build instead of silently falling through to `default`.
+
+## `useReducer` vs `useActionState`
+
+React 19's [`useActionState`](/react/en/react-19/actions-and-useactionstate/) looks superficially similar — it also returns state plus a dispatch-like function, driven by a reducer-shaped function. The difference is what triggers the update: `useReducer`'s `dispatch` is synchronous and driven by whatever event you call it from; `useActionState`'s action function is built for **async, pending-aware transitions** — it tracks a `pending` boolean and integrates with form actions and `useFormStatus` automatically. Reach for `useReducer` for synchronous, in-memory state transitions (a list, a multi-field form's local validation state); reach for `useActionState` when the "action" is inherently asynchronous (a server request) and you want pending/error state for free.
 
 ## Context + reducer: app state without a library
 
@@ -82,10 +379,149 @@ function useTasks() { return useContext(TasksContext); }
 function useTasksDispatch() { return useContext(TasksDispatchContext); }
 ```
 
-Splitting state and dispatch into two contexts means components that only *dispatch* (never read the list) don't re-render when the list changes — `dispatch` is stable for the component's lifetime. This pattern covers a surprising amount of "I need Redux" cases without any library.
+### Proof: a dispatch-only component never re-renders when the list changes
+
+`dispatch` from `useReducer` is referentially stable for the lifetime of the component — React guarantees it never changes across renders. Combined with splitting state and dispatch into separate contexts, a component that only reads `dispatch` (never the state) has no reason to ever re-render when the state updates.
+
+```tsx
+// src/components/TasksContext.tsx
+import { createContext, useContext, useReducer, memo, type Dispatch, type ReactNode } from 'react';
+
+type Task = { id: number; text: string; done: boolean };
+type Action =
+  | { type: 'added'; id: number; text: string }
+  | { type: 'toggled'; id: number };
+
+function tasksReducer(state: Task[], action: Action): Task[] {
+  switch (action.type) {
+    case 'added':
+      return [...state, { id: action.id, text: action.text, done: false }];
+    case 'toggled':
+      return state.map((t) => (t.id === action.id ? { ...t, done: !t.done } : t));
+    default:
+      return state;
+  }
+}
+
+const TasksContext = createContext<Task[]>([]);
+const TasksDispatchContext = createContext<Dispatch<Action> | null>(null);
+
+export function TasksProvider({ children }: { children: ReactNode }) {
+  const [tasks, dispatch] = useReducer(tasksReducer, []);
+  return (
+    <TasksContext value={tasks}>
+      <TasksDispatchContext value={dispatch}>{children}</TasksDispatchContext>
+    </TasksContext>
+  );
+}
+
+export const AddTaskButton = memo(function AddTaskButton({ onRender }: { onRender: () => void }) {
+  const dispatch = useContext(TasksDispatchContext)!;
+  onRender();
+  return (
+    <button onClick={() => dispatch({ type: 'added', id: Date.now(), text: 'x' })}>add</button>
+  );
+});
+
+export function TaskList() {
+  const tasks = useContext(TasksContext);
+  return <span data-testid="count">{tasks.length}</span>;
+}
+```
+
+```tsx
+// src/__tests__/tasks-context.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { TasksProvider, AddTaskButton, TaskList } from '../components/TasksContext';
+
+afterEach(cleanup);
+
+test('a dispatch-only component does not re-render when the task list changes', () => {
+  let renders = 0;
+  render(
+    <TasksProvider>
+      <AddTaskButton onRender={() => renders++} />
+      <TaskList />
+    </TasksProvider>,
+  );
+  const baseline = renders;
+
+  act(() => { screen.getByRole('button').click(); });
+  act(() => { screen.getByRole('button').click(); });
+
+  // Two dispatches added two tasks — but the dispatch-only button re-rendered
+  // zero additional times, because `dispatch` never changes reference and it
+  // never reads TasksContext (the state).
+  expect(renders - baseline).toBe(0);
+  expect(screen.getByTestId('count').textContent).toBe('2');
+});
+```
+
+```text
+✓ a dispatch-only component does not re-render when the task list changes
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Splitting state and dispatch into two contexts means components that only *dispatch* (never read the list) don't re-render when the list changes — proven above: two dispatches, zero extra renders of the button, while the list itself correctly grew to 2. This pattern covers a surprising amount of "I need Redux" cases without any library.
+
+## Mental Model
+
+A reducer turns "what changed" into a **pure function call**, exactly like render itself: same inputs (state, action) in, same output (next state) out, every time, with nothing observable happening on the side. That's precisely why Strict Mode can call it twice safely to check your work — a pure function's second call is indistinguishable from its first, except to an observer standing where it shouldn't be (a `console.log`, a mutation of the input). If doubling the call ever changes the *visible* outcome, the function was never pure to begin with — mutating and returning the same reference is the sharpest example: it doesn't just fail the purity test, it also defeats React's own change-detection.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `useReducer` over many `useState` | Transition logic centralized, unit-testable with no React | More ceremony for genuinely independent fields |
+| Discriminated-union actions + exhaustiveness check | `tsc` catches a forgotten case at compile time | One extra `default` branch to write correctly |
+| Lazy init (`useReducer(reducer, arg, init)`) | Expensive setup runs exactly once | One more function to structure correctly |
+| Context + reducer (split state/dispatch) | Zero-dependency app state, dispatch-only components never re-render | More wiring than a single `useState`; still no selectors (see the Context lesson) |
+| `useActionState` instead | Built-in `pending`/error tracking for async actions | Wrong tool for purely synchronous, in-memory transitions |
+
+## Common Misconceptions
+
+- **"Strict Mode calling my reducer twice means the action fires twice."** It means the same `(state, action)` pair is evaluated twice to check purity; only one result is committed — proven above with the same starting state logged twice, not `0` then `1`.
+- **"Mutating and returning `state` from a reducer is just a style smell."** It can silently disable re-rendering altogether: React's bail-out check sees the same reference and assumes nothing changed, so the DOM can get stuck exactly where it started — proven above.
+- **"A `default: throw new Error(...)` branch is the same as an exhaustiveness check."** It catches an unhandled action *at runtime*, after shipping. `const exhaustive: never = action` catches a missing case *at compile time*, before shipping — both are worth having, but they catch the mistake at very different times.
+- **"`useActionState` is just `useReducer` with a new name."** It's built specifically for async, pending-tracked actions (form submissions, server requests) — `useReducer` has no concept of `pending` at all.
+
+## Reading AI-generated code
+
+Before trusting a generated reducer or its wiring, check for these:
+
+- Does the reducer mutate `state` (`.push`, `.sort`, direct property assignment) and then `return state`? That's not just a style nit — it can make React skip the re-render entirely, exactly as proven above.
+- Is `Action` typed as a loose shape (`{ type: string; payload?: any }`) instead of a discriminated union? Without distinct literal `type`s, `tsc` can't narrow inside each `case`, and an exhaustiveness check in `default` is meaningless.
+- Does every reducer's `switch` end in either a real `default` that throws, or an exhaustiveness check (`const _exhaustive: never = action`)? Silently falling through to `return state` on an unrecognized action type hides typos in dispatched action names.
+- Is `useActionState` used for a synchronous, purely local state transition, or `useReducer` used to wrap what's actually an async server request (reinventing `pending`/error tracking by hand)? Match the hook to whether the transition is sync or async.
+- In a context + reducer setup, are state and dispatch delivered through the *same* context? That defeats the whole point — a component that only dispatches will still re-render on every state change, because it's still subscribed to the context carrying the state too.
+
+<SpotTheBug code={`function cartReducer(state, action) {
+  switch (action.type) {
+    case "add_item":
+      state.items.push(action.item);
+      state.total += action.item.price;
+      return state;
+    default:
+      return state;
+  }
+}
+
+function CartApp() {
+  const [cart, dispatch] = useReducer(cartReducer, { items: [], total: 0 });
+  return (
+    <button onClick={() => dispatch({ type: "add_item", item: { price: 9 } })}>
+      Add — total: {cart.total}
+    </button>
+  );
+}`}>
+`cartReducer` mutates `state.items` and `state.total` directly, then returns the exact same `state` object reference. React's bail-out check (`Object.is`) sees no reference change and can skip the re-render entirely — proven above with the identical pattern (`ImpureReducer`): the displayed total can get stuck at its initial value even though items are actually being pushed into the array underneath. The fix is to return a new object every time: `return { items: [...state.items, action.item], total: state.total + action.item.price };` — now every dispatch produces a genuinely new reference, and React reliably re-renders.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-`useReducer` moves complex, together-changing state into one **pure reducer** `(state, action) => nextState`; you `dispatch` actions that describe *what happened* instead of computing next state at the call site — which centralizes logic and makes it unit-testable. Pair it with Context (state in one provider, `dispatch` in another) for **app-wide state with no library** — and the stable `dispatch` context means dispatch-only components don't re-render.
+`useReducer` moves complex, together-changing state into one **pure reducer** `(state, action) => nextState` — Strict Mode calls it twice in dev with the same input specifically to catch impurity, and a mutating reducer that returns the same reference doesn't just risk a glitch, it can make React skip the re-render entirely. Type actions as a **discriminated union** and add an exhaustiveness check so `tsc` catches a forgotten case at compile time. Use the lazy-init third argument for expensive initial state, reach for **`useActionState`** instead when the transition is asynchronous, and pair `useReducer` with **split Context** (state vs dispatch) for app-wide state with no library — dispatch-only components then never re-render on a state change.
 </Callout>
 
 export const quizReducer = [
@@ -98,6 +534,7 @@ export const quizReducer = [
       'A CSS utility',
     ],
     answer: 1,
+    explain: 'A reducer centralizes every state transition in one place, callable and testable as a plain function with no React involved.',
   },
   {
     q: 'When should you prefer useReducer over useState?',
@@ -108,6 +545,7 @@ export const quizReducer = [
       'Never',
     ],
     answer: 1,
+    explain: 'For genuinely independent fields, separate useState calls are simpler; useReducer earns its ceremony when transitions are complex or coupled.',
   },
   {
     q: 'In the context + reducer pattern, why split state and dispatch into two contexts?',
@@ -118,6 +556,7 @@ export const quizReducer = [
       'To make dispatch async',
     ],
     answer: 1,
+    explain: 'Proven in the probe: with the split, a dispatch-only button had zero additional re-renders across two dispatches that grew the list to 2 items.',
   },
   {
     q: 'What must a reducer NOT do?',
@@ -128,6 +567,40 @@ export const quizReducer = [
       'Handle multiple action types',
     ],
     answer: 1,
+    explain: 'A reducer must be pure like render itself — mutating its input or causing side effects breaks Strict Mode\'s double-invoke check and, worse, can disable re-rendering as proven above.',
+  },
+  {
+    q: 'What happens in development when you dispatch an action, under StrictMode?',
+    options: [
+      'The action is dispatched twice, incrementing state by 2',
+      'The reducer function is called twice with the identical state and action, but only one result is committed',
+      'Nothing different happens',
+      'The component unmounts and remounts',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: the logged states were [0, 0] — the same starting value twice — not [0, 1], and the committed count was 1, not 2.',
+  },
+  {
+    q: '```ts\nfunction reducer(state, action: Action) {\n  switch (action.type) {\n    case \'increment\': return { count: state.count + 1 };\n    case \'decrement\': return { count: state.count - 1 };\n    default: {\n      const exhaustive: never = action;\n      return exhaustive;\n    }\n  }\n}\n```\nIf `Action` also includes `{ type: \'reset\'; to: number }` and this case is never handled, what does `tsc --strict` report?',
+    options: [
+      'Nothing — TypeScript cannot check switch exhaustiveness',
+      'error TS2322: Type \'{ type: "reset"; to: number; }\' is not assignable to type \'never\'.',
+      'A runtime warning only',
+      'It silently treats reset like the default case',
+    ],
+    answer: 1,
+    explain: 'Captured verbatim from the probe: leaving out the reset case means action inside default narrows to the reset variant, not never, so assigning it to a never-typed variable fails to compile with exactly this error.',
+  },
+  {
+    q: '```tsx\nfunction cartReducer(state, action) {\n  switch (action.type) {\n    case "add_item":\n      state.items.push(action.item);\n      return state;\n    default:\n      return state;\n  }\n}\n```\nWhat is the observable effect of dispatching `add_item` repeatedly?',
+    options: [
+      'The item count updates correctly every time',
+      'React may never re-render at all, because the reducer returns the same state reference each time',
+      'It throws a TypeError',
+      'It works, but only in production builds',
+    ],
+    answer: 1,
+    explain: 'Proven above with the identical pattern: returning the same top-level reference makes React\'s Object.is bail-out check conclude nothing changed, so the UI can get stuck at its initial render despite the array being mutated underneath.',
   },
 ];
 

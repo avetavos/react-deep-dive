@@ -1,6 +1,6 @@
 ---
 title: 'Lifting State & Composition'
-description: 'lifting state ขึ้นไปที่ common ancestor, one-way data flow, ปัญหา prop drilling และ composition ในฐานะทางแก้แรกก่อนจะไปหา Context'
+description: 'Lifting state ขึ้น, prop drilling กับ composition (พิสูจน์ว่า children-as-props กัน re-render ได้ด้วย), controlled เทียบ uncontrolled input, derived state แทน effect ที่ sync และ key เป็น reset switch'
 sidebar:
   order: 2
 ---
@@ -9,10 +9,11 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## Lifting state up
+## Lifting state ขึ้น
 
-เมื่อสอง component ต้องใช้ state ก้อนเดียวกัน state นั้นจะอยู่ใน component ใด component หนึ่งไม่ได้ — state นั้นต้องย้าย **ขึ้น** ไปที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props นี่คือ *lifting state up* และเป็นคำตอบเริ่มต้นของ "สอง component นี้ต้อง sync กัน"
+เมื่อ component สองตัวต้องแชร์ state เดียวกัน state นั้นอยู่ในตัวใดตัวหนึ่งไม่ได้ — มันต้องย้าย **ขึ้นไป** ที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props นี่คือ *lifting state up* และเป็นคำตอบเริ่มต้นของ "component สองตัวนี้ต้อง sync กัน"
 
 ```jsx
 // The parent owns the state; both children read/update it through props.
@@ -27,11 +28,11 @@ function TemperatureApp() {
 }
 ```
 
-state มี **single source of truth** (คือ parent) และข้อมูลไหลทางเดียว: ลงมาเป็น props และย้อนขึ้นผ่าน callback สอง input ไม่มีทางขัดแย้งกันเพราะมีค่าเดียว
+state มี **แหล่งความจริงเดียว** (parent) และข้อมูลไหลทางเดียว: ลงมาเป็น props กลับขึ้นไปเป็น callback input สองตัวไม่มีทางไม่ตรงกันเพราะมีค่าเดียว
 
 ## ปัญหา prop drilling
 
-lifting ทำงานได้สวยงามจนกระทั่ง ancestor อยู่ *ไกล* เหนือ consumer มาก ตอนนั้น props ต้องร้อยผ่านทุก component ตรงกลางที่ไม่ได้สนใจค่านั้นเลย:
+Lifting ทำงานได้ดีจนกว่า ancestor จะอยู่*ไกล*จาก consumer มาก ตอนนั้น props ต้องร้อยผ่านทุก component ตรงกลางที่ไม่ได้สนใจมันเลย:
 
 ```jsx
 // theme is only used by Button, but every layer must pass it through.
@@ -44,11 +45,11 @@ lifting ทำงานได้สวยงามจนกระทั่ง an
 </App>
 ```
 
-ทุก component ตรงกลางได้ prop ที่แค่ส่งต่อ นี่คือ **prop drilling** — รก และเป็นฝันร้ายตอน refactor สัญชาตญาณคือกระโดดไป Context ทันที แต่มีทางแก้ที่ง่ายกว่าให้ลองก่อน
+ทุก component ตรงกลางได้ prop ที่มันแค่ส่งต่อ นี่คือ **prop drilling** — รกและปวดหัวตอน refactor สัญชาตญาณคือกระโดดไปหา Context ทันที แต่มีทางแก้ที่ง่ายกว่าให้ลองก่อน
 
-## Composition: ส่ง JSX เป็น props
+## Composition: ส่ง JSX เป็น prop
 
-ก่อนไป Context ให้ลอง **composition** ก่อน แทนที่จะ drill ค่าผ่าน component ให้ส่ง JSX ที่ *render แล้ว* เข้าไปเป็น `children` (หรือ prop ที่ตั้งชื่อ) เพื่อให้ component ตรงกลางไม่เห็นค่านั้นเลย
+ก่อนจะไปหา Context ให้ลอง **composition** ก่อน แทนที่จะ drill ค่าผ่าน component ให้ส่ง JSX ที่*ถูก render แล้ว*เป็น `children` (หรือ prop ที่ตั้งชื่อไว้) เพื่อให้ component ตรงกลางไม่เห็นค่านั้นเลย
 
 ```jsx
 // Sidebar doesn't know about `theme` — it just renders whatever children it's given.
@@ -64,63 +65,409 @@ function Sidebar({ children }) {
 </Page>
 ```
 
-<Mermaid title="drilling ร้อย props ผ่านไปเรื่อย ๆ ส่วน composition ส่งมอบ content ที่ render แล้ว" code={compDiagram} />
+<Mermaid title="Drilling ร้อย props ผ่าน; composition ส่งเนื้อหาที่ render แล้วเข้าไป" code={compDiagram} />
 
 export const compDiagram = `flowchart TB
   subgraph drill["Prop drilling"]
-    a1["App theme"] --> p1["Page theme"] --> s1["Sidebar theme"] --> b1["Button ใช้ theme"]
+    a1["App theme"] --> p1["Page theme"] --> s1["Sidebar theme"] --> b1["Button uses theme"]
   end
   subgraph comp["Composition"]
-    a2["App: render Button ตรงนี้"] --> s2["Sidebar: render children"]
-    a2 -.ส่ง JSX.-> s2
+    a2["App: renders Button here"] --> s2["Sidebar: renders children"]
+    a2 -.passes JSX.-> s2
   end`;
 
-คุณยังส่ง JSX ผ่าน prop ที่ตั้งชื่อได้ด้วย (`<Layout sidebar={<Nav />} main={<Feed />} />`) component ตรงกลางจะกลายเป็น container ทั่วไป ("render อะไรก็ตามที่ถูกส่งมา") ซึ่ง reuse ได้ดีกว่า *และ* กำจัด drilling ไปด้วย Context เอาไว้ใช้ตอนที่แม้แต่ composition ก็เอื้อมไม่ถึง — ข้อมูลแบบ cross-cutting จริง ๆ ที่ถูกใช้กระจัดกระจายหลายที่
+คุณส่ง JSX ผ่าน prop ที่ตั้งชื่อไว้ก็ได้เหมือนกัน (`<Layout sidebar={<Nav />} main={<Feed />} />`) component ตรงกลางกลายเป็น container ทั่วไป ("render อะไรก็ตามที่ได้รับมา") ซึ่ง reusable กว่า *และ* ตัด drilling ออกไปด้วย
+
+## พิสูจน์: `children` เป็น prop ยังกัน re-render ได้ด้วย ไม่ใช่แค่แก้ drilling
+
+Composition มีประโยชน์ที่สองที่ไม่ค่อยชัดเจน: มันเป็น **การ optimize performance** โดยไม่ต้องมี `memo` เลย เมื่อ component ที่ถือ state ที่เปลี่ยนเร็ว render `{children}` React ไม่จำเป็นต้อง re-render subtree ของ children นั้นทุกครั้งที่ state เปลี่ยน — เพราะ element `children` ถูกสร้างโดย*ผู้ที่เรียก component นี้* และ JSX ของผู้เรียกนั้นไม่ได้เปลี่ยน
+
+```tsx
+// src/components/ChildrenBail.tsx
+import { useState, type ReactNode } from 'react';
+
+function ExpensiveChild({ onRender }: { onRender: () => void }) {
+  onRender();
+  return <span>child</span>;
+}
+
+// The ticking state lives INSIDE FastTimer. `children` is whatever its
+// caller passed in — FastTimer never re-creates it.
+function FastTimer({ children }: { children: ReactNode }) {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <span data-testid="tick">{tick}</span>
+      <button onClick={() => setTick((t) => t + 1)}>tick</button>
+      {children}
+    </div>
+  );
+}
+
+export function ComposedApp({ onChildRender }: { onChildRender: () => void }) {
+  return (
+    <FastTimer>
+      <ExpensiveChild onRender={onChildRender} />
+    </FastTimer>
+  );
+}
+```
+
+```tsx
+// src/__tests__/children-bail.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { ComposedApp } from '../components/ChildrenBail';
+
+afterEach(cleanup);
+
+test('children passed as props do not re-render when the parent that renders them ticks', () => {
+  let renders = 0;
+  render(<ComposedApp onChildRender={() => renders++} />);
+  const baseline = renders;
+
+  act(() => { screen.getByRole('button').click(); });
+  act(() => { screen.getByRole('button').click(); });
+
+  // FastTimer re-rendered twice (tick went 0 -> 1 -> 2), but ExpensiveChild —
+  // passed in as `children` — rendered zero additional times.
+  expect(renders - baseline).toBe(0);
+  expect(screen.getByTestId('tick').textContent).toBe('2');
+});
+```
+
+```text
+✓ children passed as props do not re-render when the parent that renders them ticks
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+`FastTimer` re-render ทุกครั้งที่คลิก (state `tick` ของมันเองเปลี่ยน) แต่ `ExpensiveChild` ไม่ re-render แม้แต่ครั้งเดียว — ไม่มี `memo` เกี่ยวข้องเลย `ComposedApp` สร้าง element `<ExpensiveChild />` แค่ครั้งเดียว แล้วส่งให้ `FastTimer` เป็น `children`; การ re-render ของ `FastTimer` เองไม่แตะ element นั้นเลย React จึงข้าม re-render subtree ที่มันแทนได้ นี่คือเหตุผลที่ "ยก state ลงไปไว้ที่ component เล็กที่สุดที่ต้องการมัน แล้วส่งทุกอย่างที่เหลือผ่านเป็น children" เป็นทั้งทางแก้ composition สำหรับ prop drilling *และ* ได้ performance ฟรีไปด้วย
+
+## Controlled เทียบกับ uncontrolled input
+
+form input เป็น **controlled** เมื่อ value ของมันมาจาก React state (`value={state}` บวก `onChange`) — React เป็นเจ้าของ value เต็มตัว มันเป็น **uncontrolled** เมื่อ DOM เป็นเจ้าของ (`defaultValue`, อ่านผ่าน ref เมื่อต้องการ) ทั้งสองแบบถูกต้องตามหลัก กฎที่สำคัญจริง ๆ คือ: **อย่าสลับไปมาระหว่างสองแบบสำหรับ input เดียวกันตลอดอายุของมัน**
+
+### พิสูจน์: คำเตือนจริงเมื่อ input สลับจาก uncontrolled เป็น controlled
+
+```tsx
+// src/components/ControlledWarning.tsx
+export function FlippingInput({ startControlled }: { startControlled: boolean }) {
+  // ❌ `value` starts as `undefined` (uncontrolled), then becomes a string
+  // (controlled) once `startControlled` flips — the exact trap.
+  const value = startControlled ? 'hello' : undefined;
+  return <input value={value} onChange={() => {}} />;
+}
+```
+
+```tsx
+// src/__tests__/controlled-warning.test.tsx
+import { render, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { FlippingInput } from '../components/ControlledWarning';
+
+afterEach(cleanup);
+
+test('flipping value from undefined to a string logs the real React warning', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { rerender } = render(<FlippingInput startControlled={false} />);
+
+  act(() => {
+    rerender(<FlippingInput startControlled={true} />);
+  });
+
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages.some((m) => m.includes('changing an uncontrolled input to be controlled'))).toBe(true);
+
+  spy.mockRestore();
+});
+```
+
+```text
+✓ flipping value from undefined to a string logs the real React warning
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ข้อความเป๊ะ ๆ: `"A component is changing an uncontrolled input to be controlled. This is likely caused by the value changing from undefined to a defined value, which should not happen. Decide between using a controlled or uncontrolled input element for the lifetime of the component. More info: https://react.dev/link/controlled-components"` สาเหตุปกติคือ state ที่ initialize จากอะไรบางอย่างที่เป็น `null`/`undefined` ได้ตอนแรก (API response, prop ที่ optional) — [เอกสารอ้างอิง `<input>`](https://react.dev/reference/react-dom/components/input#im-getting-an-error-a-component-is-changing-an-uncontrolled-input-to-be-controlled) แนะนำทางแก้ง่าย ๆ: บังคับให้เป็น string ตั้งแต่แรก `value={someValue ?? ''}`
+
+## Derived state แทน effect ที่ sync
+
+anti-pattern ที่พบบ่อย: การ mirror prop เข้า state ด้วย `useEffect` ทั้งที่ค่าคำนวณได้ตอน **render** เลย เวอร์ชัน effect ทำงานเดิมทุกอย่าง บวก render เพิ่มอีกครั้ง บวกเฟรมที่ state ค้างเก่าอยู่ชั่วขณะ
+
+```tsx
+// src/components/DerivedVsEffect.tsx
+import { useState, useEffect } from 'react';
+
+// ❌ Anti-pattern: mirrors props into state via an effect.
+export function SyncedEffectFullName({
+  firstName,
+  lastName,
+  onRender,
+}: {
+  firstName: string;
+  lastName: string;
+  onRender: () => void;
+}) {
+  const [fullName, setFullName] = useState(`${firstName} ${lastName}`);
+  useEffect(() => {
+    setFullName(`${firstName} ${lastName}`);
+  }, [firstName, lastName]);
+  onRender();
+  return <span data-testid="name">{fullName}</span>;
+}
+
+// ✅ Derived during render — no effect, no extra render, never stale.
+export function DerivedFullName({
+  firstName,
+  lastName,
+  onRender,
+}: {
+  firstName: string;
+  lastName: string;
+  onRender: () => void;
+}) {
+  const fullName = `${firstName} ${lastName}`;
+  onRender();
+  return <span data-testid="name">{fullName}</span>;
+}
+```
+
+```tsx
+// src/__tests__/derived-vs-effect.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { SyncedEffectFullName, DerivedFullName } from '../components/DerivedVsEffect';
+
+afterEach(cleanup);
+
+test('the effect-synced version takes one extra render to reach the same result', () => {
+  let renders = 0;
+  const r = render(<SyncedEffectFullName firstName="Ada" lastName="L" onRender={() => renders++} />);
+  act(() => {
+    r.rerender(<SyncedEffectFullName firstName="Grace" lastName="H" onRender={() => renders++} />);
+  });
+  // mount (1) + prop re-render (1) + effect's own setState re-render (1) = 3.
+  expect(renders).toBe(3);
+  expect(screen.getByTestId('name').textContent).toBe('Grace H');
+});
+
+test('the derived version reaches the same result with no extra render', () => {
+  let renders = 0;
+  const r = render(<DerivedFullName firstName="Ada" lastName="L" onRender={() => renders++} />);
+  act(() => {
+    r.rerender(<DerivedFullName firstName="Grace" lastName="H" onRender={() => renders++} />);
+  });
+  // mount (1) + prop re-render (1) = 2 — no effect, nothing to re-sync.
+  expect(renders).toBe(2);
+  expect(screen.getByTestId('name').textContent).toBe('Grace H');
+});
+```
+
+```text
+✓ the effect-synced version takes one extra render to reach the same result
+✓ the derived version reaches the same result with no extra render
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+ทั้งสองแบบลงเอยที่ "Grace H" เหมือนกัน — แต่เวอร์ชัน effect ใช้ 3 render แทนที่จะเป็น 2 และหนึ่งใน render เหล่านั้น DOM ค้าง value *เก่า* ที่ derive มา (`"Ada L"`) ไว้ชั่วขณะก่อนที่ effect จะแก้ให้ เมื่อไรก็ตามที่ค่าคำนวณได้ตรงจาก props/state ที่มีอยู่แล้ว ให้คำนวณตอน render ใช้ effect เฉพาะเพื่อ sync กับสิ่งที่อยู่นอก React จริง ๆ (DOM, subscription, network request)
+
+## `key` เป็น reset switch
+
+`key` ของ list ให้ identity ที่ React ใช้ diff — ครอบคลุมไว้ใน[บท rendering & reconciliation](/react/en/foundations/rendering-and-reconciliation/) กลไกเดียวกันนี้มีการใช้แบบที่สอง จงใจ ที่นี่: **การเปลี่ยน `key` ของ element บังคับให้ React ทิ้ง instance เก่าแล้ว mount ตัวใหม่เอี่ยม** รีเซ็ต local state ทั้งหมดของมัน นี่คือทางแก้ที่ idiomatic สำหรับ "state ภายในของ component ตัวนี้ต้องรีเซ็ตทั้งหมดเมื่อค่าระบุตัวตนบางอย่างเปลี่ยน" — สะอาดกว่าการรีเซ็ต state ทีละชิ้นด้วยมือเอง
+
+```tsx
+// src/components/KeyReset.tsx
+import { useState } from 'react';
+
+function Field({ onMount }: { onMount: () => void }) {
+  const [text, setText] = useState('');
+  useState(() => { onMount(); return null; });
+  return <input data-testid="field" value={text} onChange={(e) => setText(e.target.value)} />;
+}
+
+// ❌ No key — the same Field instance persists across a userId change,
+// keeping whatever the user had typed for the PREVIOUS user.
+export function WithoutKey({ onMount }: { userId: string; onMount: () => void }) {
+  return <Field onMount={onMount} />;
+}
+
+// ✅ Keyed by userId — a new user means a fresh Field instance, reset state.
+export function WithKey({ userId, onMount }: { userId: string; onMount: () => void }) {
+  return <Field key={userId} onMount={onMount} />;
+}
+```
+
+```tsx
+// src/__tests__/key-reset.test.tsx
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { WithoutKey, WithKey } from '../components/KeyReset';
+
+afterEach(cleanup);
+
+test('without a key, typed text survives a prop change on the same instance', () => {
+  let mounts = 0;
+  const r = render(<WithoutKey userId="a" onMount={() => mounts++} />);
+  fireEvent.change(screen.getByTestId('field'), { target: { value: 'typed' } });
+
+  r.rerender(<WithoutKey userId="b" onMount={() => mounts++} />);
+
+  expect(mounts).toBe(1); // never remounted
+  expect((screen.getByTestId('field') as HTMLInputElement).value).toBe('typed');
+});
+
+test('a key change remounts the component and resets its state', () => {
+  let mounts = 0;
+  const r = render(<WithKey userId="a" onMount={() => mounts++} />);
+  fireEvent.change(screen.getByTestId('field'), { target: { value: 'typed' } });
+
+  r.rerender(<WithKey userId="b" onMount={() => mounts++} />);
+
+  expect(mounts).toBe(2); // remounted once
+  expect((screen.getByTestId('field') as HTMLInputElement).value).toBe(''); // reset
+});
+```
+
+```text
+✓ without a key, typed text survives a prop change on the same instance
+✓ a key change remounts the component and resets its state
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+นี่คนละเรื่องกับ `key` ของ list: ตรงนั้น `key` มีไว้เพื่อ*จับคู่*element ข้าม render เพื่อไม่ให้ React สับสน item หนึ่งกับอีกอัน ตรงนี้ `key={userId}` เป็นสัญญาณจงใจว่า *ค่าตัวนี้เฉพาะ* คือตัวกำหนด identity ของ component — เปลี่ยนมัน แล้วคุณต้องการเริ่มใหม่ ไม่ใช่แค่ update
+
+## Mental Model
+
+Composition กับ lifting เป็นปลายสองด้านของคานเดียวกัน: **lift state ขึ้นเมื่อ sibling ต้องเห็นค่าเดียวกัน; ส่ง JSX ที่ render แล้วลงไป (เป็น `children`/props) เมื่อ component ตรงกลางไม่จำเป็นต้องรู้ค่านั้นเลย** ทั้งสองไม่ได้เกี่ยวกับว่าข้อมูล*เก็บ*อยู่ที่ไหน — lifting เกี่ยวกับความเป็นเจ้าของ composition เกี่ยวกับว่าใคร*เห็น*ค่าได้เทียบกับใครแค่*ส่งต่อช่อง*สำหรับเนื้อหาที่ถูกสร้างที่อื่น component ที่ render แค่ `children` มองจากมุมการไหลของข้อมูลแล้วมันล่องหน — และมองจากมุมการ render แล้ว การ re-render ของมันถูกเพราะช่องล่องหนนั้นไม่เปลี่ยนแค่เพราะ state ของ wrapper เปลี่ยน
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| Lift state ขึ้น | แหล่งความจริงเดียว sync กันแน่นอน | common ancestor รับผิดชอบเยอะขึ้น |
+| Composition (`children`/JSX prop) | แก้ prop drilling *และ* ข้าม re-render ของ subtree ที่ส่งเข้ามา | component ตรงกลางต้องออกแบบให้ทั่วไปตั้งแต่แรก |
+| Controlled input | value ตรงกับ React state เสมอ validate/transform ได้ทุก keystroke | ต้องส่ง `value` ที่ defined เสมอ — ห้ามสลับไปมาที่ `undefined` |
+| Uncontrolled input | re-render น้อยกว่า ง่ายกว่าสำหรับฟอร์มที่ "แค่อ่านตอน submit" | validate สด หรือควบคุม value แบบ programmatic ยากกว่า |
+| Derived state (คำนวณตอน render) | ไม่ render เพิ่ม ไม่ค้างเก่า โค้ดน้อยกว่า | ใช้ได้เฉพาะเมื่อค่าเป็น pure function ของ props/state ที่มีอยู่แล้ว |
+| `key` เป็น reset switch | บรรทัดเดียวรีเซ็ต state ภายในทั้งหมดของ component | ต้อง document เจตนา (reset เทียบ list identity) — ทั้งคู่หน้าตาเหมือนกันใน JSX |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"Composition ช่วยแค่แก้ prop drilling"** มันยังข้าม re-render ของ subtree ที่ส่งเข้ามาเมื่อ state ของ wrapper เองเปลี่ยนด้วย — พิสูจน์แล้วข้างบน โดยไม่มี `memo` เลย
+- **"input เริ่มเป็น uncontrolled แล้วกลายเป็น controlled ได้ตอนข้อมูลโหลดเสร็จ"** นั่นคือกับดักที่ React เตือนพอดี — พิสูจน์แล้วข้างบนด้วยข้อความเป๊ะ ๆ initialize state เป็นค่าที่ defined (`''` ไม่ใช่ `undefined`) ตั้งแต่แรกแทน
+- **"การ mirror prop เข้า state ด้วย `useEffect` แค่ efficient น้อยกว่านิดหน่อย"** มันไม่ใช่แค่ efficient น้อยกว่า — พิสูจน์แล้วข้างบนว่ามันใช้ render เพิ่มอีกครั้งเพื่อไปถึงผลลัพธ์เดิม และ render ค่าเก่าค้างไว้ชั่วขณะระหว่างนั้น
+- **"`key` มีไว้สำหรับ list เท่านั้น"** `key` บน element เดี่ยว ๆ ก็เป็นวิธี idiomatic ที่ถูกต้องในการบังคับ remount-and-reset ทั้งหมด — พิสูจน์แล้วข้างบน — ไม่เกี่ยวกับว่า element นั้นอยู่ใน list หรือเปล่าเลย
+
+## อ่านโค้ดที่ AI เขียน
+
+ก่อนเชื่อ component ที่ generate มาเรื่องการวาง state ให้เช็กสิ่งเหล่านี้:
+
+- component ถูกนิยาม*แบบ inline*เป็น JSX ลึกเข้าไปข้างใน component อื่นที่ re-render บ่อย ๆ แทนที่จะถูกส่งเข้ามาเป็น `children`/prop จากข้างบนไหม? นั่นคือ drilling โดยโครงสร้าง และยังหมายความว่า subtree นั้นไม่มีทางข้าม re-render แบบที่ composed `children` ทำได้
+- `value` ของ `<input>` มาจากอะไรบางอย่างที่เป็น `null`/`undefined` ได้ก่อนข้อมูลโหลดเสร็จไหม (API response, field ที่ optional)? นั่นคือการสลับ controlled/uncontrolled ที่พิสูจน์แล้วข้างบน — ตั้งค่า default ให้เป็นค่าที่ defined ทันที
+- มี `useEffect` ที่งานเดียวคือ `setSomething(propOrOtherState)` โดยไม่มี side effect อื่นไหม? แทบจะ derive ได้ตอน render เสมอ — พิสูจน์แล้วข้างบนว่ามันเสีย render เพิ่มและเฟรมที่ค้างเก่า
+- `key={index}` ถูกใช้กับ child ที่มี form หรือ state ทั้งที่เจตนาจริง ๆ คือ "reset เมื่อ record ที่อ้างอิงเปลี่ยน" แทนที่จะใช้ id ที่ stable ของ record เองไหม? index ไม่ได้ระบุอะไรที่มีความหมายจริงและอาจ reset (หรือไม่ reset) state ผิดพลาดตอน item ถูกเพิ่ม/ลบ/สลับลำดับ
+- component ไปหา Context (หรือ prop drilling) สำหรับค่าที่ component แค่หนึ่งหรือสองตัวห่างลงไปสองสามชั้นต้องการเท่านั้นไหม ทั้งที่การส่ง JSX ที่ render แล้วเป็น `children` จะตัดความจำเป็นที่ชั้นตรงกลางต้องรู้จักมันเลยได้?
+
+<SpotTheBug code={`function UserProfilePage({ userId }) {
+  const user = useUser(userId);
+  return <ProfileForm initialName={user.name} />;
+}
+
+function ProfileForm({ initialName }) {
+  const [name, setName] = useState(initialName);
+  return <input value={name} onChange={(e) => setName(e.target.value)} />;
+}`}>
+เมื่อ `userId` เปลี่ยน (นำทางจาก profile ของ user หนึ่งไปอีกคน) `ProfileForm` เป็น *instance ของ component เดียวกัน* — React แค่ re-render มันด้วย prop `initialName` ใหม่ ไม่ได้ remount มัน แต่ `useState(initialName)` ใช้ argument นั้นแค่ render แรกเท่านั้น ทุก render ถัดไปจะเก็บสิ่งที่ user *ก่อนหน้า* แก้ไว้ใน `name` ต่อไป แสดงข้อความเก่าของ user A แบบเงียบ ๆ ระหว่างที่กำลังแก้ profile ของ user B ทางแก้คือ pattern `key` ที่พิสูจน์แล้วข้างบนพอดี: `<ProfileForm key={userId} initialName={user.name} />` — `userId` ใหม่จะบังคับให้เกิด `ProfileForm` instance ใหม่เอี่ยม ดังนั้น `useState(initialName)` จะ re-initialize จากข้อมูลของ user ใหม่จริง ๆ แทนที่จะพกของเก่ามาด้วย
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-เมื่อสอง component แชร์ state ให้ **lift** state ขึ้นไปที่ common ancestor ที่ใกล้ที่สุด — source of truth เดียว, ข้อมูลลง, callback ขึ้น เมื่อ props ต้องผ่านหลายชั้นที่ไม่สนใจ (**prop drilling**) ให้ลอง **composition ก่อน**: ส่ง JSX ที่ render แล้วเป็น `children` หรือ prop เพื่อให้ component ตรงกลางยัง generic และไม่เห็นค่านั้น ใช้ Context เฉพาะเมื่อ composition เอื้อมไปถึง consumer ไม่ได้
+Lift state ไปที่ common ancestor ที่ใกล้ที่สุดเมื่อ sibling ต้องแชร์มัน เมื่อ props จะแค่ drill ผ่านชั้นที่ไม่เกี่ยวข้อง ให้ส่ง **JSX ที่ render แล้วเป็น `children`/props** แทน — วิธีนี้แก้ prop drilling *และ* พิสูจน์แล้วข้างบนว่าข้าม re-render ของ subtree นั้นเมื่อ state ของ wrapper เองเปลี่ยน ไม่ต้องใช้ `memo` เลย อย่าให้ input สลับไปมาระหว่าง controlled (`value` defined เสมอ) กับ uncontrolled (`value={undefined}`) — คำเตือนจริงของ React เรียกชื่อการเปลี่ยนแปลงนั้นตรง ๆ เลือก **derived state ที่คำนวณตอน render** แทน `useEffect` ที่ mirror prop เข้า state — เวอร์ชัน effect เสีย render เพิ่มและโชว์ข้อมูลค้างเก่าชั่วขณะ ทั้งคู่พิสูจน์แล้วข้างบน และไปหา **`key`** เป็น reset switch ที่จงใจเมื่อ state ภายในของ component ต้องเริ่มใหม่ทั้งหมดตามค่าระบุตัวตนที่เปลี่ยน ไม่ใช่แค่เพื่อ list identity
 </Callout>
 
 export const quizLift = [
   {
-    q: 'เมื่อสอง component พี่น้องต้องใช้ state เดียวกัน state นั้นควรอยู่ที่ไหน?',
+    q: 'เมื่อ sibling component สองตัวต้องการ state เดียวกัน มันควรอยู่ที่ไหน?',
     options: [
-      'ทำซ้ำไว้ในทั้งสองพี่น้อง',
-      'lift ขึ้นไปที่ common ancestor ที่ใกล้ที่สุด แล้วส่งลงมาเป็น props',
+      'ซ้ำกันในทั้งสอง sibling',
+      'ยกขึ้นไปที่ common ancestor ที่ใกล้ที่สุด ส่งลงมาเป็น props',
       'ใน global variable',
       'ใน DOM',
     ],
     answer: 1,
+    explain: 'Lifting ให้ state มีแหล่งความจริงเดียวใน common ancestor ดังนั้น sibling ทั้งสองอ่านค่าเดียวกันและไม่มีทางไม่ตรงกัน',
   },
   {
     q: 'prop drilling คืออะไร?',
     options: [
-      'การส่ง props ผ่าน component ตรงกลางหลายตัวที่แค่ส่งต่อ เพื่อไปถึง consumer ที่อยู่ลึก',
+      'การส่ง props ผ่าน component ตรงกลางหลายตัวที่แค่ส่งต่อมันเพื่อให้ถึง consumer ที่อยู่ลึก',
       'การ mutate props',
-      'การใช้ hook มากเกินไป',
+      'การใช้ hook เยอะเกินไป',
       'การ render บน server',
     ],
     answer: 0,
+    explain: 'ทุกชั้นตรงกลางได้ prop ที่ตัวเองไม่ได้ใช้ เพียงเพื่อส่งต่อลงไป — chain การส่งต่อนั้นคือสิ่งที่ "drilling" หมายถึง',
   },
   {
-    q: 'ทางแก้ prop drilling ด้วย composition คืออะไร?',
+    q: 'ทางแก้ composition สำหรับ prop drilling คืออะไร?',
     options: [
-      'ใส่ค่าไว้ใน global variable',
-      'ส่ง JSX ที่ render แล้วเป็น children/props เพื่อให้ component ตรงกลางไม่เห็นค่านั้น',
-      'ทำซ้ำ state ทุกที่',
+      'เอาค่าไปใส่ใน global variable',
+      'ส่ง JSX ที่ render แล้วเป็น children/props เพื่อให้ component ตรงกลางไม่เห็นค่านั้นเลย',
+      'ซ้ำ state ไว้ทุกที่',
       'ใช้ Context ทันทีเสมอ',
     ],
     answer: 1,
+    explain: 'component ตรงกลาง render แค่ {children} มันไม่เคยได้รับหรือส่งต่อค่านั้นเลย เพราะ JSX ที่ใช้มันถูกสร้างไว้สูงกว่าแล้ว',
   },
   {
     q: 'ใน one-way data flow ข้อมูลไหลอย่างไร?',
     options: [
-      'ขึ้นเป็น props, ลงเป็น callback',
-      'ลงเป็น props, ย้อนขึ้นผ่าน callback',
-      'ข้างกันระหว่างพี่น้องโดยตรง',
-      'แบบสุ่ม',
+      'ขึ้นเป็น props ลงเป็น callback',
+      'ลงเป็น props กลับขึ้นผ่าน callback',
+      'ข้างไปข้างระหว่าง sibling ตรง ๆ',
+      'สุ่ม',
     ],
     answer: 1,
+    explain: 'state ไหลลงจากเจ้าของเป็น props; child ขอการเปลี่ยนแปลงโดยเรียก function (callback) ที่ถูกส่งลงมาให้ ซึ่งเจ้าของใช้ update state ของตัวเอง',
+  },
+  {
+    q: 'นอกจากแก้ prop drilling แล้ว การส่ง `children` เป็น prop ยังทำอะไรอีก?',
+    options: [
+      'ไม่มีอะไรเพิ่ม — เป็นแค่เทคนิคจัดระเบียบโค้ด',
+      'ให้ React ข้าม re-render subtree นั้นได้เมื่อ state ของ wrapper เองเปลี่ยน โดยไม่ต้องใช้ memo',
+      'มัน fetch ข้อมูลให้ children อัตโนมัติ',
+      'มันแปลง children เป็น Context provider',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: component ที่มี state ภายในเปลี่ยนเร็ว re-render ทุกครั้งที่คลิก แต่ children ที่ส่งเข้ามาไม่ re-render เพิ่มเลย',
+  },
+  {
+    q: 'คำเตือนจริงของ React เมื่อ `value` ของ `<input>` เปลี่ยนจาก `undefined` เป็น string ที่ defined ข้าม render คืออะไร?',
+    options: [
+      'input value must be a string, got undefined',
+      '"A component is changing an uncontrolled input to be controlled. [...] which should not happen."',
+      'Cannot read property value of undefined',
+      'ไม่มีคำเตือน — React จัดการแบบเงียบ ๆ',
+    ],
+    answer: 1,
+    explain: 'ดักจับได้ตรง ๆ ในโพรบด้วยการ spy console.error ระหว่างสลับ value ของ input จริงจาก undefined เป็น "hello" ข้าม re-render',
+  },
+  {
+    q: '```tsx\nfunction Comp({ firstName, lastName, onRender }) {\n  const [fullName, setFullName] = useState(`${firstName} ${lastName}`);\n  useEffect(() => {\n    setFullName(`${firstName} ${lastName}`);\n  }, [firstName, lastName]);\n  onRender();\n  return <span>{fullName}</span>;\n}\n```\nเทียบกับการคำนวณ `fullName` ตรง ๆ ตอน render (ไม่มี effect ไม่มี state เพิ่ม) เวอร์ชันนี้เสียอะไรไปบ้าง?',
+    options: [
+      'ไม่มีอะไร — พฤติกรรมเหมือนกันเป๊ะ',
+      'render เพิ่มอีกหนึ่งครั้งต่อการเปลี่ยน prop และมีเฟรมที่ค่าที่โชว์ค้างเก่าชั่วขณะ',
+      'มัน render น้อยลงหนึ่งครั้ง',
+      'มัน throw error ใน Strict Mode',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: เวอร์ชัน effect ใช้ 3 render (mount, prop เปลี่ยน, setState ของ effect เอง) กว่าจะถึงค่าสุดท้าย เทียบกับ 2 สำหรับเวอร์ชันที่ derive fullName ตรง ๆ ตอน render',
   },
 ];
 

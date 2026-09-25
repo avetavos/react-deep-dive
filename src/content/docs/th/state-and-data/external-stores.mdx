@@ -1,6 +1,6 @@
 ---
 title: 'External Stores'
-description: 'เมื่อ built-in state ไม่พอ, external store อย่าง Zustand และ Redux และ useSyncExternalStore — ทำไมถึงมีอยู่ และ tearing คืออะไร'
+description: 'useSyncExternalStore แบบลึก — getServerSnapshot กับ hydration, tearing, กับดัก infinite loop ของ selector ที่ไม่ถูก cache, subscribe identity และเมื่อไรควรไปหา store สไตล์ Zustand'
 sidebar:
   order: 5
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## เมื่อไรควรออกจาก built-in state ของ React
 
@@ -35,6 +36,8 @@ function CartCount() {
   return <span>{count}</span>;
 }
 ```
+
+`useCartStore(selector)` ของ Zustand สร้างอยู่บน primitive ตัวเดียวกับที่บทนี้ครอบคลุมพอดี: `useSyncExternalStore` library ของ store แทบทุกตัว (Zustand, Jotai, `useSelector` ของ Redux) ใช้มันอยู่เบื้องหลังเพื่อให้การอ่านค่าภายนอกยังสอดคล้องกับการ render ของ React — โค้ดแอปทั่วไปแทบไม่ต้องเรียกมันตรง ๆ แต่การเข้าใจมันอธิบายได้ว่า *ทำไม* library เหล่านี้ถึงทำงานแบบที่เป็นอยู่
 
 ## useSyncExternalStore: subscribe อย่างปลอดภัย
 
@@ -70,6 +73,302 @@ export const ssesDiagram = `flowchart LR
   store -->|subscribe/notify| hook
   hook --> react["React อ่าน snapshot\nที่สอดคล้องหนึ่งเดียวต่อ render\n(ไม่ tearing)"]`;
 
+## พิสูจน์: `getServerSnapshot` ไม่ใช่ของ optional สำหรับ SSR
+
+argument ตัวที่สาม `getServerSnapshot` สำคัญก็ต่อเมื่อคุณ render บน server — แต่การข้ามมันไปไม่ได้ fallback ไปเป็นอะไรที่สมเหตุสมผลแบบเงียบ ๆ [เอกสารอ้างอิง](https://react.dev/reference/react/useSyncExternalStore#im-getting-an-error-the-result-of-getserversnapshot-should-be-cached) บอกตรง ๆ ว่า `getServerSnapshot` "will be used only during server rendering and during hydration... If you omit this argument, rendering the component on the server will throw an error" นี่คือสิ่งที่เกิดขึ้นจริง:
+
+```tsx
+// src/components/OnlineStatus.tsx
+import { useSyncExternalStore } from 'react';
+
+function subscribe(callback: () => void) {
+  window.addEventListener('online', callback);
+  window.addEventListener('offline', callback);
+  return () => {
+    window.removeEventListener('online', callback);
+    window.removeEventListener('offline', callback);
+  };
+}
+
+export function OnlineStatusNoServerSnapshot() {
+  const isOnline = useSyncExternalStore(subscribe, () => navigator.onLine);
+  return <span>{isOnline ? 'online' : 'offline'}</span>;
+}
+
+export function OnlineStatusWithServerSnapshot() {
+  const isOnline = useSyncExternalStore(subscribe, () => navigator.onLine, () => true);
+  return <span>{isOnline ? 'online' : 'offline'}</span>;
+}
+```
+
+```tsx
+// src/__tests__/ssr-snapshot.test.tsx
+import { renderToString } from 'react-dom/server';
+import { expect, test } from 'vitest';
+import { OnlineStatusNoServerSnapshot, OnlineStatusWithServerSnapshot } from '../components/OnlineStatus';
+
+test('omitting getServerSnapshot throws when rendered on the server', () => {
+  expect(() => renderToString(<OnlineStatusNoServerSnapshot />)).toThrow(
+    /Missing getServerSnapshot/,
+  );
+});
+
+test('providing getServerSnapshot renders successfully on the server', () => {
+  const html = renderToString(<OnlineStatusWithServerSnapshot />);
+  expect(html).toContain('online');
+});
+```
+
+```text
+✓ omitting getServerSnapshot throws when rendered on the server
+✓ providing getServerSnapshot renders successfully on the server
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+ข้อความ error ที่ throw จริง: `"Missing getServerSnapshot, which is required for server-rendered content. Will revert to client rendering."` — เหตุผลที่มันต้อง throw แทนที่จะ degrade แบบเงียบ ๆ คือเรื่อง hydration: server ไม่มี `window`/`navigator` ให้เรียก `getSnapshot` ฝั่ง client และ render *แรก* ของ client ต้องตรงกับ markup ของ server เป๊ะ ไม่งั้น React จะ log hydration mismatch `getServerSnapshot` คือตัวที่การันตีว่า render แรกเหมือนกันทั้งสองฝั่ง
+
+## `subscribe` ต้อง stable
+
+`subscribe` มีกฎ identity เหมือน dependency ทั่วไป: ส่ง function ใหม่ทุก render แล้ว React จะถือว่าเป็น subscription ใหม่ [เอกสารอ้างอิง](https://react.dev/reference/react/useSyncExternalStore#caveats) ระบุเป็น caveat ว่า "If a different `subscribe` function is passed during a re-render, React will re-subscribe to the store using the newly passed `subscribe` function. You can prevent this by declaring `subscribe` outside the component."
+
+```tsx
+// src/components/SubscribeIdentity.tsx
+import { useSyncExternalStore, useState } from 'react';
+
+let value = 0;
+const listeners = new Set<() => void>();
+export function bump() {
+  value += 1;
+  listeners.forEach((l) => l());
+}
+function getSnap() {
+  return value;
+}
+
+export let subscribeCallCount = 0;
+export function resetSubscribeCallCount() {
+  subscribeCallCount = 0;
+}
+
+// ✅ Declared OUTSIDE the component — the exact same function reference every render.
+export function subscribeStable(cb: () => void) {
+  subscribeCallCount++;
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
+export function UnstableSubscribeApp() {
+  const [tick, setTick] = useState(0);
+  // ❌ A brand-new subscribe function every render — React re-subscribes every time.
+  const v = useSyncExternalStore((cb: () => void) => {
+    subscribeCallCount++;
+    listeners.add(cb);
+    return () => listeners.delete(cb);
+  }, getSnap);
+  return (
+    <>
+      <span data-testid="v">{v}</span>
+      <button data-testid="rerender" onClick={() => setTick((t) => t + 1)}>{tick}</button>
+    </>
+  );
+}
+
+export function StableSubscribeApp() {
+  const [tick, setTick] = useState(0);
+  const v = useSyncExternalStore(subscribeStable, getSnap);
+  return (
+    <>
+      <span data-testid="v">{v}</span>
+      <button data-testid="rerender" onClick={() => setTick((t) => t + 1)}>{tick}</button>
+    </>
+  );
+}
+```
+
+```tsx
+// src/__tests__/subscribe-identity.test.tsx
+import { render, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import {
+  UnstableSubscribeApp,
+  StableSubscribeApp,
+  resetSubscribeCallCount,
+} from '../components/SubscribeIdentity';
+import * as mod from '../components/SubscribeIdentity';
+
+afterEach(cleanup);
+
+test('a new subscribe function every render re-subscribes on every render', () => {
+  resetSubscribeCallCount();
+  const r = render(<UnstableSubscribeApp />);
+  act(() => { r.getByTestId('rerender').click(); });
+  act(() => { r.getByTestId('rerender').click(); });
+  // Mount + 2 re-renders = 3 distinct subscribe() calls.
+  expect(mod.subscribeCallCount).toBe(3);
+});
+
+test('a stable, module-level subscribe function only subscribes once', () => {
+  resetSubscribeCallCount();
+  const r = render(<StableSubscribeApp />);
+  act(() => { r.getByTestId('rerender').click(); });
+  act(() => { r.getByTestId('rerender').click(); });
+  // Same reference every render — React never re-subscribes.
+  expect(mod.subscribeCallCount).toBe(1);
+});
+```
+
+```text
+✓ a new subscribe function every render re-subscribes on every render
+✓ a stable, module-level subscribe function only subscribes once
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+การ re-subscribe ทุกครั้งคือการทำงานที่สูญเปล่า (คู่ `addEventListener`/`removeEventListener` จริง ๆ หรือ subscription จริงของ store ถูกรื้อแล้วสร้างใหม่) — สำหรับ DOM event listener นั้นถูก แต่สำหรับ WebSocket หรือ store client ที่หนักกว่านั้นไม่ถูกเลย ประกาศ `subscribe` ไว้ที่ module scope หรือห่อด้วย `useCallback` ที่มี dependency stable
+
+## Tearing แบบเป็นรูปธรรม
+
+"Tearing" หมายถึง component สองตัวที่อ่านค่าภายนอก *เดียวกัน* ไม่ตรงกันภายใน render เดียว — ตัวหนึ่งโชว์ค่าเก่า อีกตัวโชว์ค่าใหม่ เพราะค่าเปลี่ยนระหว่างที่ concurrent render กำลังทำงานอยู่ หน้าที่ของ `useSyncExternalStore` คือทำให้สิ่งนี้เป็นไปไม่ได้ [เอกสารอ้างอิง](https://react.dev/reference/react/useSyncExternalStore#caveats) อธิบายกลไกว่า "If the store is mutated during a non-blocking Transition update, React will fall back to performing that update as blocking. Specifically, for every Transition update, React will call `getSnapshot` a second time just before applying changes to the DOM. If it returns a different value than when it was called originally, React will restart the update from scratch... to ensure that every component on screen is reflecting the same version of the store."
+
+ความแตกต่างภายในระหว่าง restart กับ blocking ไม่สามารถสังเกตได้ตรง ๆ จาก test แบบ synchronous (`act()` ของ test จะ flush งานที่ค้างอยู่ทั้งหมดก่อน return ไม่ว่าจะกรณีไหน) — แต่ *การรับประกันที่สำคัญจริง ๆ* คือ: ไม่ว่าการ mutate จะเกิดขึ้นตอนไหนเทียบกับ transition ทุก consumer ของ store จะลงเอยด้วยคำตอบที่ตรงกัน
+
+```tsx
+// src/components/TearingStore.tsx
+import { useSyncExternalStore, startTransition } from 'react';
+
+let count = 0;
+const listeners = new Set<() => void>();
+
+export function bumpCount(n: number) {
+  count = n;
+  listeners.forEach((l) => l());
+}
+
+function subscribe(cb: () => void) {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
+function getCount() {
+  return count;
+}
+
+function Consumer({ testid }: { testid: string }) {
+  const c = useSyncExternalStore(subscribe, getCount);
+  return <span data-testid={testid}>{c}</span>;
+}
+
+export function TearingApp() {
+  return (
+    <>
+      {/* Two independent consumers of the SAME store. */}
+      <Consumer testid="a" />
+      <Consumer testid="b" />
+      <button onClick={() => { startTransition(() => { bumpCount(5); }); }}>bump</button>
+    </>
+  );
+}
+```
+
+```tsx
+// src/__tests__/tearing.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { TearingApp } from '../components/TearingStore';
+
+afterEach(cleanup);
+
+test('two consumers of the same store never disagree, even when the mutation happens inside a transition', () => {
+  render(<TearingApp />);
+  expect(screen.getByTestId('a').textContent).toBe('0');
+  expect(screen.getByTestId('b').textContent).toBe('0');
+
+  act(() => {
+    screen.getByRole('button').click();
+  });
+
+  // Both consumers settle on the SAME value — never one at "0" and the
+  // other at "5". That agreement is the property useSyncExternalStore exists
+  // to guarantee.
+  expect(screen.getByTestId('a').textContent).toBe('5');
+  expect(screen.getByTestId('b').textContent).toBe('5');
+});
+```
+
+```text
+✓ two consumers of the same store never disagree, even when the mutation happens inside a transition
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+เทียบกับ pattern คลาสสิกก่อน `useSyncExternalStore` (`useEffect` + `useState` ที่ copy ค่าภายนอกเข้ามา): มันไม่มีการ re-check ก่อน commit แบบนี้ ดังนั้นภายใต้ concurrent rendering จริง ๆ — หลาย component อ่าน store, มี render ที่ช้ากำลังทำงานอยู่, store ถูก mutate กลาง render — สองตัวนั้น *อาจ* ไม่ตรงกันได้ชั่วขณะหนึ่งเฟรม `useSyncExternalStore` คือ API ที่ React เพิ่มมาเพื่อปิดช่องว่างนั้นโดยเฉพาะ
+
+## กับดัก infinite loop: selector ต้องถูก cache
+
+"selector" ในที่นี้หมายถึงอะไรก็ตามที่ `getSnapshot` คืนค่า ถ้ามันคืน **object หรือ array literal ใหม่ทุกครั้งที่เรียก** — แม้จะมีค่าข้างในเหมือนเดิมทุกอย่าง — React ไม่มีทางสรุปได้ว่า "ไม่มีอะไรเปลี่ยน" เพราะมันเทียบ snapshot ด้วย `Object.is` ผลลัพธ์ไม่ใช่แค่ render สูญเปล่า แต่เป็น infinite loop จริง ๆ และ React ตรวจจับพร้อมรายงานออกมา:
+
+```tsx
+// src/components/BadSelector.tsx
+import { useSyncExternalStore } from 'react';
+
+type State = { count: number };
+let state: State = { count: 0 };
+const listeners = new Set<() => void>();
+
+export function setCount(n: number) {
+  state = { count: n };
+  listeners.forEach((l) => l());
+}
+
+function subscribe(cb: () => void) {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
+// ❌ Returns a brand-new object every single call, even when nothing changed.
+function getSnapshotBad() {
+  return { count: state.count };
+}
+
+export function BadSelectorConsumer() {
+  const snap = useSyncExternalStore(subscribe, getSnapshotBad);
+  return <span>{snap.count}</span>;
+}
+```
+
+```tsx
+// src/__tests__/bad-selector.test.tsx
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { BadSelectorConsumer } from '../components/BadSelector';
+
+afterEach(cleanup);
+
+test('a getSnapshot that returns a new object every call throws and warns', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  expect(() => render(<BadSelectorConsumer />)).toThrow(/Maximum update depth exceeded/);
+
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages).toContain('The result of getSnapshot should be cached to avoid an infinite loop');
+
+  spy.mockRestore();
+});
+```
+
+```text
+✓ a getSnapshot that returns a new object every call throws and warns
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ทั้งสองข้อความเป็น output จริงของ React แบบคำต่อคำ: คำเตือนใน console `"The result of getSnapshot should be cached to avoid an infinite loop"` ตามด้วย render loop ที่ชนขีดจำกัดความปลอดภัยของ React เองแล้ว throw `"Maximum update depth exceeded..."` ทางแก้คือเลือก **primitive** (`() => state.count`) หรือ memoize object/array ที่ derive มา เพื่อให้การเรียกซ้ำด้วย state เดิมคืน reference เดิม (เทคนิคมาตรฐานที่ store แบบ selector ทุกตัว รวมถึง Zustand เอง สร้างไว้ให้แล้ว)
+
 ## เลือกบ้านให้ state
 
 | ความต้องการ | ใช้ |
@@ -81,8 +380,58 @@ export const ssesDiagram = `flowchart LR
 
 สรุปตามจริง: ไปหา store เมื่อคุณ *รู้สึกถึงความเจ็บปวด* ไม่ใช่ล่วงหน้า หลายทีมใส่ Redux ตั้งแต่วันแรกและไม่เคยต้องใช้เลย เริ่มต่ำบนบันได แล้วปีนเมื่อแอปบอกให้ปีน
 
+## Mental Model
+
+`useSyncExternalStore` เป็น **checkpoint** ไม่ใช่กลไก subscription ที่คุณจะเขียนเองตามปกติ ข้อตกลงทั้งหมดของมันคือ: "ให้ทางถามค่าปัจจุบันของ store (`getSnapshot`) และทางที่จะถูกบอกว่าเมื่อไรควรถามใหม่ (`subscribe`) มา — ฉันจะจัดการให้ทุก component ที่ถามได้คำตอบที่สอดคล้องกับ component อื่นที่ถามเหมือนกัน แม้แต่กลาง render, แม้แต่ระหว่าง transition, แม้แต่ตอน paint แรกที่ render บน server (`getServerSnapshot`)" library ของ store มีไว้เพื่อให้ selector API ที่ใช้ง่ายกว่าอยู่ข้างบน hook ตัวนี้คือการรับประกันความสอดคล้องที่อยู่ข้างใต้ทั้งหมดนั้น
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| `useSyncExternalStore` ตรง ๆ | ไม่ต้องพึ่ง dependency; ควบคุมได้เต็มที่ | ต้องเขียน subscribe/getSnapshot/getServerSnapshot เอง |
+| Zustand/Jotai/Redux Toolkit | selector ใช้ง่าย, devtools, ecosystem | ต้องพึ่ง dependency และ API เพิ่ม |
+| Selector คืน primitive | ถูก, เทียบได้เสมอ, ไม่ loop เลย | ต้อง restructure state ให้ expose primitive ออกมา |
+| Selector คืน object ที่ memoize | จัดรูปข้อมูลที่ derive ได้ | มีจุดพลาดเพิ่มอีกจุด (ดูกับดัก infinite loop) |
+| `subscribe` ที่ module scope | subscribe แค่ครั้งเดียวตลอด | ห้าม close over ค่าต่อ render ที่มันต้องการ — ส่งผ่าน `getSnapshot` แทน |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`useSyncExternalStore` fetch ข้อมูล"** มันไม่ fetch อะไรเลย — มัน subscribe เข้ากับ store ที่มีอยู่แล้ว (ใน memory, ใน `localStorage`, ใน WebSocket client) และทำให้ React สอดคล้องกับมัน
+- **"object อะไรก็ได้ที่คืนจาก `getSnapshot` ใช้ได้ ตราบใดที่ค่าถูกต้อง"** *ค่า* ที่ถูกต้องไม่พอ — *reference* ต้อง stable เมื่อไม่มีอะไรเปลี่ยน ไม่งั้น React แยกไม่ออกว่า "ไม่เปลี่ยน" กับ "เปลี่ยน" และมันวนเป็น infinite loop ได้
+- **"Tearing เป็น edge case หายาก เมินได้"** มันคืออันตรายเฉพาะของ concurrent rendering — ยิ่งแอปพึ่งพา transition, Suspense และ background rendering มากเท่าไร ยิ่งมีโอกาสสูงที่ component สองตัวอ่านค่าภายนอกในจังหวะเวลาที่ต่างกันจริง ๆ โดยไม่มี hook ตัวนี้
+- **"`getServerSnapshot` เป็น optional เหมือน default parameter"** มันไม่ optional ตั้งแต่วินาทีที่คุณ render บน server — ข้ามมันไปแล้ว throw ตามที่พิสูจน์แล้วข้างบน เพราะ fallback แบบเงียบ ๆ จะเสี่ยงต่อ hydration mismatch แทน
+
+## อ่านโค้ดที่ AI เขียน
+
+ก่อนเชื่อ hook หรือ component ที่ generate มาซึ่งเรียก `useSyncExternalStore` (ตรง ๆ หรือผ่าน store ที่เขียนเองแบบง่าย ๆ) ให้เช็กสิ่งเหล่านี้:
+
+- `getSnapshot` สร้าง object/array/function ใหม่ทุกครั้งที่เรียก (`() => ({ ...state })`, `() => state.items.filter(...)`) แทนที่จะคืน reference ที่ cache ไว้หรือ primitive ไหม? นั่นคือกับดัก infinite loop ที่พิสูจน์แล้วข้างบน
+- `subscribe` ถูกนิยาม inline ข้างใน component body ถูกสร้างใหม่ทุก render แทนที่จะอยู่ที่ module scope หรือใน `useCallback` ที่ stable ไหม? มันยังทำงานได้ แต่ re-subscribe แบบสูญเปล่าทุก render
+- ถ้า component render บน server ได้ (หน้า SSR ของ Next.js/Remix/Astro ไม่ใช่ SPA แบบ client-only ล้วน) มี `getServerSnapshot` ให้หรือเปล่า? การไม่มีมันจะพังเฉพาะใน environment ของ SSR ซึ่ง dev แบบ local ด้วย `vite dev`/setup แบบ CSR-only จะไม่จับได้
+- โค้ดใช้ `useEffect` + `useState` เพื่อ mirror ค่าภายนอก แทนที่จะใช้ `useSyncExternalStore` ไหม? นั่นคือ pattern ก่อน 18 ที่ hook ตัวนี้เข้ามาแทนที่โดยเฉพาะเพราะเรื่อง tearing
+- context ถูกใช้เพื่อ broadcast ค่าภายนอกที่ **เปลี่ยนความถี่สูง** (ตำแหน่ง cursor สด, price feed จาก websocket) ไปหา consumer ที่กระจัดกระจายหลายตัว ทั้งที่ external store พร้อม selector ต่อ slice จะ re-render component น้อยกว่ามากไหม?
+
+<SpotTheBug code={`function useCartTotal() {
+  return useSyncExternalStore(
+    cartStore.subscribe,
+    () => cartStore.getItems().reduce((sum, item) => sum + item.price, 0),
+  );
+}
+
+function useCartSummary() {
+  return useSyncExternalStore(
+    cartStore.subscribe,
+    () => ({
+      count: cartStore.getItems().length,
+      total: cartStore.getItems().reduce((sum, item) => sum + item.price, 0),
+    }),
+  );
+}`}>
+`useCartTotal` ไม่มีปัญหา — `getSnapshot` ของมันคืน number ซึ่งเป็น primitive ที่เทียบด้วยค่าได้เสมอ `useCartSummary` มีบั๊กที่พิสูจน์แล้วข้างบน: `getSnapshot` ของมันคืน object literal ใหม่ทุกครั้งที่เรียก แม้ตะกร้าจะไม่เปลี่ยนเลยก็ตาม React จึงไม่มีทางสรุปว่า "ไม่มีอะไรเปลี่ยน" และ component จะ loop จนชน `"Maximum update depth exceeded"` หลังจากเตือน `"The result of getSnapshot should be cached to avoid an infinite loop"` ก่อนหน้านั้น ทางแก้คือ cache object ที่ derive มา (คำนวณใหม่เฉพาะเมื่อ reference ของ items array เปลี่ยนจริง เช่นทำไว้ข้างใน store เอง) เพื่อให้การเรียกซ้ำด้วย state เดิมคืน reference เดิมเป๊ะ
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-ไปหา **external store** (Zustand, Redux, Jotai) เมื่อ state ถูกเข้าถึงในที่กระจัดกระจาย, ต้องการ **fine-grained subscription** หรืออยู่นอก React tree store subscribe เข้า React ผ่าน **`useSyncExternalStore`** ซึ่งมีอยู่เพื่อป้องกัน **tearing** — การอ่านที่ไม่สอดคล้องเมื่อค่าภายนอกเปลี่ยนกลาง render ภายใต้ concurrent rendering เลือกขั้นต่ำสุดที่ใช้ได้ เพิ่ม store เมื่อรู้สึกถึงความเจ็บปวดเท่านั้น
+ไปหา **external store** (Zustand, Redux, Jotai) เมื่อ state ถูกเข้าถึงในที่กระจัดกระจาย, ต้องการ **fine-grained subscription** หรืออยู่นอก React tree — ทุกตัวสร้างอยู่บน **`useSyncExternalStore`** ซึ่งมีอยู่เพื่อป้องกัน **tearing** (การอ่านค่าเดียวกันที่ไม่สอดคล้องกันระหว่าง component) และต้องการ **`getServerSnapshot`** ตั้งแต่วินาทีที่ render บน server (ข้ามมันไปแล้ว throw เพื่อปกป้อง hydration) ทำให้ `subscribe` stable ข้าม render และให้แน่ใจว่า `getSnapshot` คืน primitive หรือ reference ที่ cache ไว้ — ตัวที่คืน object ใหม่ทุกครั้งคือ infinite loop จริงที่พิสูจน์แล้ว ไม่ใช่แค่ render สูญเปล่า เลือกขั้นต่ำสุดที่ใช้ได้ เพิ่ม store เมื่อรู้สึกถึงความเจ็บปวดเท่านั้น
 </Callout>
 
 export const quizStore = [
@@ -95,6 +444,7 @@ export const quizStore = [
       'ไม่มีวัน — Context ครอบคลุมทุกอย่าง',
     ],
     answer: 1,
+    explain: 'external store คุ้มค่าเมื่อพฤติกรรม "ทุก consumer re-render" ของ Context กลายเป็นคอขวด หรือ state นั้นอยู่อิสระจาก component ใด ๆ จริง ๆ',
   },
   {
     q: '"tearing" คืออะไร?',
@@ -105,6 +455,7 @@ export const quizStore = [
       'type error',
     ],
     answer: 1,
+    explain: 'Tearing เกิดเฉพาะภายใต้ concurrent rendering เมื่อค่าภายนอกเปลี่ยนระหว่างที่ render กำลังทำงานอยู่ — พิสูจน์แล้วข้างบนว่านี่คือสิ่งที่ useSyncExternalStore ป้องกันพอดี',
   },
   {
     q: 'useSyncExternalStore ทำอะไร?',
@@ -115,6 +466,7 @@ export const quizStore = [
       'รัน effect หลัง paint',
     ],
     answer: 1,
+    explain: 'มันไม่ fetch อะไรเอง — มัน subscribe เข้ากับ store ที่มีอยู่แล้วและรับประกันว่าทุก component ที่ consume เห็นค่าปัจจุบันตรงกัน',
   },
   {
     q: 'argument หลักสองตัวของ useSyncExternalStore คืออะไร?',
@@ -125,6 +477,40 @@ export const quizStore = [
       'reducer และ initialState',
     ],
     answer: 1,
+    explain: 'มี argument ที่สาม getServerSnapshot ซึ่ง optional แต่จำเป็นเฉพาะตอน render บน server — พิสูจน์แล้วข้างบนว่าถ้าไม่ให้มันจะ throw',
+  },
+  {
+    q: 'ถ้าไม่ให้ `getServerSnapshot` แล้ว render component บน server จะเกิดอะไรขึ้น?',
+    options: [
+      'ไม่มีอะไร — มันใช้ getSnapshot ฝั่ง client แบบเงียบ ๆ',
+      'มัน throw: "Missing getServerSnapshot, which is required for server-rendered content"',
+      'มัน render ออกมาเป็น string ว่าง',
+      'มันสำคัญเฉพาะกับ CSS-in-JS เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: renderToString throw ข้อความนี้เป๊ะ ๆ เมื่อ getServerSnapshot หายไป — fallback แบบเงียบ ๆ จะเสี่ยงต่อ hydration mismatch แทน',
+  },
+  {
+    q: '```tsx\nfunction getSnapshotBad() {\n  return { count: state.count };\n}\n\nfunction BadSelectorConsumer() {\n  const snap = useSyncExternalStore(subscribe, getSnapshotBad);\n  return <span>{snap.count}</span>;\n}\n```\nเกิดอะไรขึ้นตอน component นี้ render?',
+    options: [
+      'render ปกติ แค่มี re-render เพิ่มขึ้น',
+      'React เตือน "The result of getSnapshot should be cached to avoid an infinite loop" แล้ว throw "Maximum update depth exceeded"',
+      'มันโชว์ค่าเก่าค้างไปตลอดแบบเงียบ ๆ',
+      'TypeScript ปฏิเสธที่จะ compile',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบด้วย console output จริง: getSnapshotBad คืน object reference ใหม่ทุกครั้งที่เรียก React จึงไม่มีทางเห็นว่ามัน "ไม่เปลี่ยน" และวนจนชนขีดจำกัดความปลอดภัยของความลึก render เอง',
+  },
+  {
+    q: '```tsx\nconst v = useSyncExternalStore((cb) => {\n  listeners.add(cb);\n  return () => listeners.delete(cb);\n}, getSnap);\n```\n`subscribe` ตัวนี้ถูกนิยาม inline ข้างใน component body ตลอด mount บวกสอง re-render มันถูกเรียกกี่ครั้ง?',
+    options: [
+      'ครั้งเดียว ไม่ว่าจะมีกี่ re-render',
+      'สามครั้ง — reference function ใหม่ทุก render ทำให้ React re-subscribe ทุกครั้ง',
+      'ศูนย์ครั้ง — inline function ถูกเมิน',
+      'ขึ้นอยู่กับ browser',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: เวอร์ชัน inline ถูกเรียก 3 ครั้ง (mount + 2 re-render) ในขณะที่ logic เดียวกันที่ประกาศไว้ที่ module scope ถูกเรียกแค่ครั้งเดียวเป๊ะ — ทางแก้คือทำให้ reference ของ subscribe stable',
   },
 ];
 

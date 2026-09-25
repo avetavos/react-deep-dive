@@ -1,6 +1,6 @@
 ---
 title: 'Lifting State & Composition'
-description: 'Lifting state to a common ancestor, one-way data flow, the prop-drilling problem, and composition as the first fix before reaching for Context.'
+description: 'Lifting state up, prop drilling and composition (proving children-as-props avoids re-renders too), controlled vs uncontrolled inputs, derived state instead of a syncing effect, and key as a reset switch.'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Lifting state up
 
@@ -75,10 +76,319 @@ export const compDiagram = `flowchart TB
     a2 -.passes JSX.-> s2
   end`;
 
-You can also pass JSX through named props (`<Layout sidebar={<Nav />} main={<Feed />} />`). The intermediate components become generic containers ("render whatever you're given"), which is more reusable *and* removes the drilling. Context is for when even composition can't reach — truly cross-cutting data consumed in many scattered places.
+You can also pass JSX through named props (`<Layout sidebar={<Nav />} main={<Feed />} />`). The intermediate components become generic containers ("render whatever you're given"), which is more reusable *and* removes the drilling.
+
+## Proof: `children` as a prop also avoids re-renders, not just drilling
+
+Composition has a second, less obvious benefit: it's a **performance optimization**, without `memo` anywhere. When a component holds fast-changing state and renders `{children}`, React does not need to re-render the children subtree on every state change — because the `children` element was created by *whoever called this component*, and that caller's own JSX didn't change.
+
+```tsx
+// src/components/ChildrenBail.tsx
+import { useState, type ReactNode } from 'react';
+
+function ExpensiveChild({ onRender }: { onRender: () => void }) {
+  onRender();
+  return <span>child</span>;
+}
+
+// The ticking state lives INSIDE FastTimer. `children` is whatever its
+// caller passed in — FastTimer never re-creates it.
+function FastTimer({ children }: { children: ReactNode }) {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <span data-testid="tick">{tick}</span>
+      <button onClick={() => setTick((t) => t + 1)}>tick</button>
+      {children}
+    </div>
+  );
+}
+
+export function ComposedApp({ onChildRender }: { onChildRender: () => void }) {
+  return (
+    <FastTimer>
+      <ExpensiveChild onRender={onChildRender} />
+    </FastTimer>
+  );
+}
+```
+
+```tsx
+// src/__tests__/children-bail.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { ComposedApp } from '../components/ChildrenBail';
+
+afterEach(cleanup);
+
+test('children passed as props do not re-render when the parent that renders them ticks', () => {
+  let renders = 0;
+  render(<ComposedApp onChildRender={() => renders++} />);
+  const baseline = renders;
+
+  act(() => { screen.getByRole('button').click(); });
+  act(() => { screen.getByRole('button').click(); });
+
+  // FastTimer re-rendered twice (tick went 0 -> 1 -> 2), but ExpensiveChild —
+  // passed in as `children` — rendered zero additional times.
+  expect(renders - baseline).toBe(0);
+  expect(screen.getByTestId('tick').textContent).toBe('2');
+});
+```
+
+```text
+✓ children passed as props do not re-render when the parent that renders them ticks
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+`FastTimer` re-rendered on every click (its own `tick` state changed), but `ExpensiveChild` did not re-render even once — no `memo` involved. `ComposedApp` created the `<ExpensiveChild />` element exactly once and handed it to `FastTimer` as `children`; `FastTimer`'s own re-renders don't touch that element at all, so React can skip re-rendering the subtree it represents. This is why "lift state down into the smallest component that needs it, and pass everything else through as children" is both the composition fix for prop drilling *and* a free performance win.
+
+## Controlled vs uncontrolled inputs
+
+A form input is **controlled** when its value comes from React state (`value={state}` plus `onChange`) — React owns the value, full stop. It's **uncontrolled** when the DOM owns it (`defaultValue`, read via a ref when needed). Both are legitimate; the rule that actually matters is: **don't switch between them for the same input across its lifetime.**
+
+### Proof: the exact warning when an input flips from uncontrolled to controlled
+
+```tsx
+// src/components/ControlledWarning.tsx
+export function FlippingInput({ startControlled }: { startControlled: boolean }) {
+  // ❌ `value` starts as `undefined` (uncontrolled), then becomes a string
+  // (controlled) once `startControlled` flips — the exact trap.
+  const value = startControlled ? 'hello' : undefined;
+  return <input value={value} onChange={() => {}} />;
+}
+```
+
+```tsx
+// src/__tests__/controlled-warning.test.tsx
+import { render, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { FlippingInput } from '../components/ControlledWarning';
+
+afterEach(cleanup);
+
+test('flipping value from undefined to a string logs the real React warning', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { rerender } = render(<FlippingInput startControlled={false} />);
+
+  act(() => {
+    rerender(<FlippingInput startControlled={true} />);
+  });
+
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages.some((m) => m.includes('changing an uncontrolled input to be controlled'))).toBe(true);
+
+  spy.mockRestore();
+});
+```
+
+```text
+✓ flipping value from undefined to a string logs the real React warning
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+The verbatim message: `"A component is changing an uncontrolled input to be controlled. This is likely caused by the value changing from undefined to a defined value, which should not happen. Decide between using a controlled or uncontrolled input element for the lifetime of the component. More info: https://react.dev/link/controlled-components"`. The usual cause is state initialized from something that can be `null`/`undefined` at first (an API response, an optional prop) — the [`<input>` reference](https://react.dev/reference/react-dom/components/input#im-getting-an-error-a-component-is-changing-an-uncontrolled-input-to-be-controlled) fix is simple: coerce it to a string from the start, `value={someValue ?? ''}`.
+
+## Derived state instead of a syncing effect
+
+A frequent anti-pattern: mirroring a prop into state with `useEffect`, when the value could simply be **computed during render**. The effect version does the same work, plus an extra render, plus a frame where the state is briefly stale.
+
+```tsx
+// src/components/DerivedVsEffect.tsx
+import { useState, useEffect } from 'react';
+
+// ❌ Anti-pattern: mirrors props into state via an effect.
+export function SyncedEffectFullName({
+  firstName,
+  lastName,
+  onRender,
+}: {
+  firstName: string;
+  lastName: string;
+  onRender: () => void;
+}) {
+  const [fullName, setFullName] = useState(`${firstName} ${lastName}`);
+  useEffect(() => {
+    setFullName(`${firstName} ${lastName}`);
+  }, [firstName, lastName]);
+  onRender();
+  return <span data-testid="name">{fullName}</span>;
+}
+
+// ✅ Derived during render — no effect, no extra render, never stale.
+export function DerivedFullName({
+  firstName,
+  lastName,
+  onRender,
+}: {
+  firstName: string;
+  lastName: string;
+  onRender: () => void;
+}) {
+  const fullName = `${firstName} ${lastName}`;
+  onRender();
+  return <span data-testid="name">{fullName}</span>;
+}
+```
+
+```tsx
+// src/__tests__/derived-vs-effect.test.tsx
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { SyncedEffectFullName, DerivedFullName } from '../components/DerivedVsEffect';
+
+afterEach(cleanup);
+
+test('the effect-synced version takes one extra render to reach the same result', () => {
+  let renders = 0;
+  const r = render(<SyncedEffectFullName firstName="Ada" lastName="L" onRender={() => renders++} />);
+  act(() => {
+    r.rerender(<SyncedEffectFullName firstName="Grace" lastName="H" onRender={() => renders++} />);
+  });
+  // mount (1) + prop re-render (1) + effect's own setState re-render (1) = 3.
+  expect(renders).toBe(3);
+  expect(screen.getByTestId('name').textContent).toBe('Grace H');
+});
+
+test('the derived version reaches the same result with no extra render', () => {
+  let renders = 0;
+  const r = render(<DerivedFullName firstName="Ada" lastName="L" onRender={() => renders++} />);
+  act(() => {
+    r.rerender(<DerivedFullName firstName="Grace" lastName="H" onRender={() => renders++} />);
+  });
+  // mount (1) + prop re-render (1) = 2 — no effect, nothing to re-sync.
+  expect(renders).toBe(2);
+  expect(screen.getByTestId('name').textContent).toBe('Grace H');
+});
+```
+
+```text
+✓ the effect-synced version takes one extra render to reach the same result
+✓ the derived version reaches the same result with no extra render
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+Both end up showing "Grace H" — but the effect version got there in 3 renders instead of 2, and for one of those renders the DOM briefly held the *old* derived value (`"Ada L"`) before the effect corrected it. Whenever a value can be computed directly from props/state you already have, compute it during render; reach for an effect only to synchronize with something genuinely outside React (the DOM, a subscription, a network request).
+
+## `key` as a reset switch
+
+A list's `key` gives React an identity to diff against — covered in the [rendering & reconciliation lesson](/react/en/foundations/rendering-and-reconciliation/). The same mechanism has a second, deliberate use here: **changing an element's `key` forces React to throw away the old instance and mount a brand-new one**, resetting all of its local state. This is the idiomatic fix for "this component's internal state needs to fully reset when some identifying value changes" — cleaner than manually resetting every piece of state yourself.
+
+```tsx
+// src/components/KeyReset.tsx
+import { useState } from 'react';
+
+function Field({ onMount }: { onMount: () => void }) {
+  const [text, setText] = useState('');
+  useState(() => { onMount(); return null; });
+  return <input data-testid="field" value={text} onChange={(e) => setText(e.target.value)} />;
+}
+
+// ❌ No key — the same Field instance persists across a userId change,
+// keeping whatever the user had typed for the PREVIOUS user.
+export function WithoutKey({ onMount }: { userId: string; onMount: () => void }) {
+  return <Field onMount={onMount} />;
+}
+
+// ✅ Keyed by userId — a new user means a fresh Field instance, reset state.
+export function WithKey({ userId, onMount }: { userId: string; onMount: () => void }) {
+  return <Field key={userId} onMount={onMount} />;
+}
+```
+
+```tsx
+// src/__tests__/key-reset.test.tsx
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import { WithoutKey, WithKey } from '../components/KeyReset';
+
+afterEach(cleanup);
+
+test('without a key, typed text survives a prop change on the same instance', () => {
+  let mounts = 0;
+  const r = render(<WithoutKey userId="a" onMount={() => mounts++} />);
+  fireEvent.change(screen.getByTestId('field'), { target: { value: 'typed' } });
+
+  r.rerender(<WithoutKey userId="b" onMount={() => mounts++} />);
+
+  expect(mounts).toBe(1); // never remounted
+  expect((screen.getByTestId('field') as HTMLInputElement).value).toBe('typed');
+});
+
+test('a key change remounts the component and resets its state', () => {
+  let mounts = 0;
+  const r = render(<WithKey userId="a" onMount={() => mounts++} />);
+  fireEvent.change(screen.getByTestId('field'), { target: { value: 'typed' } });
+
+  r.rerender(<WithKey userId="b" onMount={() => mounts++} />);
+
+  expect(mounts).toBe(2); // remounted once
+  expect((screen.getByTestId('field') as HTMLInputElement).value).toBe(''); // reset
+});
+```
+
+```text
+✓ without a key, typed text survives a prop change on the same instance
+✓ a key change remounts the component and resets its state
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+This is a different concern from a list's `key`: there, `key` is about *matching* elements across renders so React doesn't confuse one item for another. Here, `key={userId}` is a deliberate signal that *this specific value* defines the component's identity — change it, and you want a fresh start, not an update.
+
+## Mental Model
+
+Composition and lifting are two ends of the same lever: **lift state up when siblings must agree on one value; push rendered JSX down (as `children`/props) when a component in between doesn't need to know the value at all.** Neither is about where data is *stored* — lifting is about ownership, composition is about who gets to *see* a value versus who just *forwards a slot* for content created elsewhere. A component that only renders `children` is, from a data-flow perspective, invisible — and from a rendering perspective, its re-renders are cheap precisely because that invisible slot doesn't change just because the wrapper's own state does.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Lifting state up | Single source of truth, guaranteed sync | Common ancestor grows more responsibilities |
+| Composition (`children`/JSX props) | Fixes prop drilling *and* skips re-renders of the passed-in subtree | Intermediate components must be designed generically from the start |
+| Controlled input | Value always matches React state; easy to validate/transform on every keystroke | Must always supply a defined `value` — never flip to/from `undefined` |
+| Uncontrolled input | Less re-rendering; simpler for "just read it on submit" forms | Harder to validate live, or drive the field's value programmatically |
+| Derived state (computed during render) | No extra render, never stale, less code | Only works when the value is a pure function of existing props/state |
+| `key` as a reset switch | One line resets all of a component's internal state | Its intent (reset vs list identity) must be documented — both look identical in JSX |
+
+## Common Misconceptions
+
+- **"Composition only helps avoid prop drilling."** It also skips re-rendering the passed-in subtree when the wrapping component's own state changes — proven above, with no `memo` anywhere.
+- **"An input can start uncontrolled and become controlled once data loads."** That's exactly the trap React warns about — proven above with the verbatim message. Initialize the state as a defined value (`''`, not `undefined`) from the start instead.
+- **"Mirroring a prop into state with `useEffect` is just a slightly less efficient way to keep them in sync."** It's not just less efficient — proven above, it takes an extra render to reach the same result, and briefly renders a stale value in between.
+- **"`key` is only for lists."** `key` on any single element is a valid, idiomatic way to force a full remount-and-reset — proven above — completely independent of whether that element is inside a list.
+
+## Reading AI-generated code
+
+Before trusting generated components around state placement, check for these:
+
+- Is a component defined *inline*, as JSX, deep inside another component that re-renders often — instead of being passed in as `children`/a prop from further up? That's drilling by construction, and it also means that subtree can never skip a re-render the way composed `children` can.
+- Does an `<input>`'s `value` come from something that could be `null`/`undefined` before data loads (an API response, an optional field)? That's the controlled/uncontrolled flip proven above — default it to a defined value immediately.
+- Is there a `useEffect` whose only job is `setSomething(propOrOtherState)` with no other side effect? That's almost always derivable during render instead — proven above to cost an extra render and a stale frame.
+- Is `key={index}` used on a form or stateful child when the intent is actually "reset when the underlying record changes," rather than the record's own stable id? The index doesn't identify anything meaningful and can reset (or fail to reset) state incorrectly as items are added/removed/reordered.
+- Does a component reach for Context (or prop drilling) for a value that's only needed by one or two components a couple of layers down, when passing rendered JSX as `children` would remove the middle layer's need to know about it at all?
+
+<SpotTheBug code={`function UserProfilePage({ userId }) {
+  const user = useUser(userId);
+  return <ProfileForm initialName={user.name} />;
+}
+
+function ProfileForm({ initialName }) {
+  const [name, setName] = useState(initialName);
+  return <input value={name} onChange={(e) => setName(e.target.value)} />;
+}`}>
+When `userId` changes (navigating from one user's profile to another's), `ProfileForm` is the *same component instance* — React only re-renders it with a new `initialName` prop, it does not remount it. But `useState(initialName)` only uses that argument on the very first render; every subsequent render keeps whatever the *previous* user's edits left in `name`, silently showing stale text from user A while editing user B's profile. The fix is exactly the `key` pattern proven above: `<ProfileForm key={userId} initialName={user.name} />` — a new `userId` now forces a fresh `ProfileForm` instance, so `useState(initialName)` genuinely re-initializes from the new user's data instead of carrying over the old one.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-When two components share state, **lift it** to their closest common ancestor — one source of truth, data down, callbacks up. When props must pass through many uninterested layers (**prop drilling**), try **composition first**: pass the rendered JSX as `children` or a prop so intermediate components stay generic and never see the value. Only reach for Context when composition can't reach the consumers.
+Lift state to the closest common ancestor when siblings must share it; when props would only drill through uninterested layers, pass **rendered JSX as `children`/props** instead — this fixes prop drilling *and* proven above, skips re-rendering that subtree when the wrapping component's own state changes, no `memo` required. Never let an input flip between controlled (`value` always defined) and uncontrolled (`value={undefined}`) — React's real warning names that exact transition. Prefer **derived state computed during render** over a `useEffect` that mirrors a prop into state — the effect version costs an extra render and briefly shows stale data, both proven above. And reach for **`key`** as a deliberate reset switch when a component's internal state must fully restart on some identifying value changing, not just for list identity.
 </Callout>
 
 export const quizLift = [
@@ -91,6 +401,7 @@ export const quizLift = [
       'In the DOM',
     ],
     answer: 1,
+    explain: 'Lifting gives the state a single source of truth in the common ancestor, so both siblings read the same value and can never disagree.',
   },
   {
     q: 'What is prop drilling?',
@@ -101,6 +412,7 @@ export const quizLift = [
       'Rendering on the server',
     ],
     answer: 0,
+    explain: 'Every intermediate layer gains a prop it does not use itself, purely to forward it further down — that forwarding chain is what "drilling" refers to.',
   },
   {
     q: 'What is the composition fix for prop drilling?',
@@ -111,6 +423,7 @@ export const quizLift = [
       'Always use Context immediately',
     ],
     answer: 1,
+    explain: 'The intermediate component only renders {children}; it never receives or forwards the value at all, since the JSX using it was already created higher up.',
   },
   {
     q: 'In one-way data flow, how does data move?',
@@ -121,6 +434,40 @@ export const quizLift = [
       'Randomly',
     ],
     answer: 1,
+    explain: 'State flows down from the owner as props; children request changes by calling functions (callbacks) passed down to them, which the owner uses to update its state.',
+  },
+  {
+    q: 'Besides fixing prop drilling, what does passing `children` as a prop also do?',
+    options: [
+      'Nothing extra — it is purely a code-organization technique',
+      'It lets React skip re-rendering that subtree when the wrapping component\'s own state changes, with no memo needed',
+      'It automatically fetches data for the children',
+      'It converts the children into a Context provider',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: a component with fast-ticking internal state re-rendered on every click, but the children passed into it rendered zero additional times.',
+  },
+  {
+    q: 'What is the real React warning when an `<input>`\'s `value` goes from `undefined` to a defined string across renders?',
+    options: [
+      'input value must be a string, got undefined',
+      '"A component is changing an uncontrolled input to be controlled. [...] which should not happen."',
+      'Cannot read property value of undefined',
+      'There is no warning — React handles this silently',
+    ],
+    answer: 1,
+    explain: 'Captured verbatim in the probe by spying on console.error while flipping a real input\'s value from undefined to "hello" across a re-render.',
+  },
+  {
+    q: '```tsx\nfunction Comp({ firstName, lastName, onRender }) {\n  const [fullName, setFullName] = useState(`${firstName} ${lastName}`);\n  useEffect(() => {\n    setFullName(`${firstName} ${lastName}`);\n  }, [firstName, lastName]);\n  onRender();\n  return <span>{fullName}</span>;\n}\n```\nCompared to computing `fullName` directly during render (no effect, no extra state), what does this version cost?',
+    options: [
+      'Nothing — they behave identically',
+      'One extra render per prop change, and a frame where the displayed value is briefly stale',
+      'It renders one fewer time',
+      'It throws an error in Strict Mode',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: the effect-synced version took 3 renders (mount, prop change, effect\'s own setState) to reach the final value versus 2 for the version that derives fullName directly during render.',
   },
 ];
 
