@@ -1,0 +1,160 @@
+---
+title: How to read React you did not write
+description: 'A reading order for AI-generated React code — hook dependencies first, then the server/client boundary, then keys and identity, then who owns each piece of state, then effects vs events, then memo pairing and compiler assumptions.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Every earlier module in this course taught you to *write* React. This module teaches the other half: reading React someone — or something — else wrote, and deciding whether it is correct. An AI assistant hands you a component that compiles, that `tsc --noEmit` accepts, and that looks exactly like the hooks examples you have been studying. None of that proves it is correct. React's own failure modes are unusually quiet: an effect that reconnects on every keystroke instead of once, a list that silently swaps two rows' state, a `memo` wrapper that never once skips a render. The six steps below are the order that actually surfaces these failures, and every later lesson in this module drills one part of it.
+
+<Mermaid title="Reading order for a component you did not write" code={readingOrderDiagram} />
+
+export const readingOrderDiagram = `flowchart TD
+  A["1. Hooks and their deps<br/>dependency arrays, rules of hooks"] --> B["2. Server/client boundary<br/>'use client' / 'use server' directives"]
+  B --> C["3. Keys and identity<br/>list identity vs the reset switch"]
+  C --> D["4. State ownership<br/>derived vs synced, lifted vs local"]
+  D --> E["5. Effects vs events<br/>what belongs in which"]
+  E --> F["6. Memo pairing and compiler assumptions<br/>what actually skips a render"]
+`;
+
+## 1. Hooks and their dependencies
+
+Before you trust what a hook *does*, read what it depends on. A dependency array is a claim: "this effect only needs to re-run when these values change." An AI-generated component frequently gets the claim wrong in either direction — a value silently omitted (so the effect goes stale) or a value silently added because the linter complained (so the effect reconnects far more than it should).
+
+- **What to look for:** every `useEffect`/`useLayoutEffect`/`useMemo`/`useCallback` dependency array, checked against everything the callback actually reads; every hook call, checked against whether it sits at the top level, unconditionally, in the same order every render; whether a value that changes on every render (a promise built inline, a new object literal) is handed to a hook that needs a *stable* reference (`use()`, `useSyncExternalStore`).
+- **The question to ask:** if I actually enabled the ESLint rule for this, would it pass — and if a value was left out of the array on purpose, is there a real reason (`useEffectEvent`), or did someone just silence the warning?
+- **Which lesson explains it:** **[useEffect & Effects](/react/en/hooks/useeffect-and-effects/)** for dependency arrays, cleanup, and `useEffectEvent`; **[Rules & Custom Hooks](/react/en/hooks/rules-and-custom-hooks/)** for the rules of hooks themselves; **[External Stores](/react/en/state-and-data/external-stores/)** for the selector-must-be-cached trap.
+
+## 2. The server/client boundary and directives
+
+React code written for a framework (Next.js, or any other RSC-capable setup) carries directives that change *where* a file's code runs. `'use client'` marks the boundary into interactive, browser-side code; `'use server'` marks a function as a callable network endpoint. Getting the boundary wrong doesn't fail in this course's own Vite probe — a plain `tsc --noEmit` treats both directives as harmless string literals — but it fails hard the moment a real RSC framework builds the same file.
+
+- **What to look for:** does every file that calls `useState`, `useEffect`, or attaches an event handler actually have `'use client'` (on itself, or a parent) in a real RSC project? Does a prop crossing from a Server Component into a Client Component stay serializable — no bare functions, no class instances?
+- **The question to ask:** if this file were dropped into a real Next.js App Router project today, would the framework's own build reject it — and does this course's probe (which can't run RSC) actually prove that, or only prove the TypeScript shapes are valid?
+- **Which lesson explains it:** **[Server Components](/react/en/react-19/server-components/)** for the boundary itself and what can cross it.
+
+## 3. Keys and identity
+
+`key` does two separate jobs, and AI-generated code frequently only knows about one of them. As list identity, a wrong key doesn't throw — it silently attaches the wrong internal state to the wrong row the next time the list changes shape. As a reset switch on a single component, a *missing* deliberate key is invisible until you notice a component that should have reset is still showing yesterday's data.
+
+- **What to look for:** every `.map()` that renders a list — is the key a stable id from the data, or the array index, or missing entirely (falling back to index behavior with a console warning)? Every `<>...</>` shorthand fragment inside a `.map()` — does it need a key it structurally cannot have? Every editor/detail component whose "current item" prop changes — does it use `key={currentItemId}` to force a clean reset, or does it accumulate stale internal state instead?
+- **The question to ask:** if this list reorders, inserts, or deletes an item, does React attach the right internal state to the right row — and if this component's subject changes, does its internal state actually reset, or silently carry over?
+- **Which lesson explains it:** **[Rendering & Reconciliation](/react/en/foundations/rendering-and-reconciliation/)** for both jobs of `key`, proven with real mount/unmount tests.
+
+## 4. Who owns each piece of state
+
+Every `useState` call is a claim about ownership: this component is the single source of truth for this value. AI-generated code frequently duplicates ownership — mirroring a prop into state with an effect, mutating a value in place instead of replacing it, or broadcasting fast-changing state through a mechanism built for slow-changing, broadly-shared values.
+
+- **What to look for:** state that could be computed during render (`const fullName = first + ' ' + last`) but is instead synced via `useEffect`; an object or array mutated in place (`.push`, direct field assignment) before being handed to a setter; `setState` called directly in a render body, not an event handler or an effect; a Context whose value changes on every keystroke or animation frame, feeding many scattered consumers that would be better served by an external store's selector.
+- **The question to ask:** does this component actually need to *own* this value, or is it just re-deriving something already available from props/other state — and if it owns it, is every update producing a genuinely new reference?
+- **Which lesson explains it:** **[useEffect & Effects](/react/en/hooks/useeffect-and-effects/)** for "you probably don't need an effect"; **[State Snapshot & Purity](/react/en/foundations/state-snapshot-and-purity/)** for the `Object.is` bail-out and why mutation silently fails to re-render; **[Context](/react/en/state-and-data/context/)** for why a wide, fast-changing context re-renders everything underneath it, `memo` included.
+
+## 5. Effects vs events
+
+An effect and an event handler answer two different questions — "what should stay synchronized with something outside React" versus "what should happen because the user did something" — and AI-generated code regularly answers the wrong one with the wrong tool. The same confusion shows up in the async-Transition pitfall: code that looks like it's inside `startTransition` the whole time, when only the part before the first `await` actually is.
+
+- **What to look for:** a data fetch inside an effect with no `AbortController`, when the identifier it depends on can change quickly; a `set` call issued *after* an `await` inside `startTransition(async () => {...})` that was never re-wrapped in its own `startTransition`; a `useLayoutEffect` that reads a value a sibling `useEffect` is responsible for writing, on the same commit.
+- **The question to ask:** if this identifier changes quickly (fast typing, rapid navigation), can an older, slower response overwrite a newer one — and does every `set` call after an `await` still carry the priority the surrounding code implies it has?
+- **Which lesson explains it:** **[useEffect & Effects](/react/en/hooks/useeffect-and-effects/)** for abort-safe fetching; **[Transitions](/react/en/concurrent-and-suspense/transitions/)** and **[Actions & useActionState](/react/en/react-19/actions-and-useactionstate/)** for the async-Transition `await` pitfall; **[Commit Phase & Effects](/react/en/react-internals/commit-phase-and-effects/)** for exactly why `useLayoutEffect` and `useEffect` fire in that order, every commit.
+
+## 6. Memo pairing and compiler assumptions
+
+`React.memo`, `useMemo`, and `useCallback` only work if the rest of the component plays along — a single inline object or function literal passed as a prop defeats a `memo` wrapper completely, silently, with no warning. The React Compiler changes this calculus by inserting the same discipline automatically, but only for code that actually follows the Rules of React; it assumes purity, and a component that violates it just doesn't get compiled, with nothing in the build output telling you so.
+
+- **What to look for:** an object, array, or function literal built inline and passed as a prop to a component wrapped in `memo`; a component's return type annotated `JSX.Element`/`ReactElement` in a place that also needs to return `null`; whether the project's build config actually wires up `babel-plugin-react-compiler` at all, versus code that reads as if it assumes the compiler is running.
+- **The question to ask:** does this exact prop keep the same reference across renders when nothing meaningful changed — and if the answer is no, is that actually memoized anywhere, by hand or by the compiler?
+- **Which lesson explains it:** **[Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/)** and **[The React Compiler](/react/en/react-19/the-react-compiler/)** for what each tool actually catches, with real compiler output; **[TypeScript with React](/react/en/tooling-and-production/typescript-with-react/)** for `ReactNode` vs `ReactElement`/`JSX.Element`.
+
+## Mental Model
+
+```text
+Reading order for a React component you did not write:
+
+1. Hooks & deps      → does every dependency array tell the truth?
+2. Boundary/directives → does 'use client'/'use server' actually sit where it needs to?
+3. Keys & identity    → does the right internal state follow the right row/subject?
+4. State ownership    → who actually owns this value, and is every update a new reference?
+5. Effects vs events  → is this synchronizing with something external, or reacting to input?
+6. Memo/compiler      → does anything actually skip a render, and would the compiler agree?
+
+Skipping straight to "does it compile" answers none of these — all six patterns in this
+module's catalog pass tsc --noEmit clean.
+```
+
+## Common Misconceptions
+
+- **"If `tsc --noEmit` passes, the code is correct."** Every entry in this module's catalog type-checks cleanly. TypeScript proves the shapes are valid, never that the runtime behavior is what the prose around the code claims.
+- **"A missing dependency is always a bug to silence with `useEffectEvent` or a wider array."** Sometimes the real fix is neither — it's splitting the effect into two effects doing two genuinely different things.
+- **"AI-generated code needs more scrutiny than human-written code."** Every pattern in this module's catalog also appears in human-written React — AI just produces it with more confidence, and at higher volume.
+- **"If a component renders the right thing once, its state management is correct."** Several of this module's bugs (index keys, context store, mutation) only show up on the *second* interaction, reorder, or unrelated re-render — a single render proves almost nothing about ownership.
+
+<Callout title="The one-line takeaway">
+Read a React component in this order — hooks and their dependencies, the server/client boundary, keys and identity, who owns each piece of state, effects vs events, then memo pairing and compiler assumptions — because each step changes what the next one means, and because `tsc --noEmit` passing tells you the code compiles, never that it is correct.
+</Callout>
+
+export const quizReadingReactIndex = [
+  {
+    q: "Why does this module check hook dependency arrays before checking anything about keys or memoization?",
+    options: [
+      "Because dependency arrays are always the shortest thing to read",
+      "Because a stale or over-eager dependency array changes how the rest of the component behaves, which everything read afterward assumes is correct",
+      "Because keys are only relevant in class components",
+      "The order does not matter",
+    ],
+    answer: 1,
+    explain: "A wrong dependency array (missing or over-included) changes when an effect re-runs, which is exactly the kind of foundational behavior the later steps (state ownership, effects vs events) build on top of.",
+  },
+  {
+    q: "```tsx\nfunction Timer() {\n  const [count, setCount] = useState(0);\n  const [increment, setIncrement] = useState(1);\n  useEffect(() => {\n    const id = setInterval(() => setCount((c) => c + increment), 1000);\n    return () => clearInterval(id);\n  }, []);\n  return <button onClick={() => setIncrement((i) => i + 1)}>{count}</button>;\n}\n```\nWhat does reading this component's dependency array first reveal?",
+    options: [
+      "Nothing — the empty array is always correct for setInterval",
+      "The interval closes over the FIRST render's `increment` forever, because the empty array means the effect (and its closure) is never recreated",
+      "TypeScript will refuse to compile this",
+      "The component will crash on the second render",
+    ],
+    answer: 1,
+    explain: "This is the classic stale-closure-in-an-interval bug, proven in the Hooks module: the empty dependency array means the interval callback keeps referencing whatever `increment` was on the render that created it — clicking the button changes state but never recreates the interval.",
+  },
+  {
+    q: "Why does `'use client'` failing to error in this course's own probe not mean the directive is unimportant?",
+    options: [
+      "It means the directive genuinely does nothing",
+      "This course's probe is a plain Vite + tsc setup with no RSC framework — a real framework's build step is what actually enforces the boundary, and it fails hard where tsc stays silent",
+      "'use client' only matters for CSS",
+      "Directives are always optional",
+    ],
+    answer: 1,
+    explain: "'use client'/'use server' are plain string literals as far as tsc is concerned. Only an RSC-capable framework's own build (Next.js App Router, for example) actually enforces what can and cannot cross the boundary.",
+  },
+  {
+    q: "```jsx\n{items.map((item) => (\n  <Row key={Math.random()} item={item} />\n))}\n```\nWhat happens on every re-render of this list?",
+    options: [
+      "Nothing changes — random keys are equivalent to stable ones",
+      "Every item is treated as brand new every single render, forcing a full remount of the entire list every time",
+      "Only the first item remounts",
+      "React throws a compile-time error",
+    ],
+    answer: 1,
+    explain: "A key that changes every render (Math.random(), Date.now()) tells React every item is a completely new identity every time — the opposite of what key is for, and a full-list remount on every render, not just a subtle bug.",
+  },
+  {
+    q: "Which step in this reading order specifically covers 'does this prop keep the same reference across renders'?",
+    options: [
+      "Keys and identity",
+      "Memo pairing and compiler assumptions",
+      "The server/client boundary",
+      "Effects vs events",
+    ],
+    answer: 1,
+    explain: "Reference stability for props feeding a memo(...) wrapper (or a hook needing a stable dependency) is exactly the memo-pairing step's question — a fresh object/array/function literal defeats memoization even when nothing meaningful changed.",
+  },
+];
+
+<Quiz client:visible id="reading-react/index" questions={quizReadingReactIndex} />
+
+<ProgressTracker client:visible id="reading-index" />

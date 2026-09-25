@@ -1,0 +1,134 @@
+---
+title: Review checklist
+description: 'A one-page, six-group checklist for reviewing React code — each line a yes/no question linking to the lesson that explains the underlying rule.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+This is the checklist to run down — by eye, on any diff, yours or an AI's — after the tools in **[Verification Tools](/react/en/reading-react/verification-tools/)** have run and come back clean. It fits on one printed page on purpose: a checklist nobody actually opens during a review is worthless. Every line links to the lesson that explains *why*, so this page stays a list, not a re-run of the course. The groups follow the same order as **[How to read React you did not write](/react/en/reading-react/)**.
+
+<Mermaid title="What actually catches each group, if anything" code={checklistCoverageDiagram} />
+
+export const checklistCoverageDiagram = `flowchart LR
+  H["Hooks and deps"] --> P["Partial tool coverage<br/>(eslint-plugin-react-hooks catches some; behavior needs a test)"]
+  B["Boundary and directives"] --> M["Mostly human review<br/>(a real RSC framework build is the only real check)"]
+  K["Keys and identity"] --> M
+  S["State ownership"] --> P
+  E["Effects vs events"] --> M
+  C["Memo and compiler"] --> M
+`;
+
+## Hooks and their dependencies
+
+- Does every `useEffect`/`useMemo`/`useCallback` dependency array include everything the callback actually reads? See **[useEffect & Effects](/react/en/hooks/useeffect-and-effects/)**.
+- Is a value that changes often (a callback, a theme) read through `useEffectEvent` rather than silently omitted from an effect's deps? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 2.
+- Is every hook called unconditionally, at the top level, in the same order every render — never after an early `return`, never inside an `if`? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 3.
+- Does `useRef<T>()` always receive an explicit initial value (`null` for a DOM ref)? See **[TypeScript with React](/react/en/tooling-and-production/typescript-with-react/)**.
+- Does new code accept `ref` as a plain prop instead of wrapping itself in `forwardRef`? See **[useRef & the DOM](/react/en/hooks/useref-and-the-dom/)**.
+- Does every `useSyncExternalStore`'s `getSnapshot` return a primitive or a cached reference, never a fresh object/array literal? See **[External Stores](/react/en/state-and-data/external-stores/)**.
+- Is every promise passed to `use()` read from a stable cache, never built fresh inline in the render body? See **[`use()` & Data Fetching](/react/en/concurrent-and-suspense/use-and-data-fetching/)**.
+- Does the code import `useActionState` from `react`, not `useFormState` from `react-dom`? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 8.
+
+## The server/client boundary and directives
+
+- Does every file that calls a client-only hook (`useState`, `useEffect`) or attaches an event handler actually have `'use client'` on itself or a parent, in a real RSC-capable project? See **[Server Components](/react/en/react-19/server-components/)**.
+- Does every prop crossing from a Server Component into a Client Component stay plain, serializable data (or a real Server Action) — never a bare function or class instance? See **[Server Components](/react/en/react-19/server-components/)**.
+- Is `dangerouslySetInnerHTML` ever fed user-supplied content without running it through a real sanitizer first? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 11.
+- Is `useOptimistic`'s setter (or `requestFormReset`) called from inside `startTransition`/an Action, never directly from a plain event handler? See **[Forms & useOptimistic](/react/en/react-19/forms-and-useoptimistic/)**.
+
+## Keys and identity
+
+- Does every `.map()` over a list use a stable id from the data as `key` — never the array index, and never omitted entirely? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entries 13–14.
+- Does a `.map()` that groups sibling elements use `<Fragment key={...}>` (imported explicitly), never the `<>` shorthand? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 15.
+- Does an editor/detail component use `key={currentItemId}` to force a clean reset when its subject changes, instead of accumulating stale internal state? See **[Rendering & Reconciliation](/react/en/foundations/rendering-and-reconciliation/)**.
+
+## Who owns each piece of state
+
+- Could this state be derived during render instead of synced from a prop with a `useEffect`? See **[useEffect & Effects](/react/en/hooks/useeffect-and-effects/)**.
+- Is `setState` ever called directly inside the render body, outside an event handler or effect? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 17.
+- Is every object/array state update a genuinely new reference, never a `.push`/direct-assignment mutation followed by calling the setter with the same reference? See **[State Snapshot & Purity](/react/en/foundations/state-snapshot-and-purity/)**.
+- Is a Context's provider `value` memoized (`useMemo`), and does it carry only slow-changing, broadly-shared data — never a value that changes on every keystroke? See **[Context](/react/en/state-and-data/context/)**.
+
+## Effects vs events
+
+- Does every `set` call **after** an `await` inside `startTransition(async () => {...})` sit inside its own nested `startTransition`? See **[Transitions](/react/en/concurrent-and-suspense/transitions/)**.
+- Does a data fetch inside an effect cancel its previous in-flight request (`AbortController`) when its identifier changes quickly? See **[useEffect & Effects](/react/en/hooks/useeffect-and-effects/)**.
+- Is any `Date.now()`/`Math.random()` read during render, in code that will ever hydrate — instead of only inside an effect or passed down as a fixed prop? See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 22.
+- Does a `useLayoutEffect` read a value only a sibling `useEffect` writes, expecting to see the current commit's write instead of the previous one? See **[Commit Phase & Effects](/react/en/react-internals/commit-phase-and-effects/)**.
+
+## Memo pairing and compiler assumptions
+
+- Does every prop passed to a `memo`-wrapped component stay a stable reference — no inline object/array/function literal built at the call site? See **[Memoization & the Compiler](/react/en/hooks/memoization-and-the-compiler/)**.
+- If the project claims to run the React Compiler, is `babel-plugin-react-compiler` actually wired into the build — or does the code just assume auto-memoization that isn't running? See **[The React Compiler](/react/en/react-19/the-react-compiler/)**.
+- Does a component's return type annotated `JSX.Element`/`ReactElement` ever need to return `null`? Should it be `ReactNode` instead? See **[TypeScript with React](/react/en/tooling-and-production/typescript-with-react/)**.
+
+<Callout title="A checklist narrows the search, it does not replace it">
+Every line above maps to one of the 25 patterns in the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)** — all but three of which no tool in this course catches automatically. Run this list on every diff regardless of how clean `tsc` and `eslint` came back.
+</Callout>
+
+export const quizReviewChecklist = [
+  {
+    q: "Why does 'is a Context's provider value memoized' belong in the 'State ownership' group rather than 'Memo pairing and compiler assumptions'?",
+    options: [
+      "It doesn't — it belongs in the memo group because memo is involved",
+      "The checklist groups by WHOSE state the question is about — a Context's value identity is about the provider's own state ownership, even though memo(consumer) is the thing it happens to defeat",
+      "Context has nothing to do with either group",
+      "There's no meaningful difference between the two groups",
+    ],
+    answer: 1,
+    explain: "The groups mirror the reading order's six steps: which underlying concern a question targets, not which API happens to be involved. An unmemoized provider value is a state-ownership/reference-stability issue at the provider, even though its visible symptom is a memoized consumer re-rendering.",
+  },
+  {
+    q: "```tsx\nuseLayoutEffect(() => {\n  if (boxRef.current) setMeasuredWidth(parseInt(boxRef.current.style.width, 10));\n});\nuseEffect(() => {\n  if (boxRef.current) boxRef.current.style.width = expand ? '200px' : '100px';\n}, [expand]);\n```\nWhich checklist group catches this, and how?",
+    options: [
+      "Memo pairing — it's about a memoized value",
+      "Effects vs events — 'does a useLayoutEffect read a value only a sibling useEffect writes, expecting to see the current commit's write instead of the previous one?'",
+      "Keys and identity — it's a key placement issue",
+      "No group covers this",
+    ],
+    answer: 1,
+    explain: "This is exactly the Effects vs events group's ordering question: useLayoutEffect fires before useEffect on every commit, so a read in the former can never observe the latter's write from the SAME commit.",
+  },
+  {
+    q: "Why does the checklist ask specifically whether a `.map()` grouping siblings uses `<Fragment key={...}>` (imported explicitly), rather than just 'does every list item have a key'?",
+    options: [
+      "Those two questions are exactly the same thing",
+      "The shorthand <>...</> fragment cannot carry a key under any syntax — a reviewer checking only 'is there a key present' would miss that this specific shape has no way to have one at all until Fragment is imported",
+      "Fragments never need keys",
+      "This only matters in class components",
+    ],
+    answer: 1,
+    explain: "As the AI Bug Catalog's entry 15 shows: the shorthand fragment is structurally incapable of taking any attribute, key included — the fix isn't 'add the missing key', it's switching to the long-form Fragment import first.",
+  },
+  {
+    q: "```tsx\nexport default function ProductPage({ id }) {\n  function handleAddToCart() { console.log('added', id); }\n  return <AddToCartButton onAdd={handleAddToCart} />;\n}\n```\nWhich checklist group covers this diff, and what does it ask?",
+    options: [
+      "Memo pairing and compiler assumptions",
+      "The server/client boundary and directives",
+      "Keys and identity",
+      "Hooks and their dependencies",
+    ],
+    answer: 1,
+    explain: "Serialization rules across the Server/Client split are exactly what the boundary group covers — a concern about what crosses a directive-marked line, not about hooks, keys, or memoization.",
+  },
+  {
+    q: "The checklist says to check whether 'Date.now()/Math.random() is read during render, in code that will ever hydrate.' Why does the 'will ever hydrate' qualifier matter?",
+    options: [
+      "It doesn't — this always breaks, everywhere",
+      "A hydration mismatch requires a second, disagreeing execution of the same render logic against server-sent HTML — a component that only ever renders client-side (a plain SPA) has no such second execution to disagree with",
+      "Math.random() is banned entirely in React",
+      "Date.now() only works in Server Components",
+    ],
+    answer: 1,
+    explain: "Proven in the AI Bug Catalog's entry 22: the mismatch requires renderToString followed by a hydrateRoot call re-executing the same component — a client-only render tree never replays against server HTML, so there's nothing for a second execution to disagree with.",
+  },
+];
+
+<Quiz client:visible id="reading-react/review-checklist" questions={quizReviewChecklist} />
+
+<ProgressTracker client:visible id="reading-checklist" />

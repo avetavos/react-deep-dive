@@ -1,0 +1,160 @@
+---
+title: วิธีอ่านโค้ด React ที่คุณไม่ได้เขียน
+description: 'ลำดับการอ่านโค้ด React ที่ AI เขียน — เริ่มจาก hook dependency ก่อน แล้วดู server/client boundary แล้วดู key กับ identity แล้วดูว่าใครเป็นเจ้าของ state แต่ละก้อน แล้วดู effect เทียบกับ event สุดท้ายดู memo pairing กับสมมติฐานของ compiler'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ทุกโมดูลก่อนหน้านี้ในคอร์สสอนให้คุณ *เขียน* React โมดูลนี้สอนอีกครึ่งหนึ่ง: การอ่านโค้ด React ที่คนอื่น — หรืออะไรบางอย่าง — เขียนไว้ แล้วตัดสินว่ามันถูกหรือเปล่า AI assistant ยื่น component ที่ compile ผ่าน ที่ `tsc --noEmit` ยอมรับ และหน้าตาเหมือน example ของ hooks ที่คุณเรียนมาทุกอย่าง แต่นั่นไม่ได้พิสูจน์อะไรเลยว่ามันถูก failure mode ของ React เองมักจะเงียบผิดปกติ: effect ที่ reconnect ทุกครั้งที่พิมพ์แทนที่จะ connect ครั้งเดียว, list ที่สลับ state ของสองแถวแบบเงียบ ๆ, `memo` wrapper ที่ไม่เคย skip render สักครั้งเดียว 6 ขั้นตอนด้านล่างคือลำดับที่เผยบั๊กพวกนี้ออกมาจริง ๆ และทุกบทที่ตามมาในโมดูลนี้เจาะลึกทีละขั้น
+
+<Mermaid title="ลำดับการอ่าน component ที่คุณไม่ได้เขียน" code={readingOrderDiagram} />
+
+export const readingOrderDiagram = `flowchart TD
+  A["1. Hooks and their deps<br/>dependency arrays, rules of hooks"] --> B["2. Server/client boundary<br/>'use client' / 'use server' directives"]
+  B --> C["3. Keys and identity<br/>list identity vs the reset switch"]
+  C --> D["4. State ownership<br/>derived vs synced, lifted vs local"]
+  D --> E["5. Effects vs events<br/>what belongs in which"]
+  E --> F["6. Memo pairing and compiler assumptions<br/>what actually skips a render"]
+`;
+
+## 1. Hooks กับ dependency ของมัน
+
+ก่อนจะเชื่อว่า hook *ทำ* อะไร ให้อ่านก่อนว่ามัน depend on อะไร dependency array คือคำกล่าวอ้าง: "effect นี้ต้องรันใหม่ก็ต่อเมื่อค่าพวกนี้เปลี่ยน" component ที่ AI generate มักจะทำผิดคำกล่าวอ้างนี้ได้ทั้งสองทาง — ค่าที่ถูกตัดออกไปเงียบ ๆ (effect เลย stale) หรือค่าที่ถูกเติมเข้าไปเงียบ ๆ เพราะ linter บ่น (effect เลย reconnect บ่อยเกินความจำเป็น)
+
+- **สิ่งที่ต้องมองหา:** dependency array ของทุก `useEffect`/`useLayoutEffect`/`useMemo`/`useCallback` เทียบกับทุกอย่างที่ callback อ่านจริง ๆ; ทุกการเรียก hook เช็คว่ามันอยู่ top level แบบ unconditional ในลำดับเดียวกันทุก render หรือเปล่า; ค่าที่เปลี่ยนทุก render (promise ที่สร้างขึ้นตรง ๆ ใน render, object literal ใหม่) ถูกส่งให้ hook ที่ต้องการ reference ที่ *เสถียร* (`use()`, `useSyncExternalStore`) หรือเปล่า
+- **คำถามที่ต้องถาม:** ถ้าเปิด ESLint rule ของเรื่องนี้จริง ๆ มันจะผ่านไหม — และถ้าค่าถูกตัดออกจาก array โดยตั้งใจ มีเหตุผลจริง (`useEffectEvent`) หรือแค่มีคน silence warning ทิ้งไว้?
+- **บทที่อธิบายเรื่องนี้:** **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)** สำหรับ dependency array, cleanup และ `useEffectEvent`; **[Rules & Custom Hooks](/react/th/hooks/rules-and-custom-hooks/)** สำหรับกฎของ hooks เอง; **[External Stores](/react/th/state-and-data/external-stores/)** สำหรับกับดัก selector-ต้อง-cache
+
+## 2. Server/client boundary กับ directive
+
+โค้ด React ที่เขียนสำหรับ framework (Next.js หรือ RSC-capable setup ไหนก็ตาม) มี directive ที่เปลี่ยน *ที่ที่* โค้ดในไฟล์นั้นรัน `'use client'` บ่งบอก boundary เข้าสู่โค้ดฝั่ง browser ที่ interactive; `'use server'` บ่งบอกว่า function เป็น network endpoint ที่เรียกได้ การเข้าใจ boundary ผิดจะไม่ fail ใน probe Vite ของคอร์สนี้เอง — `tsc --noEmit` ธรรมดามองทั้งสอง directive เป็นแค่ string literal ไร้พิษภัย — แต่มัน fail หนักทันทีที่ RSC framework จริงมาสร้างไฟล์เดียวกันนี้
+
+- **สิ่งที่ต้องมองหา:** ทุกไฟล์ที่เรียก `useState`, `useEffect` หรือแปะ event handler มี `'use client'` จริง ๆ ไหม (บนตัวเองหรือ parent) ใน project RSC จริง? prop ที่ข้ามจาก Server Component ไปหา Client Component ยังคง serializable อยู่ไหม — ไม่มี function เปล่า ๆ ไม่มี class instance?
+- **คำถามที่ต้องถาม:** ถ้าเอาไฟล์นี้ไปวางใน project Next.js App Router จริงวันนี้ build ของ framework เองจะปฏิเสธมันไหม — และ probe ของคอร์สนี้ (ที่รัน RSC ไม่ได้) พิสูจน์เรื่องนั้นได้จริงหรือพิสูจน์ได้แค่ว่ารูปแบบ TypeScript ถูกต้อง?
+- **บทที่อธิบายเรื่องนี้:** **[Server Components](/react/th/react-19/server-components/)** สำหรับ boundary เองและสิ่งที่ข้ามมันได้
+
+## 3. Key กับ identity
+
+`key` ทำงานสองอย่างที่แยกกัน และโค้ดที่ AI generate มักรู้จักแค่อย่างเดียว ในฐานะ list identity, key ที่ผิดจะไม่ throw — มัน attach internal state ผิดแถวเงียบ ๆ ครั้งต่อไปที่ list เปลี่ยนรูปร่าง ในฐานะ reset switch บน component เดี่ยว, key ที่*ขาดหาย*โดยตั้งใจจะมองไม่เห็นจนกว่าคุณจะสังเกตว่า component ที่ควรจะ reset ยังโชว์ข้อมูลของเมื่อวาน
+
+- **สิ่งที่ต้องมองหา:** ทุก `.map()` ที่ render list — key เป็น id ที่เสถียรจากข้อมูล หรือเป็น array index หรือขาดหายไปเลย (ตกไปใช้พฤติกรรมแบบ index พร้อม console warning)? ทุก `<>...</>` shorthand fragment ข้างใน `.map()` — มันต้องการ key ที่โดยโครงสร้างแล้วมีไม่ได้หรือเปล่า? component editor/detail ที่ prop "current item" เปลี่ยน — มันใช้ `key={currentItemId}` เพื่อบังคับ reset สะอาด ๆ หรือมันสะสม internal state ที่ค้างอยู่แทน?
+- **คำถามที่ต้องถาม:** ถ้า list นี้ reorder, insert หรือลบ item, React attach internal state ที่ถูกต้องให้แถวที่ถูกต้องไหม — และถ้าเรื่องที่ component นี้แสดงเปลี่ยนไป internal state ของมัน reset จริงไหม หรือแอบ carry over มา?
+- **บทที่อธิบายเรื่องนี้:** **[Rendering & Reconciliation](/react/th/foundations/rendering-and-reconciliation/)** สำหรับหน้าที่ทั้งสองของ `key` พิสูจน์ด้วย test mount/unmount จริง
+
+## 4. ใครเป็นเจ้าของ state แต่ละก้อน
+
+ทุกการเรียก `useState` คือคำกล่าวอ้างเรื่อง ownership: component นี้คือ single source of truth สำหรับค่านี้ โค้ดที่ AI generate มักซ้ำซ้อน ownership — mirror prop เข้า state ด้วย effect, mutate ค่าตรง ๆ แทนที่จะแทนที่มัน หรือกระจาย state ที่เปลี่ยนเร็วผ่านกลไกที่สร้างมาสำหรับค่าที่เปลี่ยนช้าและแชร์กว้าง
+
+- **สิ่งที่ต้องมองหา:** state ที่คำนวณได้ตอน render (`const fullName = first + ' ' + last`) แต่กลับถูก sync ผ่าน `useEffect` แทน; object หรือ array ที่ mutate ตรง ๆ (`.push`, การ assign field ตรง ๆ) ก่อนส่งให้ setter; `setState` ถูกเรียกตรง ๆ ใน render body ไม่ใช่ใน event handler หรือ effect; Context ที่ value เปลี่ยนทุก keystroke หรือ animation frame ป้อนให้ consumer ที่กระจัดกระจายจำนวนมาก ซึ่งจะดีกว่าถ้าใช้ selector ของ external store
+- **คำถามที่ต้องถาม:** component นี้จำเป็นต้อง *เป็นเจ้าของ* ค่านี้จริงไหม หรือมันแค่ derive ของบางอย่างที่มีอยู่แล้วจาก prop/state อื่น — และถ้ามันเป็นเจ้าของ ทุก update สร้าง reference ใหม่จริงไหม?
+- **บทที่อธิบายเรื่องนี้:** **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)** สำหรับ "คุณอาจไม่ต้องใช้ effect"; **[State Snapshot & Purity](/react/th/foundations/state-snapshot-and-purity/)** สำหรับ `Object.is` bail-out และทำไม mutation ถึงทำให้ re-render ไม่เกิดแบบเงียบ ๆ; **[Context](/react/th/state-and-data/context/)** สำหรับทำไม context กว้าง ๆ ที่เปลี่ยนเร็ว re-render ทุกอย่างข้างใต้มัน รวมถึง `memo` ด้วย
+
+## 5. Effect เทียบกับ event
+
+effect กับ event handler ตอบคำถามคนละข้อ — "อะไรควร sync กับสิ่งนอก React" เทียบกับ "อะไรควรเกิดขึ้นเพราะ user ทำอะไรบางอย่าง" — และโค้ดที่ AI generate มักตอบผิดข้อด้วยเครื่องมือผิดตัว ความสับสนแบบเดียวกันนี้โผล่ในกับดัก async-Transition: โค้ดที่ดูเหมือนอยู่ใน `startTransition` ตลอดเวลา ทั้งที่จริงมีแค่ส่วนก่อน `await` แรกเท่านั้นที่ใช่
+
+- **สิ่งที่ต้องมองหา:** data fetch ข้างใน effect ที่ไม่มี `AbortController` ทั้งที่ identifier ที่มันขึ้นกับเปลี่ยนเร็วได้; การเรียก `set` *หลัง* `await` ข้างใน `startTransition(async () => {...})` ที่ไม่เคยถูกห่อด้วย `startTransition` ของตัวเองอีกที; `useLayoutEffect` ที่อ่านค่าที่ `useEffect` ตัวพี่น้องรับผิดชอบเขียน ใน commit เดียวกัน
+- **คำถามที่ต้องถาม:** ถ้า identifier นี้เปลี่ยนเร็ว (พิมพ์เร็ว, navigate เร็ว) response ที่เก่ากว่าและช้ากว่าจะ overwrite response ที่ใหม่กว่าได้ไหม — และทุกการเรียก `set` หลัง `await` ยังคง priority ที่โค้ดรอบข้างบอกเป็นนัยว่ามันมีอยู่ไหม?
+- **บทที่อธิบายเรื่องนี้:** **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)** สำหรับการ fetch แบบ abort-safe; **[Transitions](/react/th/concurrent-and-suspense/transitions/)** และ **[Actions & useActionState](/react/th/react-19/actions-and-useactionstate/)** สำหรับกับดัก `await` ของ async-Transition; **[Commit Phase & Effects](/react/th/react-internals/commit-phase-and-effects/)** สำหรับเหตุผลที่แท้จริงว่าทำไม `useLayoutEffect` กับ `useEffect` ยิงตามลำดับนั้นทุก commit
+
+## 6. Memo pairing กับสมมติฐานของ compiler
+
+`React.memo`, `useMemo` และ `useCallback` จะทำงานได้ก็ต่อเมื่อส่วนที่เหลือของ component ร่วมมือด้วย — object หรือ function literal แบบ inline หนึ่งตัวที่ส่งเป็น prop ทำลาย `memo` wrapper ได้หมดสิ้น เงียบ ๆ ไม่มี warning React Compiler เปลี่ยนสมการนี้ด้วยการใส่วินัยแบบเดียวกันให้อัตโนมัติ แต่เฉพาะโค้ดที่ทำตาม Rules of React จริง ๆ เท่านั้น — มันสมมติเรื่อง purity และ component ที่ละเมิดมันก็แค่ไม่ถูก compile โดยไม่มีอะไรใน build output บอกคุณเลย
+
+- **สิ่งที่ต้องมองหา:** object, array หรือ function literal ที่สร้างแบบ inline แล้วส่งเป็น prop ให้ component ที่ห่อด้วย `memo`; return type ของ component ที่ annotate เป็น `JSX.Element`/`ReactElement` ในที่ที่ต้อง return `null` ด้วย; build config ของ project ต่อสาย `babel-plugin-react-compiler` เข้าจริงหรือเปล่า เทียบกับโค้ดที่เขียนราวกับสมมติว่า compiler กำลังรันอยู่
+- **คำถามที่ต้องถาม:** prop ตัวนี้เก็บ reference เดิมข้าม render เมื่อไม่มีอะไรเปลี่ยนแปลงจริง ๆ ไหม — และถ้าคำตอบคือไม่ มันถูก memoize ไว้ที่ไหนสักแห่งไหม ไม่ว่าจะด้วยมือหรือด้วย compiler?
+- **บทที่อธิบายเรื่องนี้:** **[Memoization & the Compiler](/react/th/hooks/memoization-and-the-compiler/)** และ **[The React Compiler](/react/th/react-19/the-react-compiler/)** สำหรับสิ่งที่แต่ละเครื่องมือจับได้จริง พร้อม compiler output จริง; **[TypeScript with React](/react/th/tooling-and-production/typescript-with-react/)** สำหรับ `ReactNode` เทียบกับ `ReactElement`/`JSX.Element`
+
+## Mental Model
+
+```text
+Reading order for a React component you did not write:
+
+1. Hooks & deps      → does every dependency array tell the truth?
+2. Boundary/directives → does 'use client'/'use server' actually sit where it needs to?
+3. Keys & identity    → does the right internal state follow the right row/subject?
+4. State ownership    → who actually owns this value, and is every update a new reference?
+5. Effects vs events  → is this synchronizing with something external, or reacting to input?
+6. Memo/compiler      → does anything actually skip a render, and would the compiler agree?
+
+Skipping straight to "does it compile" answers none of these — all six patterns in this
+module's catalog pass tsc --noEmit clean.
+```
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ถ้า `tsc --noEmit` ผ่าน โค้ดก็ถูกต้อง"** ทุก entry ในแคตตาล็อกของโมดูลนี้ type-check ผ่านสะอาด TypeScript พิสูจน์แค่ว่ารูปแบบถูกต้อง ไม่เคยพิสูจน์ว่าพฤติกรรมตอน runtime เป็นไปตามที่ prose รอบโค้ดอ้างไว้
+- **"dependency ที่ขาดหายเป็นบั๊กที่ต้อง silence ด้วย `useEffectEvent` หรือ array ที่กว้างขึ้นเสมอ"** บางครั้งวิธีแก้จริงไม่ใช่ทั้งสองอย่าง — คือการแยก effect เป็นสองตัวที่ทำสองเรื่องที่ต่างกันจริง ๆ
+- **"โค้ดที่ AI generate ต้องการความระมัดระวังมากกว่าโค้ดที่คนเขียน"** ทุก pattern ในแคตตาล็อกของโมดูลนี้ก็โผล่ในโค้ด React ที่คนเขียนด้วยเหมือนกัน — AI แค่ผลิตมันด้วยความมั่นใจมากกว่าและปริมาณมากกว่า
+- **"ถ้า component render สิ่งที่ถูกต้องครั้งเดียว การจัดการ state ของมันก็ถูกต้อง"** บั๊กหลายตัวในโมดูลนี้ (index key, context store, mutation) จะโผล่ให้เห็นตอน interaction *ที่สอง*, ตอน reorder หรือตอน re-render ที่ไม่เกี่ยวข้องเท่านั้น — render ครั้งเดียวพิสูจน์เรื่อง ownership แทบไม่ได้เลย
+
+<Callout title="สรุปหนึ่งบรรทัด">
+อ่าน component React ตามลำดับนี้ — hooks กับ dependency ของมัน, server/client boundary, key กับ identity, ใครเป็นเจ้าของ state แต่ละก้อน, effect เทียบกับ event แล้วค่อย memo pairing กับสมมติฐานของ compiler — เพราะแต่ละขั้นเปลี่ยนความหมายของขั้นถัดไป และเพราะ `tsc --noEmit` ผ่านบอกแค่ว่าโค้ด compile ได้ ไม่เคยบอกว่ามันถูกต้อง
+</Callout>
+
+export const quizReadingReactIndex = [
+  {
+    q: "ทำไมโมดูลนี้ถึงเช็ค dependency array ของ hook ก่อนเช็คเรื่อง key หรือ memoization?",
+    options: [
+      "เพราะ dependency array สั้นที่สุดเสมอ",
+      "เพราะ dependency array ที่ stale หรือใส่มากเกินไปเปลี่ยนพฤติกรรมของส่วนที่เหลือของ component ซึ่งขั้นตอนหลัง ๆ (state ownership, effect เทียบกับ event) สมมติว่ามันถูกต้องอยู่แล้ว",
+      "เพราะ key เกี่ยวข้องแค่กับ class component เท่านั้น",
+      "ลำดับไม่สำคัญ",
+    ],
+    answer: 1,
+    explain: "dependency array ที่ผิด (ขาดหรือใส่เกิน) เปลี่ยนจังหวะที่ effect รันใหม่ ซึ่งเป็นพฤติกรรมพื้นฐานที่ขั้นตอนหลัง ๆ สร้างต่อยอดขึ้นไป",
+  },
+  {
+    q: "```tsx\nfunction Timer() {\n  const [count, setCount] = useState(0);\n  const [increment, setIncrement] = useState(1);\n  useEffect(() => {\n    const id = setInterval(() => setCount((c) => c + increment), 1000);\n    return () => clearInterval(id);\n  }, []);\n  return <button onClick={() => setIncrement((i) => i + 1)}>{count}</button>;\n}\n```\nการอ่าน dependency array ของ component นี้ก่อนเผยอะไรออกมา?",
+    options: [
+      "ไม่มีอะไร — array ว่างถูกต้องเสมอสำหรับ setInterval",
+      "interval ปิดทับ `increment` ของ render แรกสุดตลอดไป เพราะ array ว่างหมายความว่า effect (และ closure ของมัน) ไม่เคยถูกสร้างใหม่",
+      "TypeScript จะปฏิเสธไม่ compile โค้ดนี้",
+      "component จะ crash ตอน render ที่สอง",
+    ],
+    answer: 1,
+    explain: "นี่คือบั๊ก stale-closure-ใน-interval แบบคลาสสิก พิสูจน์แล้วในโมดูล Hooks: dependency array ว่างหมายความว่า callback ของ interval อ้างอิง `increment` ค่าเดิมที่มีตอนสร้าง effect ตลอดไป — การคลิกปุ่มเปลี่ยน state แต่ไม่เคยสร้าง interval ใหม่",
+  },
+  {
+    q: "ทำไม `'use client'` ที่ไม่ error ใน probe ของคอร์สนี้ไม่ได้แปลว่า directive นี้ไม่สำคัญ?",
+    options: [
+      "มันแปลว่า directive นี้ไม่ทำอะไรเลยจริง ๆ",
+      "probe ของคอร์สนี้เป็นแค่ Vite + tsc ธรรมดาไม่มี RSC framework — build จริงของ framework ต่างหากที่บังคับ boundary และมัน fail หนักตรงที่ tsc เงียบ",
+      "'use client' สำคัญแค่กับ CSS",
+      "directive เป็น optional เสมอ",
+    ],
+    answer: 1,
+    explain: "'use client'/'use server' เป็นแค่ string literal ธรรมดาในสายตาของ tsc มีแค่ build ของ framework ที่รองรับ RSC จริง (เช่น Next.js App Router) เท่านั้นที่บังคับว่าอะไรข้าม boundary ได้หรือไม่ได้",
+  },
+  {
+    q: "```jsx\n{items.map((item) => (\n  <Row key={Math.random()} item={item} />\n))}\n```\nเกิดอะไรขึ้นทุกครั้งที่ list นี้ re-render?",
+    options: [
+      "ไม่มีอะไรเปลี่ยน — random key เทียบเท่ากับ key ที่เสถียร",
+      "ทุก item ถูกมองเป็นของใหม่ทุก render บังคับให้ทั้ง list remount ใหม่ทุกครั้ง",
+      "แค่ item แรกเท่านั้นที่ remount",
+      "React throw compile-time error",
+    ],
+    answer: 1,
+    explain: "key ที่เปลี่ยนทุก render (Math.random(), Date.now()) บอก React ว่าทุก item เป็น identity ใหม่หมดทุกครั้ง — ตรงข้ามกับสิ่งที่ key มีไว้ทำ และทำให้ทั้ง list remount ทุก render ไม่ใช่แค่บั๊กเล็ก ๆ",
+  },
+  {
+    q: "ขั้นตอนไหนในลำดับการอ่านนี้ที่ครอบคลุมเรื่อง 'prop นี้เก็บ reference เดิมข้าม render ไหม' โดยตรง?",
+    options: [
+      "Key กับ identity",
+      "Memo pairing กับสมมติฐานของ compiler",
+      "Server/client boundary",
+      "Effect เทียบกับ event",
+    ],
+    answer: 1,
+    explain: "ความเสถียรของ reference สำหรับ prop ที่ป้อนให้ memo(...) wrapper (หรือ hook ที่ต้องการ dependency ที่เสถียร) คือคำถามของขั้น memo-pairing โดยตรง — object/array/function literal ใหม่ทำลาย memoization แม้ไม่มีอะไรเปลี่ยนแปลงจริง ๆ",
+  },
+];
+
+<Quiz client:visible id="reading-react/index" questions={quizReadingReactIndex} />
+
+<ProgressTracker client:visible id="reading-index" />

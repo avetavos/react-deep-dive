@@ -1,0 +1,134 @@
+---
+title: เช็คลิสต์รีวิวโค้ด
+description: 'เช็คลิสต์แบบหน้าเดียว แบ่ง 6 กลุ่ม สำหรับรีวิวโค้ด React — แต่ละบรรทัดเป็นคำถาม yes/no ที่ลิงก์ไปบทที่อธิบายกฎเบื้องหลัง'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+นี่คือเช็คลิสต์ที่ต้องไล่ดู — ด้วยตา บน diff ไหนก็ตาม ของคุณเองหรือของ AI — หลังจากเครื่องมือใน **[Verification Tools](/react/th/reading-react/verification-tools/)** รันแล้วผ่านสะอาด มันตั้งใจให้จบในหน้าเดียวที่พิมพ์ได้: เช็คลิสต์ที่ไม่มีใครเปิดจริง ๆ ตอนรีวิวก็ไร้ค่า ทุกบรรทัดลิงก์ไปบทที่อธิบายว่า *ทำไม* หน้านี้เลยยังคงเป็น list ไม่ใช่การรันคอร์สซ้ำ กลุ่มต่าง ๆ เรียงตามลำดับเดียวกับ **[วิธีอ่านโค้ด React ที่คุณไม่ได้เขียน](/react/th/reading-react/)**
+
+<Mermaid title="อะไรจับแต่ละกลุ่มได้จริง ถ้ามี" code={checklistCoverageDiagram} />
+
+export const checklistCoverageDiagram = `flowchart LR
+  H["Hooks and deps"] --> P["Partial tool coverage<br/>(eslint-plugin-react-hooks catches some; behavior needs a test)"]
+  B["Boundary and directives"] --> M["Mostly human review<br/>(a real RSC framework build is the only real check)"]
+  K["Keys and identity"] --> M
+  S["State ownership"] --> P
+  E["Effects vs events"] --> M
+  C["Memo and compiler"] --> M
+`;
+
+## Hooks กับ dependency ของมัน
+
+- dependency array ของทุก `useEffect`/`useMemo`/`useCallback` มีทุกอย่างที่ callback อ่านจริง ๆ ครบไหม? ดู **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)**
+- ค่าที่เปลี่ยนบ่อย (callback, theme) ถูกอ่านผ่าน `useEffectEvent` แทนที่จะถูกตัดออกจาก deps ของ effect เงียบ ๆ ไหม? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 2
+- ทุก hook ถูกเรียกแบบ unconditional ที่ top level ในลำดับเดียวกันทุก render — ไม่เคยหลัง `return` ก่อนเวลา ไม่เคยข้างใน `if` ใช่ไหม? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 3
+- `useRef<T>()` ได้รับค่าเริ่มต้นแบบชัดเจนเสมอไหม (`null` สำหรับ DOM ref)? ดู **[TypeScript with React](/react/th/tooling-and-production/typescript-with-react/)**
+- โค้ดใหม่รับ `ref` เป็น prop ธรรมดาแทนการห่อตัวเองด้วย `forwardRef` ไหม? ดู **[useRef & the DOM](/react/th/hooks/useref-and-the-dom/)**
+- `getSnapshot` ของทุก `useSyncExternalStore` return primitive หรือ reference ที่ cache ไว้ ไม่เคยเป็น object/array literal ใหม่ใช่ไหม? ดู **[External Stores](/react/th/state-and-data/external-stores/)**
+- ทุก promise ที่ส่งให้ `use()` ถูกอ่านจาก cache ที่เสถียร ไม่เคยถูกสร้างใหม่ใน render body ตรง ๆ ใช่ไหม? ดู **[`use()` & Data Fetching](/react/th/concurrent-and-suspense/use-and-data-fetching/)**
+- โค้ด import `useActionState` จาก `react` ไม่ใช่ `useFormState` จาก `react-dom` ใช่ไหม? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 8
+
+## Server/client boundary กับ directive
+
+- ทุกไฟล์ที่เรียก client-only hook (`useState`, `useEffect`) หรือแปะ event handler มี `'use client'` จริง ๆ บนตัวเองหรือ parent ใน project ที่รองรับ RSC จริงไหม? ดู **[Server Components](/react/th/react-19/server-components/)**
+- ทุก prop ที่ข้ามจาก Server Component ไป Client Component ยังเป็นข้อมูล serializable ธรรมดา (หรือ Server Action จริง) ไม่เคยเป็น function เปล่า ๆ หรือ class instance ใช่ไหม? ดู **[Server Components](/react/th/react-19/server-components/)**
+- `dangerouslySetInnerHTML` เคยได้รับ content จาก user โดยไม่ผ่าน sanitizer จริงก่อนไหม? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 11
+- setter ของ `useOptimistic` (หรือ `requestFormReset`) ถูกเรียกจากข้างใน `startTransition`/Action เสมอ ไม่เคยตรง ๆ จาก event handler ธรรมดาใช่ไหม? ดู **[Forms & useOptimistic](/react/th/react-19/forms-and-useoptimistic/)**
+
+## Key กับ identity
+
+- ทุก `.map()` ที่วน list ใช้ id ที่เสถียรจากข้อมูลเป็น `key` — ไม่เคยเป็น array index และไม่เคยขาดหายไปเลยใช่ไหม? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 13–14
+- `.map()` ที่จับกลุ่ม sibling element ใช้ `<Fragment key={...}>` (import มาแบบชัดเจน) ไม่ใช่ shorthand `<>` ใช่ไหม? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 15
+- component editor/detail ใช้ `key={currentItemId}` เพื่อบังคับ reset สะอาด ๆ เมื่อเรื่องที่มันแสดงเปลี่ยน แทนที่จะสะสม internal state ที่ค้างอยู่ใช่ไหม? ดู **[Rendering & Reconciliation](/react/th/foundations/rendering-and-reconciliation/)**
+
+## ใครเป็นเจ้าของ state แต่ละก้อน
+
+- state ตัวนี้คำนวณได้ตอน render แทนที่จะ sync จาก prop ด้วย `useEffect` ไหม? ดู **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)**
+- `setState` เคยถูกเรียกตรง ๆ ข้างใน render body นอกเหนือ event handler หรือ effect ไหม? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 17
+- ทุก state update ของ object/array เป็น reference ใหม่จริง ๆ ไม่เคยเป็นการ mutate ด้วย `.push`/assign ตรง ๆ แล้วเรียก setter ด้วย reference เดิมใช่ไหม? ดู **[State Snapshot & Purity](/react/th/foundations/state-snapshot-and-purity/)**
+- `value` ของ provider ใน Context ถูก memoize (`useMemo`) และมีแค่ข้อมูลที่เปลี่ยนช้าและแชร์กว้าง ไม่เคยเป็นค่าที่เปลี่ยนทุก keystroke ใช่ไหม? ดู **[Context](/react/th/state-and-data/context/)**
+
+## Effect เทียบกับ event
+
+- ทุกการเรียก `set` **หลัง** `await` ข้างใน `startTransition(async () => {...})` อยู่ข้างใน `startTransition` ของตัวเองอีกชั้นไหม? ดู **[Transitions](/react/th/concurrent-and-suspense/transitions/)**
+- data fetch ข้างใน effect ยกเลิก request ที่ค้างอยู่ก่อนหน้า (`AbortController`) เมื่อ identifier ของมันเปลี่ยนเร็วไหม? ดู **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)**
+- มี `Date.now()`/`Math.random()` ที่ถูกอ่านตอน render ในโค้ดที่จะ hydrate สักวันไหม — แทนที่จะอยู่ข้างใน effect เท่านั้นหรือส่งลงมาเป็น prop คงที่? ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 22
+- `useLayoutEffect` อ่านค่าที่มีแค่ `useEffect` ตัวพี่น้องเขียน โดยคาดหวังว่าจะเห็น write ของ commit ปัจจุบันแทนที่จะเป็นของ commit ก่อนหน้าไหม? ดู **[Commit Phase & Effects](/react/th/react-internals/commit-phase-and-effects/)**
+
+## Memo pairing กับสมมติฐานของ compiler
+
+- ทุก prop ที่ส่งให้ component ที่ห่อด้วย `memo` เก็บ reference ที่เสถียร — ไม่มี object/array/function literal แบบ inline ที่จุดเรียกใช้ใช่ไหม? ดู **[Memoization & the Compiler](/react/th/hooks/memoization-and-the-compiler/)**
+- ถ้า project อ้างว่ารัน React Compiler `babel-plugin-react-compiler` ถูกต่อสายเข้า build จริงไหม — หรือโค้ดแค่สมมติว่ามี auto-memoization ที่จริง ๆ ไม่ได้รันอยู่? ดู **[The React Compiler](/react/th/react-19/the-react-compiler/)**
+- return type ของ component ที่ annotate เป็น `JSX.Element`/`ReactElement` เคยต้อง return `null` ไหม? ควรเป็น `ReactNode` แทนหรือเปล่า? ดู **[TypeScript with React](/react/th/tooling-and-production/typescript-with-react/)**
+
+<Callout title="เช็คลิสต์แค่ช่วยตีกรอบการค้นหา ไม่ได้แทนที่มัน">
+ทุกบรรทัดด้านบนตรงกับหนึ่งใน 25 pattern ใน **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** — เกือบทั้งหมดยกเว้นสามอันที่ไม่มีเครื่องมือไหนในคอร์สนี้จับได้อัตโนมัติ ไล่ list นี้ทุก diff ไม่ว่า `tsc` กับ `eslint` จะสะอาดแค่ไหนก็ตาม
+</Callout>
+
+export const quizReviewChecklist = [
+  {
+    q: "ทำไม 'value ของ provider ใน Context ถูก memoize ไหม' ถึงอยู่กลุ่ม 'ใครเป็นเจ้าของ state' แทนที่จะเป็น 'Memo pairing กับสมมติฐานของ compiler'?",
+    options: [
+      "ไม่ใช่ — มันควรอยู่กลุ่ม memo เพราะเกี่ยวกับ memo",
+      "เช็คลิสต์จัดกลุ่มตามว่าคำถามพูดถึง state ของ 'ใคร' — identity ของ value ใน Context เป็นเรื่อง state ownership ของ provider เอง แม้ว่าอาการที่เห็นจะเป็น consumer ที่ memoize ไว้ re-render",
+      "Context ไม่เกี่ยวกับทั้งสองกลุ่ม",
+      "สองกลุ่มนี้ไม่มีความต่างกันจริง ๆ",
+    ],
+    answer: 1,
+    explain: "กลุ่มต่าง ๆ สะท้อน 6 ขั้นของลำดับการอ่าน: คำถามพูดถึง concern อะไรเป็นหลัก ไม่ใช่ API ตัวไหนเกี่ยวข้อง provider value ที่ไม่ memoize เป็นปัญหา state-ownership/reference-stability ที่ provider แม้อาการที่เห็นได้จะเป็น consumer ที่ memoize ไว้ re-render ก็ตาม",
+  },
+  {
+    q: "```tsx\nuseLayoutEffect(() => {\n  if (boxRef.current) setMeasuredWidth(parseInt(boxRef.current.style.width, 10));\n});\nuseEffect(() => {\n  if (boxRef.current) boxRef.current.style.width = expand ? '200px' : '100px';\n}, [expand]);\n```\nกลุ่มไหนในเช็คลิสต์จับเรื่องนี้ได้ และจับได้อย่างไร?",
+    options: [
+      "Memo pairing — เป็นเรื่องค่าที่ memoize ไว้",
+      "Effect เทียบกับ event — 'useLayoutEffect อ่านค่าที่มีแค่ useEffect ตัวพี่น้องเขียน โดยคาดหวังว่าจะเห็น write ของ commit ปัจจุบันแทนที่จะเป็นของ commit ก่อนหน้าไหม?'",
+      "Key กับ identity — เป็นปัญหาการวาง key",
+      "ไม่มีกลุ่มไหนครอบคลุมเรื่องนี้",
+    ],
+    answer: 1,
+    explain: "นี่คือคำถามเรื่องลำดับของกลุ่ม Effect เทียบกับ event โดยตรง: useLayoutEffect ยิงก่อน useEffect ทุก commit เลยทำให้การอ่านใน useLayoutEffect ไม่มีทางเห็น write ของ useEffect ใน commit เดียวกันได้เลย",
+  },
+  {
+    q: "ทำไมเช็คลิสต์ถึงถามเจาะจงว่า `.map()` ที่จับกลุ่ม sibling ใช้ `<Fragment key={...}>` (import มาแบบชัดเจน) แทนที่จะถามแค่ 'ทุก list item มี key ไหม'?",
+    options: [
+      "สองคำถามนี้เหมือนกันทุกประการ",
+      "shorthand fragment แบบ <>...</> ไม่สามารถมี key ได้เลยไม่ว่า syntax ไหน — reviewer ที่เช็คแค่ 'มี key อยู่ไหม' จะพลาดว่ารูปแบบนี้ไม่มีทางมี key เลยจนกว่าจะ import Fragment เข้ามา",
+      "Fragment ไม่ต้องการ key เลย",
+      "เรื่องนี้สำคัญแค่ใน class component",
+    ],
+    answer: 1,
+    explain: "ตามที่ entry 15 ของ AI Bug Catalog แสดง: shorthand fragment ไม่สามารถรับ attribute อะไรได้เลยโดยโครงสร้าง รวมถึง key — ทางแก้ไม่ใช่ 'เติม key ที่หายไป' แต่คือการเปลี่ยนไปใช้ Fragment import แบบยาวก่อน",
+  },
+  {
+    q: "```tsx\nexport default function ProductPage({ id }) {\n  function handleAddToCart() { console.log('added', id); }\n  return <AddToCartButton onAdd={handleAddToCart} />;\n}\n```\nกลุ่มไหนในเช็คลิสต์ครอบคลุม diff นี้ และมันถามว่าอะไร?",
+    options: [
+      "Memo pairing กับสมมติฐานของ compiler",
+      "Server/client boundary กับ directive",
+      "Key กับ identity",
+      "Hooks กับ dependency ของมัน",
+    ],
+    answer: 1,
+    explain: "กฎเรื่อง serialization ข้าม Server/Client split คือสิ่งที่กลุ่ม boundary ครอบคลุมโดยตรง — เป็น concern เรื่องอะไรข้ามเส้นที่มี directive กำกับ ไม่ใช่เรื่อง hook, key หรือ memoization",
+  },
+  {
+    q: "เช็คลิสต์บอกให้เช็คว่า 'Date.now()/Math.random() ถูกอ่านตอน render ในโค้ดที่จะ hydrate สักวันไหม' ทำไมเงื่อนไข 'จะ hydrate สักวัน' ถึงสำคัญ?",
+    options: [
+      "ไม่สำคัญ — มันพังเสมอไม่ว่าที่ไหน",
+      "hydration mismatch ต้องการการรันซ้ำครั้งที่สองของ render logic เดียวกันที่ไม่ตรงกับ HTML ที่ server ส่งมา — component ที่ render ฝั่ง client อย่างเดียว (SPA ธรรมดา) ไม่มีการรันครั้งที่สองแบบนั้นให้ไม่ตรงกันเลย",
+      "Math.random() ถูกห้ามใช้ทั้งหมดใน React",
+      "Date.now() ใช้ได้แค่ใน Server Component เท่านั้น",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วใน entry 22 ของ AI Bug Catalog: mismatch ต้องการ renderToString ตามด้วย hydrateRoot ที่รัน component เดียวกันซ้ำ — render tree ที่เป็น client-only ล้วนไม่เคยเล่นซ้ำกับ HTML ของ server เลย จึงไม่มีอะไรให้การรันครั้งที่สองไม่ตรงกัน",
+  },
+];
+
+<Quiz client:visible id="reading-react/review-checklist" questions={quizReviewChecklist} />
+
+<ProgressTracker client:visible id="reading-checklist" />

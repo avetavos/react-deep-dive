@@ -1,0 +1,405 @@
+---
+title: เครื่องมือตรวจสอบ
+description: 'tsc --noEmit แบบ strict, eslint-plugin-react-hooks v7, การอ่าน bail-out ของ babel-plugin-react-compiler, RTL + vitest, <Profiler>, React DevTools, <StrictMode>, react-dom/static prerender และ verify-snippets.mjs ของคอร์สนี้ แต่ละตัวจับอะไรได้จริง — พร้อม output จริง'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+คอร์สนี้ไม่มี in-browser playground สำหรับ React แบบที่ sandbox รันได้จะให้คุณ — วิธีเดียวที่จะพิสูจน์คำกล่าวอ้างเรื่องโค้ดที่ generate มาคือ project จริง, การรัน `tsc`/`eslint` จริง หรือ test จริง output ทุกอันด้านล่างเป็นของจริง จับมาจาก React 19.3.0 และ `eslint-plugin-react-hooks@7.1.1` ใน probe Vite + TypeScript + Vitest + React Testing Library ของคอร์สนี้เอง ไม่มีเครื่องมือไหนคาบเกี่ยวกันสมบูรณ์ และไม่มีตัวไหนใกล้เคียงความสมบูรณ์ด้วยตัวเองเลย — บรรทัด "Caught by" ของแต่ละ entry ทั้ง 25 ตัวใน **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** บอกเป๊ะ ๆ ว่าเครื่องมือไหนด้านล่าง (ถ้ามี) จะจับมันได้
+
+## `tsc --noEmit` — ด่านแรกที่เร็ว แบบ strict
+
+การ type-check อย่างเดียวจับแคตตาล็อกนี้ได้น้อยอย่างน่าตกใจโดยการออกแบบ — กฎส่วนใหญ่ของ React เอง (Rules of Hooks, effect cleanup, key identity, memoization) เป็น concern เรื่อง runtime/พฤติกรรมที่ type system ของ TypeScript ไม่มีทางเห็นได้ สิ่งที่ `tsc` *จับได้จริง* ภายใต้ config `strict`: การเรียก `useRef<T>()` แบบไม่มี argument (typing ของ React 19 ตัดครอบไม่มี argument ออกไป) และ return type ของ component ที่ annotate เป็น `JSX.Element`/`ReactElement` ในสาขาที่ต้อง return `null` ด้วย
+
+```bash
+npx tsc --noEmit
+```
+
+```text
+BadUseRefNoArg.tsx(3,15): error TS2554: Expected 1 arguments, but got 0.
+StatusIcon.tsx(3,44): error TS2322: Type 'null' is not assignable to type 'Element'.
+```
+
+ทั้งสองเป็น error จริง ปัจจุบัน ภายใต้ `@types/react@19` — ไม่ใช่แค่ style nitpick ดู **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 4 กับ 25
+
+## `eslint-plugin-react-hooks@7.1.1` — diagnostic ของ compiler เอง มาเป็น lint error
+
+เพราะ template `react-ts` ของ Vite ใช้ **oxlint** ไม่ใช่ ESLint กฎที่รู้จัก Hooks ต้อง install เองแบบชัดเจนพร้อม flat config:
+
+```bash
+npm install -D eslint @typescript-eslint/parser eslint-plugin-react-hooks
+```
+
+```js
+// eslint.config.mjs
+import reactHooks from 'eslint-plugin-react-hooks';
+import tsParser from '@typescript-eslint/parser';
+import { defineConfig } from 'eslint/config';
+
+export default defineConfig([
+  { files: ['**/*.{ts,tsx}'], languageOptions: { parser: tsParser } },
+  reactHooks.configs.flat['recommended-latest'],
+]);
+```
+
+`recommended-latest` เปิดทั้งกฎคลาสสิก rules-of-hooks/exhaustive-deps *และ* diagnostic ของ React Compiler เอง (`refs`, `set-state-in-render`, `immutability` และอื่น ๆ) ใน preset เดียว ห้าการละเมิดจริง รันผ่าน config นั้นเป๊ะ ๆ อันละกฎที่แคตตาล็อกของโมดูลนี้ต้องการ:
+
+**`rules-of-hooks`** — hook ที่ถูกเรียกแบบ conditional (**[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 3):
+
+```text
+Toggle.tsx
+  5:25  error  React Hook "useState" is called conditionally. React Hooks must be called
+  in the exact same order in every component render. Did you accidentally call a React
+  Hook after an early return?  react-hooks/rules-of-hooks
+```
+
+**`exhaustive-deps`** — dependency ที่ขาดหาย:
+
+```text
+Counter.tsx
+  8:6  warning  React Hook useEffect has a missing dependency: 'step'. Either include
+  it or remove the dependency array. If 'setCount' needs the current value of 'step',
+  you can also switch to useReducer instead of useState and read 'step' in the
+  reducer  react-hooks/exhaustive-deps
+```
+
+**`refs`** — อ่าน/เขียน `ref.current` ตอน render (**[useRef & the DOM](/react/th/hooks/useref-and-the-dom/)**):
+
+```text
+Error: Cannot access refs during render
+
+React refs are values that are not needed for rendering. Refs should only be
+accessed outside of render, such as in event handlers or effects. Accessing
+a ref value (the `current` property) during render can cause your component
+not to update as expected (https://react.dev/reference/react/useRef).
+```
+
+**`set-state-in-render`** — `setState` ถูกเรียกแบบ unconditional ตอน render (**[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 17):
+
+```text
+BadSetState.tsx
+  6:3  error  Error: Cannot call setState during render
+
+Calling setState during render may trigger an infinite loop.
+* To reset state when other state/props change, store the previous value in
+  state and update conditionally: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+* To derive data from other state/props, compute the derived data during
+  render without using state.
+
+  4 | export function BadSetState() {
+  5 |   const [count, setCount] = useState(0)
+> 6 |   setCount(count + 1)
+    |   ^^^^^^^^ Found setState() in render
+  7 |   return <p>{count}</p>
+  8 | }
+  9 |  react-hooks/set-state-in-render
+```
+
+**`immutability`** — mutate prop ตรง ๆ (**[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)** entry 18):
+
+```text
+Themed.tsx
+  4:3  error  Error: This value cannot be modified
+
+Modifying component props or hook arguments is not allowed. Consider using a
+local variable instead.
+
+  2 |
+  3 | export function Themed({ config }: { config: Config }) {
+> 4 |   config.theme = 'dark'
+    |   ^^^^^^ value cannot be modified
+  5 |   return <p>{config.theme}</p>
+  6 | }
+  7 |  react-hooks/immutability
+```
+
+ทั้งห้าเป็นของจริง จาก config เดียวกันด้านบน — ไม่มี error text ที่เขียนเองสักบรรทัด
+
+## `babel-plugin-react-compiler` — อ่าน bail-out จริง
+
+compiler ระวังตัวโดยตั้งใจ: มันจะ memoize function เต็มรูปแบบ (call `_c()` memo-cache ห่อทุก sub-expression ที่ cache ได้) หรือปล่อยมันไว้เฉย ๆ ไม่แตะเลย โดย**ไม่มี build error ทั้งสองทาง** การ compile function `BadSetState` ตัวเดียวกับ example `set-state-in-render` ด้านบนด้วย `babel-plugin-react-compiler@1.0.0` ทำให้ function ถูกส่งผ่านไปแบบ byte-for-byte:
+
+```text
+import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
+function BadSetState() {
+  const [count, setCount] = useState(0);
+  setCount(count + 1); // setState during render — Rules of React violation
+  return /*#__PURE__*/_jsxDEV("p", {
+    children: count
+  }, void 0, false);
+}
+```
+
+ไม่มี `_c()` ไม่มี memo cache — bail-out เงียบโดยการออกแบบ การ compile example การ mutate ของ `Themed` ก็ให้รูปแบบเดียวกัน: ส่งผ่านไปแบบไม่แตะ วิธีเดียวที่จะรู้ว่า component ถูกข้ามไปคือ diff compiled output กับตัวที่รู้ว่าดี หรือรัน ESLint rule ด้านบน ซึ่ง report การละเมิด*เดียวกัน*เป็น error จริง ตอน edit time โดยไม่ต้องอ่าน compiler output เลย ดู **[The React Compiler](/react/th/react-19/the-react-compiler/)** สำหรับคู่ input/output เต็ม ๆ พร้อม component ที่ compiler *memoize* จริง ๆ หน้าตาเป็นแบบไหน
+
+## RTL + Vitest: smoke test จริง
+
+component ที่ render แล้ว interact จริงยังคงเป็นหลักฐานตรงที่สุดที่คอร์สนี้มีสำหรับ "มันทำงานจริงไหม":
+
+```tsx
+// src/components/SmokeCounter.tsx
+import { useState } from 'react';
+
+export default function SmokeCounter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>count: {count}</button>;
+}
+```
+
+```tsx
+// src/__tests__/smoke-counter.test.tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { expect, test } from 'vitest';
+import SmokeCounter from '../components/SmokeCounter';
+
+test('a real RTL smoke test: click, then assert on what the user sees', async () => {
+  const user = userEvent.setup();
+  render(<SmokeCounter />);
+  await user.click(screen.getByRole('button', { name: /count: 0/i }));
+  expect(screen.getByRole('button', { name: /count: 1/i })).toBeInTheDocument();
+});
+```
+
+```bash
+npm run verify -- --test reading-react/verification-tools
+```
+
+```text
+✓ a real RTL smoke test: click, then assert on what the user sees
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ดู **[Testing](/react/th/tooling-and-production/testing/)** สำหรับวินัย RTL/Vitest เต็มรูปแบบที่คอร์สนี้ยึดถือ — query, `userEvent`, warning "not wrapped in act" และการ test Suspense/async transition
+
+## `<Profiler onRender>` — จำนวน commit จริง ไม่ใช่การเดา
+
+`<Profiler id="..." onRender={...}>` เรียก callback ของมันหนึ่งครั้งต่อหนึ่ง commit ข้างใน พร้อม `phase` (`"mount"` หรือ `"update"`) และ timing data จริง — วิธีเชิงกลไกที่จะยืนยัน "component นี้ re-render จริงไหม" แทนที่จะเดาด้วยตา:
+
+```tsx
+// src/__tests__/profiler-counts.test.tsx
+import { Profiler, useState } from 'react';
+import { render, cleanup, act } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function ProfiledChild({ label }: { label: string }) {
+  return <span>{label}</span>;
+}
+
+function ProfiledParent() {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>{tick}</button>
+      <ProfiledChild label="static" />
+    </div>
+  );
+}
+
+test('<Profiler onRender> records one commit per actual re-render, with real phase/duration data', () => {
+  const commits: { phase: string }[] = [];
+  const { getByRole } = render(
+    <Profiler id="parent" onRender={(_id, phase) => commits.push({ phase })}>
+      <ProfiledParent />
+    </Profiler>,
+  );
+
+  expect(commits).toHaveLength(1);
+  expect(commits[0].phase).toBe('mount');
+
+  act(() => { getByRole('button').click(); });
+  act(() => { getByRole('button').click(); });
+
+  expect(commits).toHaveLength(3);
+  expect(commits.slice(1).every((c) => c.phase === 'update')).toBe(true);
+});
+```
+
+การ mount component ที่ห่อด้วย `<Profiler>` ให้ commit เป๊ะ ๆ หนึ่งครั้ง (`phase: 'mount'`); การ re-render ที่ขับด้วย state สองครั้งถัดมาให้อีกสองครั้ง (`phase: 'update'`) — รวมสาม commit พิสูจน์ด้วยการนับจำนวนครั้งที่ callback ถูกเรียกจริง ไม่ใช่การอนุมานจากพฤติกรรม นี่คือ primitive ตัวเดียวกับที่ Profiler tab ของ React DevTools เองสร้างขึ้นมาจาก ดู **[Rendering Performance](/react/th/performance-and-patterns/rendering-performance/)** สำหรับ `<Profiler>` ที่ใช้กับการ optimize จริง
+
+## React DevTools: แท็บ Components กับ Profiler
+
+extension ของ browser ให้สองแท็บที่เครื่องมือ command-line ของคอร์สนี้แทนไม่ได้:
+
+- **Components** — ดู component tree ที่มีชีวิต, prop, state และค่าปัจจุบันของทุก hook ตามลำดับที่ hook ถูกเรียก; เลือก component เพื่อดูเป๊ะ ๆ ว่ามันได้รับอะไรและถืออะไรอยู่ โดยไม่ต้องเติม `console.log` สักบรรทัด
+- **Profiler** — บันทึก session ของการ interact แล้วดู flame graph ของทุก commit: component ไหน render, ใช้เวลาเท่าไหร่ และ (สำคัญที่สุด) **ทำไม** แต่ละตัวถึง render — DevTools บอกชื่อ prop หรือ state ที่เปลี่ยนแล้วเป็นตัวกระตุ้น ซึ่งเป็นวิธีที่เร็วที่สุดในการยืนยันบั๊ก memoization ของ entry 19 หรือ 24 บนหน้าจริง แทนที่จะเป็น unit test
+- **"Highlight updates when components render"** (setting ในแท็บ Profiler) — กระพริบกรอบรอบทุก component ที่ re-render สด ๆ ขณะคุณ interact กับหน้า เปิดตัวนี้บนหน้าที่สงสัยว่า over-render (Context กว้าง ๆ ที่ไม่ memoize; object แบบ inline ที่ทำลาย boundary ของ `memo`) ทำให้*ขอบเขต*ของปัญหามองเห็นได้ในไม่กี่วินาที ก่อนจะเขียน test สักตัว
+
+## `<StrictMode>` ตอน development
+
+`<StrictMode>` ตั้งใจ double-render component และ double-invoke setup→cleanup→setup ของ effect ตอน development — พิสูจน์แล้ว ไม่ใช่แค่บรรยาย ใน **[Rendering & Reconciliation](/react/th/foundations/rendering-and-reconciliation/)**:
+
+```text
+✓ StrictMode (dev) renders twice and runs setup -> cleanup -> setup once on mount
+✓ without StrictMode, the same component renders and effects run exactly once
+```
+
+การเปิดมันทิ้งไว้ไม่มีต้นทุนใด ๆ ใน production (มันไม่ทำอะไรเลยที่นั่น) และเผยพฤติกรรมแบบ impure ที่แคตตาล็อกของโมดูลนี้เต็มไปด้วย — mutation ตอน render, effect ที่ cleanup ไม่ undo setup ของมันเต็มที่ — เป็นอาการตอน *development* ก่อนที่มันจะถูก ship ทั้งคู่ ดู **[Production & Ecosystem](/react/th/tooling-and-production/production-and-ecosystem/)** สำหรับความต่างของ dev/production build ที่เรื่องนี้ยึดถือ
+
+## `prerender` ของ `react-dom/static` — ดู HTML ที่แน่ชัดที่ first paint ของ user จะโชว์
+
+`prerender` ของ `react-dom/static` (และ `prerenderToNodeStream`) รอข้อมูลทั้งหมดจนจบก่อนจะ return — ไม่เหมือน `renderToString`/`renderToPipeableStream` มันไม่เคยปล่อย shell ที่ยังไม่สมบูรณ์ออกมา สิ่งที่ได้กลับมาเลยเป็น HTML ที่*แน่ชัด*สมบูรณ์ที่ first paint จริงจะโชว์:
+
+```tsx
+// src/components/StaticPage.tsx
+function StaticPage() {
+  return (
+    <html>
+      <body>
+        <p data-testid="marker">static</p>
+      </body>
+    </html>
+  );
+}
+
+export default StaticPage;
+```
+
+```tsx
+// src/__tests__/static-prerender.test.tsx
+import { prerender } from 'react-dom/static';
+import { expect, test } from 'vitest';
+import StaticPage from '../components/StaticPage';
+
+test('react-dom/static prerender() resolves a real, complete HTML stream (Node runtime)', async () => {
+  const { prelude } = await prerender(<StaticPage />);
+  const reader = prelude.getReader();
+  const decoder = new TextDecoder();
+  let html = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    html += decoder.decode(value);
+  }
+  expect(html).toContain('<p data-testid="marker">static</p>');
+});
+```
+
+คุณค่าของมันสำหรับบั๊ก hydration โดยเฉพาะ: การส่อง HTML ที่แน่ชัด สมบูรณ์ รอครบแล้วนี้ตอน build time — ก่อน client JavaScript ไหนจะรันเลย — คือสิ่งที่ทำให้จับค่าที่จะไม่ตรงกันทันทีที่ client รัน component เดียวกันซ้ำได้ pattern `Date.now()`/`Math.random()` ของ entry 22 เป็นตัวอย่างที่ชัดที่สุด `prerender` รันการรันซ้ำฝั่ง client เองไม่ได้ (ต้องใช้ browser จริงหรือ `hydrateRoot` พิสูจน์แยกไว้ใน entry 22 ของ **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)**) — แต่การอ่าน output ของมันคือที่ที่ถูกที่สุดในการสังเกตค่าที่ไม่ควรจะเสถียรตั้งแต่แรก
+
+## harness ของคอร์สนี้เอง: compile ทุก snippet
+
+ทุก code fence ในคอร์สนี้ที่มี comment บรรทัดแรกเปล่า ๆ แบบ `// path.ext` คือไฟล์จริง ถูกเก็บโดย `tools/verify-snippets.mjs` เข้า directory ที่ namespace ไว้ต่อบท แล้ว type-check ใน `tsc --noEmit` รอบเดียวข้ามทั้งคอร์ส:
+
+```bash
+node tools/verify-snippets.mjs
+```
+
+```text
+no type errors.
+
+Per-module fence summary (collected / skipped-no-path / expect-error / tests):
+  reading-react: ... (see this module's own gate run)
+  ...
+```
+
+fence ที่ตั้งใจโชว์โค้ดที่พังหรือมีพฤติกรรมผิด (เหมือน example "โค้ดที่ AI มักเขียน" ส่วนใหญ่ใน **[AI Bug Catalog](/react/th/reading-react/ai-bug-catalog/)**) ขึ้นต้นด้วย `// @expect-error <เหตุผล>` เพื่อให้ harness ข้ามการเก็บมัน — เนื้อหาบทเรียนพก output จริงของ `tsc`/`eslint`/console ที่จับแยกไว้แล้วแทนที่จะให้ harness พยายาม reproduce ความล้มเหลวที่ตั้งใจไว้ทุกรอบ
+
+## Mental Model
+
+<Mermaid title="เครื่องมือ static พิสูจน์อะไรได้จาก source อย่างเดียว เครื่องมือ dynamic ต้องการ render จริง commit จริง หรือ framework จริง" code={verificationToolsDiagram} />
+
+export const verificationToolsDiagram = `flowchart TD
+  subgraph Static["Static (source only)"]
+    Tsc["tsc --noEmit<br/>real type errors: useRef arg, JSX.Element/null"]
+    Eslint["eslint-plugin-react-hooks@7<br/>rules-of-hooks, exhaustive-deps, refs,<br/>set-state-in-render, immutability"]
+    Compiler["babel-plugin-react-compiler<br/>read the real bail-out (or lack of one)"]
+    Verify["tools/verify-snippets.mjs<br/>compiles every tagged fence in the course"]
+  end
+  subgraph Runtime["Runtime (needs a real render or commit)"]
+    Rtl["RTL + Vitest<br/>click, then assert on what a user sees"]
+    Profiler["<Profiler onRender><br/>real per-commit counts, phase, timing"]
+    Devtools["React DevTools<br/>Components + Profiler tabs, highlight updates"]
+    Strict["<StrictMode><br/>dev-only double render/effect"]
+  end
+  subgraph Framework["Needs a real SSR/hydration setup or framework"]
+    Static["react-dom/static prerender<br/>exact final HTML before any client JS runs"]
+    Rsc["a real RSC framework build<br/>'use client'/'use server' boundary enforcement"]
+  end
+`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+ทุกเครื่องมือในหน้านี้เป็นตัวกรอง ไม่ใช่คำตัดสิน — แม้รันพร้อมกันทั้งหมด มันยังปล่อยให้ 25 pattern ส่วนใหญ่ใน AI Bug Catalog (รวมถึงตัวที่เดิมพันสูงที่สุด คือ `dangerouslySetInnerHTML` ที่ไม่ sanitize) ไม่ถูกจับเลย รันทุกเครื่องมือในหน้านี้ แล้วยังต้องไล่ <a href="/react/th/reading-react/review-checklist/">เช็คลิสต์รีวิวโค้ด</a> ด้วยตาอยู่ดี
+</Callout>
+
+export const quizVerificationTools = [
+  {
+    q: "```text\nBadSetState.tsx\n  6:3  error  Error: Cannot call setState during render\n...react-hooks/set-state-in-render\n```\nคำสั่งไหนสร้างบรรทัดนี้ และตรงกับ fence ไหนใน AI Bug Catalog?",
+    options: [
+      "tsc --noEmit ตรงกับการเรียก useRef แบบไม่มี argument",
+      "eslint (eslint-plugin-react-hooks@7.1.1, recommended-latest) ตรงกับ example setState-ตอน-render ของ entry 17",
+      "babel-plugin-react-compiler ที่ print build error",
+      "react-dom/static prerender ตรงกับ hydration mismatch",
+    ],
+    answer: 1,
+    explain: "react-hooks/set-state-in-render เป็นหนึ่งใน diagnostic ที่มาจาก compiler ซึ่ง config recommended-latest ของ eslint-plugin-react-hooks@7 ส่งออกมาเป็น lint error จริง — ข้อความนี้จับมาจากการรัน config นั้นกับ BadSetState.tsx ของ entry 17 จริง ๆ",
+  },
+  {
+    q: "ทำไมการ compile `BadSetState` ด้วย babel-plugin-react-compiler ถึงไม่มี error เลย แค่ function ถูกส่งผ่านไปแบบไม่แตะ?",
+    options: [
+      "compiler จะ error ดัง ๆ เสมอเมื่อละเมิด Rules-of-React",
+      "compiler ถูกออกแบบมาให้ข้ามโค้ดที่มีปัญหาแทนที่จะทำให้ build fail — component จะได้ memo-cache เต็มรูปแบบ หรือถูกส่งผ่านไปแบบ byte-for-byte โดยไม่มีอะไรใน build output บอกว่าเกิดอะไรขึ้น",
+      "function ตัวนี้เรียบง่ายเกินไปจน compile ไม่ได้",
+      "babel-plugin-react-compiler ทำงานกับ class component เท่านั้น",
+    ],
+    answer: 1,
+    explain: "ยืนยันโดยตรง: compiled output ไม่มี call `_c()` memo-cache เลยและเหมือน source ทุกอย่าง — bail-out เงียบแบบเดียวกับที่โชว์ใน example การ mutate ของ Themed มีแค่การ diff output หรือรัน ESLint rule เท่านั้นที่เผยมันออกมา",
+  },
+  {
+    q: "`<Profiler onRender>` พิสูจน์อะไรที่ component test เดี่ยว ๆ พิสูจน์ไม่ได้?",
+    options: [
+      "ไม่มีอะไรเพิ่ม — ทั้งสองพิสูจน์เรื่องเดียวกัน",
+      "จำนวน commit ที่แน่ชัด (พร้อม phase — mount เทียบกับ update) ที่เกิดขึ้นจริง แทนที่จะอนุมานจำนวน re-render จากพฤติกรรมที่มองเห็น",
+      "type TypeScript ของ component ถูกต้องไหม",
+      "component ถูกห่อด้วย StrictMode ไหม",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วด้านบน: การ mount บวก state-update สองครั้งให้ onRender ถูกเรียกเป๊ะ ๆ 3 ครั้ง (หนึ่ง 'mount' สอง 'update') — การนับ commit จริงเชิงกลไก ไม่ใช่การยืนยันเกี่ยวกับ DOM content ที่มองเห็น",
+  },
+  {
+    q: "ทำไม `prerender` ของ `react-dom/static` ถึงพิสูจน์ด้วยตัวเองไม่ได้ว่า component ปลอด hydration mismatch?",
+    options: [
+      "prerender throw เสมอเมื่อมี mismatch ใด ๆ",
+      "prerender สร้างแค่ HTML ฝั่ง server; mismatch ต้องการการรันครั้งที่สองที่ไม่ตรงกันฝั่ง client (ผ่าน hydrateRoot หรือ browser จริง) มาเทียบด้วย — prerender เองไม่มีอะไรให้เทียบเลย",
+      "prerender ไม่มีอยู่ใน react-dom",
+      "prerender ทำงานกับ class component เท่านั้น",
+    ],
+    answer: 1,
+    explain: "entry 22 ของ AI Bug Catalog พิสูจน์ mismatch โดยจับคู่ renderToString (server) กับ hydrateRoot (client พร้อม Date.now() ที่ mock ต่างกัน) — คุณค่าของ prerender คือทำให้ HTML สุดท้ายของ server ส่องดูได้ ไม่ใช่การ reproduce การรันซ้ำที่ไม่ตรงกันของ client เอง",
+  },
+  {
+    q: "ทำไม harness ของคอร์สนี้ถึงติด `// @expect-error <เหตุผล>` บน fence 'โค้ดที่ AI มักเขียน' ส่วนใหญ่ใน AI Bug Catalog แทนที่จะเป็น path comment ธรรมดา?",
+    options: [
+      "เพื่อซ่อนบั๊กจากผู้อ่าน",
+      "เพื่อให้ harness ข้ามการ type-check fence ที่พังหรือผิดพฤติกรรมโดยตั้งใจ — เนื้อหาบทเรียนพก output จริงของ tsc/eslint/console ที่จับแยกไว้แล้วแทนที่จะให้ทุกรอบพยายาม reproduce ความล้มเหลวที่ตั้งใจ",
+      "เพราะ fence ที่มี @expect-error รันเร็วกว่า",
+      "ไม่มีผลอะไรกับ harness เลย",
+    ],
+    answer: 1,
+    explain: "ถ้าไม่มี marker นี้ example 'โค้ดผิด' ที่ตั้งใจเขียนจะทำให้ทุกรอบของ tools/verify-snippets.mjs report type error จริง (หรือเก็บโค้ดที่ไม่ควรถูกมองเป็น implementation จริงของโมดูล) — marker นี้บอก harness ว่า fence นี้ตั้งใจไม่ถูกเก็บ",
+  },
+  {
+    q: "```text\nrules-of-hooks, exhaustive-deps, refs, set-state-in-render, immutability\n```\nทั้งห้าตัวนี้มีอะไรร่วมกัน ตามที่บทนี้ยืนยัน?",
+    options: [
+      "ทั้งหมดเป็น TypeScript compiler error",
+      "ทั้งหมดเป็นกฎจริงของ eslint-plugin-react-hooks@7.1.1 ยืนยันด้วยการรัน config นั้นกับไฟล์ที่ละเมิดหนึ่งไฟล์ต่อหนึ่งกฎ",
+      "ใช้ได้แค่กับ class component เท่านั้น",
+      "ทั้งหมดเป็นแค่ warning ไม่เคยเป็น error",
+    ],
+    answer: 1,
+    explain: "แต่ละตัวในห้าตัวนี้เป็นกฎข้างใน flat config recommended-latest ของ eslint-plugin-react-hooks@7.1.1 และบทนี้จับการรัน config นั้นจริงกับไฟล์ที่ละเมิดหนึ่งไฟล์ต่อกฎ — ไม่ใช่ห้าเครื่องมือต่างกัน",
+  },
+];
+
+<Quiz client:visible id="reading-react/verification-tools" questions={quizVerificationTools} />
+
+<ProgressTracker client:visible id="reading-tools" />

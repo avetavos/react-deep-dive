@@ -1,0 +1,405 @@
+---
+title: Verification tools
+description: 'What tsc --noEmit strict, eslint-plugin-react-hooks v7, babel-plugin-react-compiler bail-out inspection, RTL + vitest, <Profiler>, React DevTools, <StrictMode>, react-dom/static prerender, and this course''s own verify-snippets.mjs each actually catch — with real output.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+This course has no in-browser playground for React the way a runnable sandbox would give you — the only way to prove a claim about generated code is a real project, a real `tsc`/`eslint` run, or a real test. Every output below is real, captured against React 19.3.0 and `eslint-plugin-react-hooks@7.1.1` in this course's own Vite + TypeScript + Vitest + React Testing Library probe. None of these tools overlap perfectly, and none is close to complete on its own — the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**'s "Caught by" line for each of its 25 entries names exactly which one (if any) of the tools below would have caught it.
+
+## `tsc --noEmit` — the fast, first pass, strict
+
+Type-checking alone catches surprisingly little of this catalog by design — most of React's own rules (the Rules of Hooks, effect cleanup, key identity, memoization) are runtime/behavioral concerns TypeScript's type system has no way to see. What `tsc` *does* catch reliably, under a `strict` config: a `useRef<T>()` call with no argument (React 19's typings dropped the zero-argument overload), and a component return type annotated `JSX.Element`/`ReactElement` in a branch that also returns `null`.
+
+```bash
+npx tsc --noEmit
+```
+
+```text
+BadUseRefNoArg.tsx(3,15): error TS2554: Expected 1 arguments, but got 0.
+StatusIcon.tsx(3,44): error TS2322: Type 'null' is not assignable to type 'Element'.
+```
+
+Both are real, current errors under `@types/react@19` — not style nitpicks. See the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entries 4 and 25.
+
+## `eslint-plugin-react-hooks@7.1.1` — the compiler's own diagnostics as lint errors
+
+Since the Vite `react-ts` template ships **oxlint**, not ESLint, the Hooks-aware rules need an explicit install and a flat config:
+
+```bash
+npm install -D eslint @typescript-eslint/parser eslint-plugin-react-hooks
+```
+
+```js
+// eslint.config.mjs
+import reactHooks from 'eslint-plugin-react-hooks';
+import tsParser from '@typescript-eslint/parser';
+import { defineConfig } from 'eslint/config';
+
+export default defineConfig([
+  { files: ['**/*.{ts,tsx}'], languageOptions: { parser: tsParser } },
+  reactHooks.configs.flat['recommended-latest'],
+]);
+```
+
+`recommended-latest` turns on the classic rules-of-hooks/exhaustive-deps rules *and* the React Compiler's own diagnostics (`refs`, `set-state-in-render`, `immutability`, and more) in one preset. Five real violations, run through that exact config, one per rule this module's catalog needs:
+
+**`rules-of-hooks`** — a hook called conditionally (**[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 3):
+
+```text
+Toggle.tsx
+  5:25  error  React Hook "useState" is called conditionally. React Hooks must be called
+  in the exact same order in every component render. Did you accidentally call a React
+  Hook after an early return?  react-hooks/rules-of-hooks
+```
+
+**`exhaustive-deps`** — a missing dependency:
+
+```text
+Counter.tsx
+  8:6  warning  React Hook useEffect has a missing dependency: 'step'. Either include
+  it or remove the dependency array. If 'setCount' needs the current value of 'step',
+  you can also switch to useReducer instead of useState and read 'step' in the
+  reducer  react-hooks/exhaustive-deps
+```
+
+**`refs`** — reading/writing `ref.current` during render (**[useRef & the DOM](/react/en/hooks/useref-and-the-dom/)**):
+
+```text
+Error: Cannot access refs during render
+
+React refs are values that are not needed for rendering. Refs should only be
+accessed outside of render, such as in event handlers or effects. Accessing
+a ref value (the `current` property) during render can cause your component
+not to update as expected (https://react.dev/reference/react/useRef).
+```
+
+**`set-state-in-render`** — `setState` called unconditionally during render (**[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 17):
+
+```text
+BadSetState.tsx
+  6:3  error  Error: Cannot call setState during render
+
+Calling setState during render may trigger an infinite loop.
+* To reset state when other state/props change, store the previous value in
+  state and update conditionally: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+* To derive data from other state/props, compute the derived data during
+  render without using state.
+
+  4 | export function BadSetState() {
+  5 |   const [count, setCount] = useState(0)
+> 6 |   setCount(count + 1)
+    |   ^^^^^^^^ Found setState() in render
+  7 |   return <p>{count}</p>
+  8 | }
+  9 |  react-hooks/set-state-in-render
+```
+
+**`immutability`** — mutating a prop directly (**[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**, entry 18):
+
+```text
+Themed.tsx
+  4:3  error  Error: This value cannot be modified
+
+Modifying component props or hook arguments is not allowed. Consider using a
+local variable instead.
+
+  2 |
+  3 | export function Themed({ config }: { config: Config }) {
+> 4 |   config.theme = 'dark'
+    |   ^^^^^^ value cannot be modified
+  5 |   return <p>{config.theme}</p>
+  6 | }
+  7 |  react-hooks/immutability
+```
+
+All five are real, from the identical config above — no hand-written error text.
+
+## `babel-plugin-react-compiler` — reading a real bail-out
+
+The compiler is deliberately conservative: it either fully memoizes a function (a `_c()` memo-cache call wraps every cacheable sub-expression) or leaves it completely untouched, with **no build error either way**. Compiling the exact `BadSetState` function from the `set-state-in-render` example above with `babel-plugin-react-compiler@1.0.0` produces the function passed through byte-for-byte:
+
+```text
+import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
+function BadSetState() {
+  const [count, setCount] = useState(0);
+  setCount(count + 1); // setState during render — Rules of React violation
+  return /*#__PURE__*/_jsxDEV("p", {
+    children: count
+  }, void 0, false);
+}
+```
+
+No `_c()`, no memo cache — the bail-out is silent by design. Compiling the `Themed` mutation example produces the identical shape: passed through untouched. The only way to know a component was skipped is to diff the compiled output against a known-good one, or to run the ESLint rules above, which report the *same* violations as real errors, at edit time, without needing to read compiler output at all. See **[The React Compiler](/react/en/react-19/the-react-compiler/)** for the full input/output pair, plus what a component the compiler *does* memoize looks like.
+
+## RTL + Vitest: a real smoke test
+
+A rendered, interacted-with component is still the most direct proof this course has for "does this actually work":
+
+```tsx
+// src/components/SmokeCounter.tsx
+import { useState } from 'react';
+
+export default function SmokeCounter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>count: {count}</button>;
+}
+```
+
+```tsx
+// src/__tests__/smoke-counter.test.tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { expect, test } from 'vitest';
+import SmokeCounter from '../components/SmokeCounter';
+
+test('a real RTL smoke test: click, then assert on what the user sees', async () => {
+  const user = userEvent.setup();
+  render(<SmokeCounter />);
+  await user.click(screen.getByRole('button', { name: /count: 0/i }));
+  expect(screen.getByRole('button', { name: /count: 1/i })).toBeInTheDocument();
+});
+```
+
+```bash
+npm run verify -- --test reading-react/verification-tools
+```
+
+```text
+✓ a real RTL smoke test: click, then assert on what the user sees
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+See **[Testing](/react/en/tooling-and-production/testing/)** for the full RTL/Vitest discipline this course follows — queries, `userEvent`, the "not wrapped in act" warning, and testing Suspense/async transitions.
+
+## `<Profiler onRender>` — real commit counts, not a guess
+
+`<Profiler id="..." onRender={...}>` calls its callback once per commit inside it, with a `phase` (`"mount"` or `"update"`) and real timing data — the mechanical way to confirm "did this actually re-render," instead of eyeballing it:
+
+```tsx
+// src/__tests__/profiler-counts.test.tsx
+import { Profiler, useState } from 'react';
+import { render, cleanup, act } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function ProfiledChild({ label }: { label: string }) {
+  return <span>{label}</span>;
+}
+
+function ProfiledParent() {
+  const [tick, setTick] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>{tick}</button>
+      <ProfiledChild label="static" />
+    </div>
+  );
+}
+
+test('<Profiler onRender> records one commit per actual re-render, with real phase/duration data', () => {
+  const commits: { phase: string }[] = [];
+  const { getByRole } = render(
+    <Profiler id="parent" onRender={(_id, phase) => commits.push({ phase })}>
+      <ProfiledParent />
+    </Profiler>,
+  );
+
+  expect(commits).toHaveLength(1);
+  expect(commits[0].phase).toBe('mount');
+
+  act(() => { getByRole('button').click(); });
+  act(() => { getByRole('button').click(); });
+
+  expect(commits).toHaveLength(3);
+  expect(commits.slice(1).every((c) => c.phase === 'update')).toBe(true);
+});
+```
+
+Mounting a component wrapped in `<Profiler>` produces exactly one commit (`phase: 'mount'`); two subsequent state-driven re-renders produce exactly two more (`phase: 'update'`) — three commits total, proven by asserting the callback's own call count, not inferred from behavior. This is the same primitive React DevTools' own Profiler tab is built on. See **[Rendering Performance](/react/en/performance-and-patterns/rendering-performance/)** for `<Profiler>` used against a real optimization.
+
+## React DevTools: Components and Profiler tabs
+
+The browser extension gives you two tabs this course's command-line tools cannot replace:
+
+- **Components** — inspect the live component tree, its props, state, and every hook's current value, in the order the hooks were called; select a component to see exactly what it received and is holding, without adding a single `console.log`.
+- **Profiler** — record a session of interactions and see a flame graph of every commit: which components rendered, how long each took, and (critically) **why** each one rendered — DevTools names the specific prop or state change that triggered it, which is the fastest way to confirm entry 19 or entry 24's memoization bugs on a real page instead of a unit test.
+- **"Highlight updates when components render"** (a Profiler-tab setting) — flashes a border around every component that re-renders, live, as you interact with the page. Turning this on over a page suspected of over-rendering (a wide, unmemoized Context; an inline object breaking a `memo` boundary) makes the *scope* of the problem visible in seconds, before you write a single test.
+
+## `<StrictMode>` in development
+
+`<StrictMode>` deliberately double-renders components and double-invokes effects' setup→cleanup→setup in development — proven, not just described, in **[Rendering & Reconciliation](/react/en/foundations/rendering-and-reconciliation/)**:
+
+```text
+✓ StrictMode (dev) renders twice and runs setup -> cleanup -> setup once on mount
+✓ without StrictMode, the same component renders and effects run exactly once
+```
+
+Leaving it on costs nothing in production (it does nothing there) and surfaces exactly the kind of impurity this module's catalog is full of — a mutation during render, an effect whose cleanup doesn't fully undo its setup — as a *development-time* symptom, before either one ships. See **[Production & Ecosystem](/react/en/tooling-and-production/production-and-ecosystem/)** for the dev/production build split this relies on.
+
+## `react-dom/static`'s `prerender` — inspecting the exact HTML a user's first paint will show
+
+`react-dom/static`'s `prerender` (and `prerenderToNodeStream`) fully waits out all data before returning — unlike `renderToString`/`renderToPipeableStream`, it never emits a partial shell, so what you get back is the *exact*, complete HTML a real first paint will show:
+
+```tsx
+// src/components/StaticPage.tsx
+function StaticPage() {
+  return (
+    <html>
+      <body>
+        <p data-testid="marker">static</p>
+      </body>
+    </html>
+  );
+}
+
+export default StaticPage;
+```
+
+```tsx
+// src/__tests__/static-prerender.test.tsx
+import { prerender } from 'react-dom/static';
+import { expect, test } from 'vitest';
+import StaticPage from '../components/StaticPage';
+
+test('react-dom/static prerender() resolves a real, complete HTML stream (Node runtime)', async () => {
+  const { prelude } = await prerender(<StaticPage />);
+  const reader = prelude.getReader();
+  const decoder = new TextDecoder();
+  let html = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    html += decoder.decode(value);
+  }
+  expect(html).toContain('<p data-testid="marker">static</p>');
+});
+```
+
+Its value for hydration bugs specifically: inspecting this exact, final, awaited HTML at build time — before any client JavaScript runs — is what lets you catch a value that will disagree the moment the client re-executes the same component, entry 22's `Date.now()`/`Math.random()` pattern being the clearest case. `prerender` cannot run the client-side re-execution itself (that needs a real browser or `hydrateRoot`, proven separately in the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**'s entry 22) — but reading its output is the cheapest place to notice a value that has no business being stable in the first place.
+
+## This course's own harness: compile every snippet
+
+Every code fence in this course tagged with a bare `// path.ext` first line is a real file, collected by `tools/verify-snippets.mjs` into a namespaced directory per lesson and type-checked in one `tsc --noEmit` pass across the whole course:
+
+```bash
+node tools/verify-snippets.mjs
+```
+
+```text
+no type errors.
+
+Per-module fence summary (collected / skipped-no-path / expect-error / tests):
+  reading-react: ... (see this module's own gate run)
+  ...
+```
+
+A fence deliberately showing broken or misbehaving code (like most of the "code AI typically writes" examples in the **[AI Bug Catalog](/react/en/reading-react/ai-bug-catalog/)**) starts with `// @expect-error <reason>` so the harness skips collecting it — the lesson prose carries the real, separately-captured `tsc`/`eslint`/console output instead of asking the harness to reproduce a deliberate failure on every run.
+
+## Mental Model
+
+<Mermaid title="Static tools prove things from source alone; dynamic tools need a real render, a real commit, or a real framework" code={verificationToolsDiagram} />
+
+export const verificationToolsDiagram = `flowchart TD
+  subgraph Static["Static (source only)"]
+    Tsc["tsc --noEmit<br/>real type errors: useRef arg, JSX.Element/null"]
+    Eslint["eslint-plugin-react-hooks@7<br/>rules-of-hooks, exhaustive-deps, refs,<br/>set-state-in-render, immutability"]
+    Compiler["babel-plugin-react-compiler<br/>read the real bail-out (or lack of one)"]
+    Verify["tools/verify-snippets.mjs<br/>compiles every tagged fence in the course"]
+  end
+  subgraph Runtime["Runtime (needs a real render or commit)"]
+    Rtl["RTL + Vitest<br/>click, then assert on what a user sees"]
+    Profiler["<Profiler onRender><br/>real per-commit counts, phase, timing"]
+    Devtools["React DevTools<br/>Components + Profiler tabs, highlight updates"]
+    Strict["<StrictMode><br/>dev-only double render/effect"]
+  end
+  subgraph Framework["Needs a real SSR/hydration setup or framework"]
+    Static["react-dom/static prerender<br/>exact final HTML before any client JS runs"]
+    Rsc["a real RSC framework build<br/>'use client'/'use server' boundary enforcement"]
+  end
+`;
+
+<Callout title="The one-line takeaway">
+Every tool on this page is a filter, not a verdict — even run together, they leave most of the AI Bug Catalog's 25 patterns (including the highest-stakes one, unsanitized `dangerouslySetInnerHTML`) completely uncaught. Run every tool here, then still work through the <a href="/react/en/reading-react/review-checklist/">Review Checklist</a> by eye.
+</Callout>
+
+export const quizVerificationTools = [
+  {
+    q: "```text\nBadSetState.tsx\n  6:3  error  Error: Cannot call setState during render\n...react-hooks/set-state-in-render\n```\nWhich command produced this line, and against which fence in the AI Bug Catalog?",
+    options: [
+      "tsc --noEmit, against a useRef call with no argument",
+      "eslint (eslint-plugin-react-hooks@7.1.1, recommended-latest), against entry 17's setState-during-render example",
+      "babel-plugin-react-compiler, printing a build error",
+      "react-dom/static prerender, against a hydration mismatch",
+    ],
+    answer: 1,
+    explain: "react-hooks/set-state-in-render is one of the compiler-derived diagnostics eslint-plugin-react-hooks@7's recommended-latest config ships as real lint errors — this exact message was captured running that config against entry 17's BadSetState.tsx.",
+  },
+  {
+    q: "Why does compiling `BadSetState` with babel-plugin-react-compiler produce no error at all, just the function passed through untouched?",
+    options: [
+      "The compiler always errors loudly on Rules-of-React violations",
+      "The compiler is designed to skip problematic code rather than fail the build — a component either gets the full memo-cache treatment or passes through byte-for-byte, with nothing in the build output flagging which one happened",
+      "This specific function is too simple to compile",
+      "babel-plugin-react-compiler only works on class components",
+    ],
+    answer: 1,
+    explain: "Verified directly: the compiled output has no _c() memo-cache call and is otherwise identical to the source — the same silent bail-out shown for the Themed mutation example. Only diffing the output, or running the ESLint rules, reveals it.",
+  },
+  {
+    q: "What does `<Profiler onRender>` prove that a component test alone does not?",
+    options: [
+      "Nothing extra — they prove the same thing",
+      "The exact number of commits (and their phase — mount vs update) that actually happened, rather than inferring re-render count from visible behavior",
+      "Whether the component's TypeScript types are correct",
+      "Whether the component is wrapped in StrictMode",
+    ],
+    answer: 1,
+    explain: "Proven above: mounting plus two state-driven updates produces exactly 3 onRender calls (one 'mount', two 'update') — a mechanical count of actual commits, not an assertion about visible DOM content.",
+  },
+  {
+    q: "Why can `react-dom/static`'s `prerender` not, by itself, prove a component is free of hydration mismatches?",
+    options: [
+      "prerender always throws on any mismatch",
+      "prerender only produces the server-side HTML; a mismatch requires a SECOND, disagreeing execution on the client (via hydrateRoot or a real browser) to compare against — prerender alone has nothing to compare to",
+      "prerender does not exist in react-dom",
+      "prerender only works with class components",
+    ],
+    answer: 1,
+    explain: "The AI Bug Catalog's entry 22 proves the mismatch specifically by pairing renderToString (server) with hydrateRoot (client, with a different mocked Date.now()) — prerender's value is making the exact final server HTML inspectable, not reproducing the client's disagreeing re-execution on its own.",
+  },
+  {
+    q: "Why does this course's harness mark most of the AI Bug Catalog's 'code AI typically writes' fences with `// @expect-error <reason>` instead of a plain path comment?",
+    options: [
+      "To hide the bugs from readers",
+      "So the harness skips type-checking a fence that is deliberately broken or behaviorally wrong — the lesson prose carries the real, separately-captured tsc/eslint/console output instead of asking every run to reproduce an intentional failure",
+      "Because @expect-error fences run faster",
+      "It has no effect on the harness at all",
+    ],
+    answer: 1,
+    explain: "Without the marker, a deliberately buggy 'wrong code' example would make every run of tools/verify-snippets.mjs report a real type error (or collect code that actually shouldn't be treated as the module's canonical implementation) — the marker tells the harness this fence is intentionally uncollected.",
+  },
+  {
+    q: "```text\nrules-of-hooks, exhaustive-deps, refs, set-state-in-render, immutability\n```\nWhat do all five of these have in common, verified in this lesson?",
+    options: [
+      "They are all TypeScript compiler errors",
+      "They are all real eslint-plugin-react-hooks@7.1.1 rules, verified by running that exact config against a violating file for each one",
+      "They only apply to class components",
+      "They are all warnings, never errors",
+    ],
+    answer: 1,
+    explain: "Each of the five is a rule inside eslint-plugin-react-hooks@7.1.1's recommended-latest flat config, and this lesson captured a real run of that exact config against one violating file per rule — not five different tools.",
+  },
+];
+
+<Quiz client:visible id="reading-react/verification-tools" questions={quizVerificationTools} />
+
+<ProgressTracker client:visible id="reading-tools" />

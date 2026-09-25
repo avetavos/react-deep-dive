@@ -1,0 +1,1745 @@
+---
+title: แคตตาล็อกบั๊กที่ AI มักเขียน
+description: '25 บั๊กที่โค้ด React ที่ AI generate มักผลิตซ้ำ ๆ — โค้ดที่ AI มักเขียน ทำไมมันผิด output จริงของ tsc/eslint/test/console และวิธีแก้'
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+ทุก pattern ด้านล่างถูกเขียนให้หน้าตาเหมือนโค้ด React ที่ AI assistant ผลิตออกมาจริง ๆ แล้วนำไป type-check, lint หรือรันกับ probe Vite + React 19.3 + Vitest + React Testing Library จริง output ของ `tsc`, `eslint-plugin-react-hooks@7.1.1` และ console ที่ยกมาคัดลอกตรงจากการรันจริงเหล่านั้น ไม่ได้แต่งขึ้นจากความจำ 25 pattern จัดกลุ่มตามลำดับการอ่านเดียวกับ **[วิธีอ่านโค้ด React ที่คุณไม่ได้เขียน](/react/th/reading-react/)**: hooks กับ dependency ของมัน, server/client boundary, key กับ identity, state ownership, effect เทียบกับ event และ memo pairing/สมมติฐานของ compiler ดู **[เช็คลิสต์รีวิวโค้ด](/react/th/reading-react/review-checklist/)** ที่ตามหลังบทนี้สำหรับเวอร์ชันหน้าเดียวของ 25 คำถามเดียวกัน
+
+## Hooks กับ dependency ของมัน
+
+### 1. Effect ที่ขาด cleanup
+
+```tsx
+// src/components/ChatRoomNoCleanup.tsx — as generated
+import { useEffect } from 'react';
+
+function ChatRoomNoCleanup({ roomId }: { roomId: string }) {
+  useEffect(() => {
+    const connection = createConnection(roomId);
+    connection.connect();
+    // No return statement — nothing ever tears this connection down.
+  }, [roomId]);
+  return null;
+}
+```
+
+`useEffect` มีไว้ sync กับ external system และทุกการ sync ต้องการวิธี undo ถ้าไม่มี cleanup function React ไม่มีอะไรให้เรียกเมื่อ `roomId` เปลี่ยนหรือ component unmount — connection เก่าก็แค่รันต่อไปเงียบ ๆ อยู่ข้าง ๆ ไม่ว่า effect รอบถัดไปจะตั้งค่าอะไรไว้
+
+**อาการ — จำนวน connection ที่วัดได้จริง** (counter ที่แชร์กันข้าม instance ของ `createConnection` ทุกตัว พิสูจน์แล้วใน probe):
+
+```text
+✓ an effect with no cleanup leaves a real connection open after the component unmounts
+✓ remounting the same room without cleanup accumulates connections instead of replacing one
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+การ unmount component ทิ้งจำนวน connection ไว้ที่ `1` ไม่ใช่ `0`; การสลับห้องทิ้งไว้ที่ `2` (ทั้ง "general" กับ "random" เปิดพร้อมกัน) ไม่ใช่ `1` — พิสูจน์ว่า connection เก่าไม่เคยถูกปิดจริง ไม่ใช่แค่ leak ในทางทฤษฎี
+
+**วิธีแก้:** return การเรียก disconnect จาก effect:
+
+```tsx
+// src/components/ChatRoomWithCleanup.tsx
+import { useEffect } from 'react';
+
+function ChatRoomWithCleanup({ roomId }: { roomId: string }) {
+  useEffect(() => {
+    const connection = createConnection(roomId);
+    connection.connect();
+    return () => connection.disconnect(); // cleanup: undo the setup
+  }, [roomId]);
+  return null;
+}
+
+declare function createConnection(roomId: string): { connect(): void; disconnect(): void };
+
+export default ChatRoomWithCleanup;
+```
+
+```tsx
+// src/__tests__/chatroom-cleanup.test.tsx
+import { useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function makeConnection(_roomId: string, onTotalChanged: (n: number) => void) {
+  return {
+    connect() {
+      makeConnection.total++;
+      onTotalChanged(makeConnection.total);
+    },
+    disconnect() {
+      makeConnection.total--;
+      onTotalChanged(makeConnection.total);
+    },
+  };
+}
+makeConnection.total = 0;
+
+function ChatRoomWithCleanupTest({ roomId, onTotalChanged }: { roomId: string; onTotalChanged: (n: number) => void }) {
+  useEffect(() => {
+    const connection = makeConnection(roomId, onTotalChanged);
+    connection.connect();
+    return () => connection.disconnect();
+  }, [roomId]);
+  return null;
+}
+
+test('an effect WITH cleanup disconnects on unmount, unlike the buggy version above', () => {
+  makeConnection.total = 0;
+  let total = 0;
+  const { unmount } = render(
+    <ChatRoomWithCleanupTest roomId="general" onTotalChanged={(n) => { total = n; }} />,
+  );
+  expect(total).toBe(1);
+  unmount();
+  expect(total).toBe(0); // cleanup actually ran — the connection closed
+});
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — ไม่มี compiler error ไม่มี lint rule ไหนตรวจจับ `return` ที่หายไปใน effect มีแค่ test mount/unmount จริง (หรือ subscription ที่ leak ใน production) เท่านั้นที่เผยมันออกมา ดู **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)** สำหรับการพิสูจน์ลำดับ cleanup แบบเต็ม
+
+### 2. Stale closure ใน effect ของ `setInterval` (วิธีแก้ด้วย `useEffectEvent`)
+
+```tsx
+// @expect-error compiles and runs, but the interval never sees a fresh `increment` — see prose
+// src/components/Timer.tsx — as generated
+function Timer() {
+  const [count, setCount] = useState(0);
+  const [increment, setIncrement] = useState(1);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCount((c) => c + increment); // reads increment from the closure
+    }, 1000);
+    return () => clearInterval(id);
+  }, []); // empty deps — the interval is only ever set up once
+
+  return (
+    <div>
+      <output>{count}</output>
+      <button onClick={() => setIncrement((i) => i + 1)}>bump increment</button>
+    </div>
+  );
+}
+```
+
+callback ของ interval ปิดทับ `increment` จาก render ที่ effect รันอยู่ ด้วย dependency array ว่าง effect นั้นรันแค่ครั้งเดียว ตอน mount — callback เลยอ้างอิง `increment` **ตอนเริ่มต้น** (`1`) ตลอดไป ไม่ว่าจะกดปุ่มกี่ครั้งก็ตาม
+
+**อาการ — output test จริง** (fake timer พิสูจน์แล้วใน probe):
+
+```text
+✓ useEffectEvent reads the latest increment without re-running the effect (no interval reset)
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+เจาะจง: หลัง tick หนึ่งครั้งตอน `increment=1` และ tick หนึ่งครั้งตอน `increment=2` เวอร์ชันบั๊กด้านบนยังโชว์ `2` (`0 + 1 + 1`) ไม่ใช่ `3` — การ bump ไม่มีผลกับ interval ที่กำลังรันอยู่เลย
+
+**วิธีแก้:** แยกการอ่านที่ไม่ reactive ออกมาเป็น `useEffectEvent` (React 19.2) ซึ่งเห็น state ล่าสุดเสมอโดยไม่กลายเป็น dependency:
+
+```tsx
+// src/components/TimerFixed.tsx
+import { useEffect, useEffectEvent, useState } from 'react';
+
+function TimerFixed({ onTick }: { onTick: () => void }) {
+  const [count, setCount] = useState(0);
+  const [increment, setIncrement] = useState(1);
+
+  const onTickEvent = useEffectEvent(() => {
+    setCount((c) => c + increment);
+    onTick();
+  });
+
+  useEffect(() => {
+    const id = setInterval(onTickEvent, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div>
+      <output data-testid="count">{count}</output>
+      <button onClick={() => setIncrement((i) => i + 1)}>bump increment</button>
+    </div>
+  );
+}
+
+export default TimerFixed;
+```
+
+```tsx
+// src/__tests__/timer-fixed.test.tsx
+import { useEffect, useEffectEvent, useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+
+afterEach(cleanup);
+
+function TimerFixed({ onTick }: { onTick: () => void }) {
+  const [count, setCount] = useState(0);
+  const [increment, setIncrement] = useState(1);
+
+  const onTickEvent = useEffectEvent(() => {
+    setCount((c) => c + increment);
+    onTick();
+  });
+
+  useEffect(() => {
+    const id = setInterval(onTickEvent, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div>
+      <output data-testid="count">{count}</output>
+      <button onClick={() => setIncrement((i) => i + 1)}>bump increment</button>
+    </div>
+  );
+}
+
+test('useEffectEvent reads the latest increment without re-running the effect (no interval reset)', () => {
+  vi.useFakeTimers();
+  const onTick = vi.fn();
+  const { getByTestId, getByRole } = render(<TimerFixed onTick={onTick} />);
+
+  act(() => { vi.advanceTimersByTime(1000); }); // tick with increment=1
+  expect(getByTestId('count').textContent).toBe('1');
+
+  act(() => { getByRole('button').click(); }); // increment becomes 2
+
+  act(() => { vi.advanceTimersByTime(1000); }); // tick with increment=2, SAME interval
+  expect(getByTestId('count').textContent).toBe('3'); // 1 + 2, not reset
+
+  vi.useRealTimers();
+});
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติจับบั๊กอ่านค่า-stale ตัวนี้เอง — มีแค่ test แบบ timer จริงเท่านั้น ความผิดพลาด*ตรงข้าม*กัน (การเติม Effect Event เข้า deps array) ถูกจับโดย `react-hooks/exhaustive-deps` พิสูจน์แล้วใน **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)**
+
+### 3. Hook ที่ถูกเรียกแบบ conditional
+
+```tsx
+// @expect-error real eslint error — see prose
+// src/components/Toggle.tsx — as generated
+import { useState } from 'react';
+
+export function Toggle({ show }: { show: boolean }) {
+  if (show) {
+    const [on, setOn] = useState(false); // hook called conditionally
+    return <button onClick={() => setOn(!on)}>{String(on)}</button>;
+  }
+  return null;
+}
+```
+
+Hook ต้องถูกเรียกในลำดับเดียวกันเป๊ะทุก render — hook ข้างใน `if` รันบาง render ไม่รันบาง render ซึ่งทำให้ bookkeeping ภายในของ hook-slot ของ React ไม่ตรงกันทันทีที่ `show` เปลี่ยน
+
+**อาการ — output จริงของ `eslint-plugin-react-hooks@7.1.1`** (flat config `recommended-latest`):
+
+```text
+Toggle.tsx
+  5:25  error  React Hook "useState" is called conditionally. React Hooks must be called
+  in the exact same order in every component render. Did you accidentally call a React
+  Hook after an early return?  react-hooks/rules-of-hooks
+```
+
+**วิธีแก้:** เรียก hook แบบ unconditional ที่ top level แล้ว branch ที่ *ค่า* แทนการเรียก hook:
+
+```tsx
+// src/components/ToggleFixed.tsx
+import { useState } from 'react';
+
+export function ToggleFixed({ show }: { show: boolean }) {
+  const [on, setOn] = useState(false); // always called, same order every render
+  if (!show) return null;
+  return <button onClick={() => setOn(!on)}>{String(on)}</button>;
+}
+```
+
+**จับได้โดย:** กฎ `rules-of-hooks` ของ `eslint-plugin-react-hooks` จับได้เชื่อถือได้ ทันทีที่มันถูกต่อสายเข้า CI จริง — ไม่ใช่โดย `tsc`
+
+### 4. `useRef()` แบบไม่มีค่าเริ่มต้น ภายใต้ typing ของ React 19
+
+```tsx
+// @expect-error real tsc error — see prose
+// src/BadUseRefNoArg.tsx
+import { useRef } from 'react';
+function Box() {
+  const ref = useRef<HTMLDivElement>(); // React 19 types: no zero-arg overload
+  return <div ref={ref} />;
+}
+```
+
+`@types/react@19` ประกาศ overload ของ `useRef` ไว้เป๊ะ ๆ สามแบบ และไม่มีสักแบบที่รับศูนย์ argument — นิสัยเก่า "ไม่มี argument, `undefined` โดยนัย" จาก type definition รุ่นก่อนไม่ตรงกับ overload ไหนเลย
+
+**อาการ — output จริงของ `tsc`:**
+
+```text
+BadUseRefNoArg.tsx(3,15): error TS2554: Expected 1 arguments, but got 0.
+```
+
+**วิธีแก้:** ส่งค่าเริ่มต้นแบบชัดเจน — `null` สำหรับ DOM ref ที่จะแปะทีหลัง:
+
+```tsx
+// src/UseRefFix.tsx
+import { useRef } from 'react';
+
+export function Box() {
+  const ref = useRef<HTMLDivElement>(null); // React 19: explicit initial value required
+  return <div ref={ref} />;
+}
+```
+
+**จับได้โดย:** `tsc --noEmit` ทันทีและไม่มีเงื่อนไข — นี่คือ type error จริง ปัจจุบัน ภายใต้ `@types/react@19` ไม่ใช่ style nitpick ดู **[TypeScript with React](/react/th/tooling-and-production/typescript-with-react/)**
+
+### 5. `forwardRef` ในโค้ด React 19 ใหม่
+
+```jsx
+// src/components/FancyInputOld.jsx — as generated
+import { forwardRef } from 'react';
+
+const FancyInput = forwardRef(function FancyInput(props, ref) {
+  return <input {...props} ref={ref} />;
+});
+
+export default FancyInput;
+```
+
+โค้ดนี้ยังทำงานได้ — `forwardRef` ไม่ถูกลบออก — แต่โค้ดที่ generate มาแล้วเอื้อมไปหามันใน codebase React 19 ถือว่าล้าสมัย ไม่ใช่แค่ "แบบเก่า ๆ" react.dev ตอนนี้ระบุแผนการ deprecate ที่เป็นรูปธรรม ไม่ใช่แค่ "ไม่จำเป็นอีกต่อไป":
+
+> `forwardRef` will be deprecated in a future release.
+> — [react.dev/reference/react/forwardRef](https://react.dev/reference/react/forwardRef)
+
+ประวัติ URL ของหน้า reference ของมันเองเป็นสัญญาณอิสระตัวที่สองของการเปลี่ยนแปลงแบบเดียวกัน: **[react.dev/reference/react-dom/hooks/useFormState](https://react.dev/reference/react-dom/hooks/useFormState)** — API ที่เปลี่ยนชื่อในลักษณะคล้ายกัน entry 21 ด้านล่าง — ตอนนี้ redirect ตรงไปหน้า replacement เลย เป็นการปฏิบัติแบบเดียวกับที่ docs ของ `forwardRef` เองกำลังมุ่งไป
+
+**วิธีแก้:** รับ `ref` เป็น prop ธรรมดา — ไม่มี wrapper ไม่มีการเต้น generic-parameter แยกต่างหาก:
+
+```tsx
+// src/components/FancyInputNew.tsx
+type FancyInputProps = { placeholder?: string; ref?: React.Ref<HTMLInputElement> };
+
+function FancyInputNew({ placeholder, ref }: FancyInputProps) {
+  return <input placeholder={placeholder} ref={ref} />;
+}
+
+export default FancyInputNew;
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — `forwardRef` ยัง compile และทำงานได้วันนี้ มีแค่การอ่าน timeline ที่ react.dev ระบุไว้เอง (หรือ lint rule ของ project ที่ห้ามใช้มัน ถ้ามีตั้งไว้) เท่านั้นที่ตีธง ดู **[useRef & the DOM](/react/th/hooks/useref-and-the-dom/)**
+
+### 6. Selector ของ `useSyncExternalStore` ที่ return object ใหม่ทุกครั้ง
+
+```tsx
+// @expect-error real infinite-loop console output — see prose
+// src/components/BadSelector.tsx — as generated
+import { useSyncExternalStore } from 'react';
+
+function getSnapshotBad() {
+  return { count: state.count }; // a NEW object every single call
+}
+
+function BadSelectorConsumer() {
+  const snap = useSyncExternalStore(subscribe, getSnapshotBad);
+  return <span>{snap.count}</span>;
+}
+```
+
+React เทียบผลลัพธ์ `getSnapshot()` ที่ต่อเนื่องกันด้วย `Object.is` เพื่อตัดสินว่ามีอะไรเปลี่ยนไหม `getSnapshot` ที่ return object literal ใหม่ทุกครั้งไม่มีทางถูกมองว่า "ไม่เปลี่ยน" ได้เลย — แม้ state ข้างในจะเหมือนเดิมทุกประการ — React เลย re-render, เรียก `getSnapshot` อีกที ได้ object ใหม่อีกตัว แล้ว re-render อีก ไปเรื่อย ๆ
+
+**อาการ — console output จริง คำต่อคำ:**
+
+```text
+The result of getSnapshot should be cached to avoid an infinite loop
+```
+
+ตามด้วย safety limit ของ render-depth ของ React เองที่ throw `Maximum update depth exceeded`
+
+**วิธีแก้:** return primitive หรือ cache object ที่ derive ไว้ให้การเรียกซ้ำกับ state เดียวกัน return reference เดิม:
+
+```tsx
+// src/components/GoodSelector.tsx
+import { useSyncExternalStore } from 'react';
+
+function getSnapshotGood() {
+  return state.count; // a primitive — always comparable by value
+}
+
+export function GoodSelectorConsumer() {
+  const count = useSyncExternalStore(subscribe, getSnapshotGood);
+  return <span>{count}</span>;
+}
+
+declare const state: { count: number };
+declare function subscribe(cb: () => void): () => void;
+```
+
+**จับได้โดย:** ไม่มีอะไรตอน type-check — มีแค่การรัน component จริงเท่านั้นที่เผย warning แล้วตามด้วย error ที่ throw ดู **[External Stores](/react/th/state-and-data/external-stores/)** สำหรับการพิสูจน์เต็มรูปแบบ
+
+### 7. `use()` ถูกเรียกด้วย promise ที่สร้างสด ๆ ตอน render
+
+```tsx
+// @expect-error suspends forever / refetches every render — see prose
+// src/components/SearchResultsBad.tsx — as generated
+function SearchResultsBad({ query }: { query: string }) {
+  const resultsPromise = fetchResults(query); // a NEW promise every render
+  const results = use(resultsPromise);
+  return <ul>{results.map((r) => <li key={r.id}>{r.title}</li>)}</ul>;
+}
+
+declare function fetchResults(query: string): Promise<{ id: string; title: string }[]>;
+declare function use<T>(p: Promise<T>): T;
+```
+
+`use()` ไม่ fetch หรือ cache อะไรเลย — มันแค่อ่าน promise ไหนก็ตามที่คุณส่งให้ การเรียก `fetchResults(query)` ตรง ๆ ข้างใน render body สร้าง promise ใหม่เอี่ยมทุก render component เลยหรือ suspend ไม่จบ (ถ้าการ retry ของ `use()` เจอ promise ใหม่ที่ไม่เคย resolve ทันเวลาซ้ำ ๆ) หรือไม่ก็ fetch ใหม่ทุก render เดียว
+
+**วิธีแก้:** cache promise ต่อ `query` และยกเลิก request ที่ค้างอยู่ก่อนหน้าเมื่อ `query` เปลี่ยน:
+
+```tsx
+// src/components/SearchResultsFixed.tsx
+const cache = new Map<string, Promise<{ id: string; title: string }[]>>();
+
+function getResultsPromise(query: string) {
+  if (!cache.has(query)) cache.set(query, fetchResults(query));
+  return cache.get(query)!;
+}
+
+function SearchResultsFixed({ query }: { query: string }) {
+  const results = use(getResultsPromise(query)); // stable reference per query
+  return <ul>{results.map((r) => <li key={r.id}>{r.title}</li>)}</ul>;
+}
+
+declare function fetchResults(query: string): Promise<{ id: string; title: string }[]>;
+declare function use<T>(p: Promise<T>): T;
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ไม่มี compiler error ไม่มี lint rule มีแค่พฤติกรรมที่สังเกตได้ (spinner โหลดค้างตลอดไป หรือ network tab เต็มไปด้วย request ซ้ำ) เท่านั้นที่เผยมัน ดู **[`use()` & Data Fetching](/react/th/concurrent-and-suspense/use-and-data-fetching/)** สำหรับการพิสูจน์เรื่อง timing ว่าทำไม promise ต้องถูกสร้างนอก render ตั้งแต่แรก
+
+### 8. `useFormState` แทนที่จะเป็น `useActionState`
+
+```tsx
+// src/components/ChangeNameOld.tsx — as generated
+'use client';
+import { useFormState } from 'react-dom';
+
+function ChangeNameOld() {
+  const [error, formAction] = useFormState(updateNameAction, null);
+  return (
+    <form action={formAction}>
+      <input name="name" />
+      {error && <p>{error}</p>}
+    </form>
+  );
+}
+
+declare function updateNameAction(prevState: string | null, formData: FormData): Promise<string | null>;
+
+export default ChangeNameOld;
+```
+
+`useFormState` ยังคงอยู่ใน `react-dom@19.3.0` — ยืนยันโดยตรงว่ามันไม่ใช่ API ที่ถูกลบ — แต่ AI model ที่ train มาก่อนปี 2024 เอื้อมไปหามันด้วยความเคยชิน และโค้ดที่ generate มาโดยอิงมันมักใช้รูปแบบ tuple สอง item *แบบเก่า* (`[state, formAction]` ไม่มี `isPending`) ที่ document ไว้ก่อนการเปลี่ยนชื่อ ขาด pending flag ไปเลย
+
+**อาการ — รูปแบบ return ที่ยืนยันด้วย runtime จริง:**
+
+```text
+✓ react-dom still exports useFormState (React 19.3) — a real backward-compat alias, not a removed API
+✓ useActionState (from react) returns the identical 3-tuple shape
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+`useFormState` return triple `[state, formAction, isPending]` *เหมือนกัน* กับที่ `useActionState` return — พิสูจน์ด้วยการยืนยันว่าผลลัพธ์ที่จับได้มีความยาว `3` โดย element ที่สองกับสามมี type เป็น function กับ boolean ตามลำดับ แยกต่างหาก URL ของ reference ของ `useFormState` เองเป็นสัญญาณอิสระตัวที่สองของการเปลี่ยนชื่อ: การ fetch `react.dev/reference/react-dom/hooks/useFormState` redirect (HTTP 200 หลังตาม redirect) ตรงไปที่ `react.dev/reference/react/useActionState` — react.dev ไม่มีหน้า reference แยกสำหรับชื่อเก่าอีกต่อไปแล้ว
+
+**วิธีแก้:** import `useActionState` จาก `react` แทนที่จะเป็น `useFormState` จาก `react-dom`:
+
+```tsx
+// src/components/ChangeNameFixed.tsx
+'use client';
+import { useActionState } from 'react';
+
+function ChangeNameFixed() {
+  const [error, formAction, isPending] = useActionState(updateNameAction, null);
+  return (
+    <form action={formAction}>
+      <input name="name" disabled={isPending} />
+      {error && <p>{error}</p>}
+    </form>
+  );
+}
+
+declare function updateNameAction(prevState: string | null, formData: FormData): Promise<string | null>;
+
+export default ChangeNameFixed;
+```
+
+```tsx
+// src/__tests__/use-form-state-shape.test.tsx
+import { useFormState } from 'react-dom';
+import { useActionState } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+async function bumpAction(prevState: number, _payload: FormData) {
+  return prevState + 1;
+}
+
+function WithUseFormState({ onResult }: { onResult: (r: unknown[]) => void }) {
+  const result = useFormState(bumpAction as never, 0);
+  onResult(result as unknown[]);
+  return null;
+}
+
+function WithUseActionState({ onResult }: { onResult: (r: unknown[]) => void }) {
+  const result = useActionState(bumpAction, 0);
+  onResult(result as unknown[]);
+  return null;
+}
+
+test('react-dom still exports useFormState (React 19.3) — a real backward-compat alias, not a removed API', () => {
+  let captured: unknown[] = [];
+  render(<WithUseFormState onResult={(r) => { captured = r; }} />);
+  // Same 3-tuple shape useActionState returns — confirmed by length, not assumed.
+  expect(captured).toHaveLength(3);
+  expect(typeof captured[1]).toBe('function');
+  expect(typeof captured[2]).toBe('boolean');
+});
+
+test('useActionState (from react) returns the identical 3-tuple shape', () => {
+  let captured: unknown[] = [];
+  render(<WithUseActionState onResult={(r) => { captured = r; }} />);
+  expect(captured).toHaveLength(3);
+  expect(typeof captured[1]).toBe('function');
+  expect(typeof captured[2]).toBe('boolean');
+});
+```
+
+**จับได้โดย:** ไม่มีอะไรตอน type-check — ทั้งสองแบบ compile และรันได้ทั้งคู่ มีแค่การอ่าน reference ปัจจุบันของ react.dev (หรือสังเกต `isPending` ที่หายไป) เท่านั้นที่จับมันได้ ดู **[Actions & useActionState](/react/th/react-19/actions-and-useactionstate/)**
+
+## Server/client boundary กับ directive
+
+### 9. Hook ที่ใช้ในไฟล์ที่ไม่มี directive `'use client'`
+
+```tsx
+// src/components/Counter.tsx — as generated, dropped into an RSC-capable project
+import { useState } from 'react';
+
+export function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>{count}</button>;
+}
+```
+
+ไฟล์นี้ compile ผ่านสะอาดภายใต้ `tsc --noEmit` ใน probe Vite ธรรมดาของคอร์สนี้ — `'use client'` เป็นแค่ string literal ในสายตาของ TypeScript และ Vite SPA ไม่มี server/client split ให้ directive นี้มีความหมายตั้งแต่แรกอยู่แล้ว เอาไฟล์เดียวกันนี้ไปวางใน RSC-capable framework จริง (Next.js App Router) โดยไม่มี `'use client'` บนตัวเองหรือ parent build step ของ framework เองจะปฏิเสธมันทันทีที่มันพยายามใช้ client-only hook จากสิ่งที่ framework มองว่าเป็น Server Component
+
+**ข้อจำกัดที่ต้องพูดตรง ๆ:** probe Vite ของคอร์สนี้ reproduce build error ระดับ framework แบบนั้นไม่ได้ — การพิสูจน์เรื่องนี้ต้องการ RSC framework จริง ซึ่งเป็นสิ่งที่ **[Server and Client Components](/nextjs/en/foundations/server-and-client-components/)** ในคอร์ส Next.js Deep Dive ทำ กับ `next build` จริง
+
+**วิธีแก้:** เติม directive เข้าไฟล์ (หรือยืนยันว่า parent มีอยู่แล้ว):
+
+```tsx
+// src/components/CounterFixed.tsx
+'use client';
+import { useState } from 'react';
+
+export function CounterFixed() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>{count}</button>;
+}
+```
+
+**จับได้โดย:** build step ของ RSC-capable framework จริงเท่านั้น — ไม่ใช่ `tsc` ไม่ใช่ probe ของคอร์สนี้ ดู **[Server Components](/react/th/react-19/server-components/)** สำหรับสิ่งที่ directive นี้บ่งบอกจริง ๆ
+
+### 10. Event handler ที่ส่งจาก Server Component ไปหา child ของ Client Component
+
+```tsx
+// @expect-error illustrative — this course's probe has no RSC bundler to fail the build; see prose
+// src/ProductPage.tsx — as generated
+// A Server Component (no 'use client' here) passing a live function down.
+export default function ProductPage({ id }: { id: string }) {
+  function handleAddToCart() {
+    console.log('added', id); // closes over server-side state
+  }
+  return <AddToCartButton onAdd={handleAddToCart} />; // ❌ function prop from a Server Component
+}
+
+declare function AddToCartButton(props: { onAdd: () => void }): React.ReactElement;
+```
+
+Prop ที่ข้าม boundary Server → Client ต้อง serializable — ข้อมูลที่รอดจากการถูกส่งข้าม network ในฐานะคำอธิบาย ไม่ใช่ live reference function ธรรมดาที่ประกาศใน Server Component เป็นกรณีที่ข้ามไม่ได้พอดี: มันถือ live closure ทับ execution ฝั่ง server ซึ่งไม่มีความหมายอะไรเลยเมื่อไปถึง browser
+
+**วิธีแก้:** ย้าย logic ที่ interactive (และ event handler ที่กระตุ้นมัน) เข้าไปใน Client Component เอง แล้วส่งแค่ข้อมูล serializable — หรือ Server Action จริง (`'use server'`) — ข้าม boundary:
+
+```tsx
+// src/AddToCartButton.tsx
+'use client';
+
+export function AddToCartButton({ productId }: { productId: string }) {
+  function handleAddToCart() {
+    console.log('added', productId); // lives entirely on the client
+  }
+  return <button onClick={handleAddToCart}>Add to cart</button>;
+}
+```
+
+**จับได้โดย:** build step ของ RSC framework จริง ไม่ใช่ `tsc` — probe ของคอร์สนี้ยืนยันได้แค่ว่ารูปแบบ type-check ผ่าน ไม่ใช่ว่ากฎ boundary ถูกบังคับใช้จริง ดู **[Server Components](/react/th/react-19/server-components/)** สำหรับกฎ serialization เต็มรูปแบบ (พร้อมทางเลือก Server Action เมื่อการคลิกต้องไปถึง server จริง ๆ)
+
+### 11. `dangerouslySetInnerHTML` กับ input จาก user ที่ไม่ sanitize
+
+```tsx
+// @expect-error demonstrates a real XSS payload landing in the live DOM — see prose
+// src/components/Comment.tsx — as generated
+function Comment({ html }: { html: string }) {
+  return <div dangerouslySetInnerHTML={{ __html: html }} />;
+}
+```
+
+`dangerouslySetInnerHTML` ทำตามชื่อของมันเป๊ะ ๆ: มันตั้ง `innerHTML` ตรง ๆ **ไม่มี escape และไม่มี sanitize ใด ๆ ทั้งสิ้น** การส่ง content จาก user (comment, bio, rich-text field) เข้าไปตรง ๆ คือช่องโหว่ cross-site-scripting ที่ใช้งานได้จริง ไม่ใช่แค่ทฤษฎี
+
+**อาการ — DOM content ที่ยืนยันแล้วจริง:**
+
+```text
+✓ dangerouslySetInnerHTML with unsanitized user input inserts a real, live <img onerror> payload into the DOM
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+การ render `<Comment html='<img src="x" onerror="window.__xss = true">' />` แล้วส่อง DOM จริงยืนยันว่า tag `<img>` เป๊ะ ๆ, handler `onerror` ของมัน และ attribute ของมันอยู่ที่นั่นจริงทั้งหมด — `node.innerHTML` ตรงกับ string อันตรายนั้น byte ต่อ byte และ `node.querySelector('img')` เจอ element จริงที่มี handler ของผู้โจมตีติดอยู่
+
+```tsx
+// src/__tests__/dangerous-html.test.tsx
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function CommentUnsafe({ html }: { html: string }) {
+  return <div data-testid="comment" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+test('dangerouslySetInnerHTML with unsanitized user input inserts a real, live <img onerror> payload into the DOM', () => {
+  const malicious = '<img src="x" onerror="window.__xss = true">';
+  const { getByTestId } = render(<CommentUnsafe html={malicious} />);
+  const node = getByTestId('comment');
+  // React sets innerHTML verbatim — no escaping, no sanitization of its own.
+  expect(node.innerHTML).toBe(malicious);
+  expect(node.querySelector('img')).not.toBeNull();
+  expect(node.querySelector('img')!.getAttribute('onerror')).toContain('window.__xss');
+});
+```
+
+**วิธีแก้:** sanitize ก่อนตั้งค่า ด้วย sanitizer library จริง (DOMPurify คือตัวเลือกที่คอนเวิร์จแล้ว) — ห้ามใช้ regex ที่เขียนเองสตริปทิ้ง:
+
+```tsx
+// src/components/CommentFixed.tsx
+// DOMPurify is illustrative here (a real sanitizer, not a course dependency) —
+// `declare` stands in for its real type, the same way this course stubs any
+// external library it references without adding it as a dependency.
+declare const DOMPurify: { sanitize: (html: string) => string };
+
+export function CommentFixed({ html }: { html: string }) {
+  return <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html) }} />;
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ไม่มี compiler error ไม่มี default lint rule ใน config ของคอร์สนี้ มีแค่ security review (หรือการโจมตีจริง) เท่านั้นที่เผยมัน นี่คือ entry เดียวในแคตตาล็อกนี้ที่ "มัน compile และรันได้ปกติ" คือสัญญาณที่อันตรายที่สุดเท่าที่จะเป็นไปได้ ไม่ใช่สัญญาณที่ทำให้อุ่นใจ
+
+### 12. Setter ของ `useOptimistic` ถูกเรียกนอก Transition หรือ Action
+
+```tsx
+// @expect-error real console.error + value reverts immediately — see prose
+// src/components/LikeButton.tsx — as generated
+function LikeButton({ liked }: { liked: boolean }) {
+  const [optimisticLiked, setOptimisticLiked] = useOptimistic(liked);
+
+  function handleClick() {
+    setOptimisticLiked(!optimisticLiked); // called directly in a plain event handler
+    saveLike(!optimisticLiked);
+  }
+
+  return <button onClick={handleClick}>{optimisticLiked ? 'Liked' : 'Like'}</button>;
+}
+
+declare function useOptimistic<T>(v: T): [T, (v: T) => void];
+declare function saveLike(v: boolean): void;
+```
+
+Setter ของ `useOptimistic` เหมือนกับ `requestFormReset` คือ API ที่ใช้ได้เฉพาะข้างใน Action ตาม react.dev: *"The optimistic setter function must be called inside `startTransition` or within an Action. Calling the setter outside an Action will cause the optimistic state to revert immediately because there is no Transition holding it."*
+
+**อาการ — ข้อความ console ที่จับได้จริง:**
+
+```text
+An optimistic state update occurred outside a transition or action.
+```
+
+ปุ่มโชว์ label แบบ optimistic แว๊บหนึ่งแล้วก็ revert กลับ — ไม่มี Transition ให้ React "ถือ" ค่า optimistic ไว้จนกว่า state จริงจะนิ่ง
+
+**วิธีแก้:** ห่อการเรียกด้วย `startTransition`:
+
+```tsx
+// src/components/LikeButtonFixed.tsx
+import { startTransition, useOptimistic } from 'react';
+
+export function LikeButtonFixed({ liked }: { liked: boolean }) {
+  const [optimisticLiked, setOptimisticLiked] = useOptimistic(liked);
+
+  function handleClick() {
+    startTransition(() => {
+      setOptimisticLiked(!optimisticLiked);
+      saveLike(!optimisticLiked);
+    });
+  }
+
+  return <button onClick={handleClick}>{optimisticLiked ? 'Liked' : 'Like'}</button>;
+}
+
+declare function saveLike(v: boolean): void;
+```
+
+**จับได้โดย:** ไม่มีอะไรตอน type-check — ทั้งสองเวอร์ชัน compile และรันได้ มีแค่ console warning (กับค่าที่มองเห็นได้ว่า revert) เท่านั้นที่เผยมัน ดู **[Forms & useOptimistic](/react/th/react-19/forms-and-useoptimistic/)** สำหรับข้อความที่จับได้เป๊ะ ๆ
+
+## Key กับ identity
+
+### 13. Array index ที่ใช้เป็น list key
+
+```tsx
+// @expect-error state bleeds to the wrong row on reorder — see prose
+// src/components/TodoList.tsx — as generated
+function TodoList({ todos }: { todos: { id: string; text: string; done: boolean }[] }) {
+  return (
+    <ul>
+      {todos.map((todo, i) => (
+        <li key={i}>
+          <input type="checkbox" defaultChecked={todo.done} />
+          {todo.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+`key={i}` ใช้ array index เป็น identity ตราบใดที่ list ไม่เคย reorder แบบนี้ดูโอเค — แต่ทันทีที่มี item ถูก insert, ลบ หรือ list ถูก sort React จับคู่ state ของแถว*เก่า*กับ item ที่บังเอิญมานั่ง index เดียวกันตอนนี้ ไม่ใช่กับ item ที่มันถูก attach ไว้แต่แรก
+
+**อาการ — output test จริง:**
+
+```text
+✓ index-as-key: prepending an item moves the checked state to the WRONG row
+✓ stable id-as-key: the same reorder keeps the checked state on the correct item
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+การติ๊กแถวแรก แล้วเติม item ใหม่ไว้หน้าสุดของ list ทิ้ง checked state ไว้ที่ **position 0** — ซึ่งตอนนี้เป็น todo คนละตัวไปแล้วสิ้นเชิง — แทนที่จะตามติดตัว todo ที่ user ติ๊กไว้จริง
+
+**วิธีแก้:** ใช้ id ที่เสถียรจากข้อมูล:
+
+```tsx
+// src/components/TodoListFixed.tsx
+export function TodoListFixed({ todos }: { todos: { id: string; text: string; done: boolean }[] }) {
+  return (
+    <ul>
+      {todos.map((todo) => (
+        <li key={todo.id}>
+          <input type="checkbox" defaultChecked={todo.done} />
+          {todo.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลยนอกจาก warning "missing key" ของ dev-mode ของ React เอง ซึ่งไม่ยิงเลยในกรณีนี้ (key *มีอยู่* จริง มันแค่ผิดตัว) มีแค่ test การ reorder (หรือ user report) เท่านั้นที่เผยการ bleed ดู **[Rendering & Reconciliation](/react/th/foundations/rendering-and-reconciliation/)**
+
+<SpotTheBug code={`function TodoList({ todos }) {
+  return (
+    <ul>
+      {todos.map((todo, i) => (
+        <li key={i}>
+          <input type="checkbox" defaultChecked={todo.done} />
+          {todo.text}
+        </li>
+      ))}
+    </ul>
+  );
+}`}>
+`key={i}` มองผ่าน ๆ ดูสมเหตุสมผลเต็มที่ และไม่มี warning ยิงเลย — key มีอยู่จริง บั๊กโผล่แค่ทางพฤติกรรมเท่านั้น: พิสูจน์แล้วใน probe ว่าการติ๊กแถวแรกแล้วเติม item ใหม่เข้า list ทิ้ง state `checked` ไว้ที่ *position 0* ซึ่งตอนนี้เป็น todo คนละตัวไปแล้ว วิธีแก้คือ `key={todo.id}` — id ที่เสถียรจากข้อมูลเอง ไม่ใช่จากตำแหน่งปัจจุบันของแถวใน array
+</SpotTheBug>
+
+### 14. `key` หายไปเลย (ไม่ใช่แม้แต่ index)
+
+```tsx
+// @expect-error warns AND bleeds state, identically to index-as-key — see prose
+// src/components/ListNoKey.tsx — as generated
+function ListNoKey({ items }: { items: { id: string; text: string }[] }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <li>
+          <Checkbox label={item.text} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+declare function Checkbox(props: { label: string }): React.ReactElement;
+```
+
+การละ `key` ไปเลยไม่ใช่เวอร์ชันที่เบากว่าของ entry 13 — fallback ของ React สำหรับ list child ที่ไม่มี key คือ positional index พฤติกรรมเลย**เหมือนกันเป๊ะ**กับ `key={i}` บวกกับ console warning ที่เวอร์ชันของ entry 13 ไม่เคยยิงเลย
+
+**อาการ — console output จริง คำต่อคำ และ state bleed แบบเดียวกัน:**
+
+```text
+Each child in a list should have a unique "key" prop.
+```
+
+```text
+✓ omitting key entirely warns with the exact same message index-as-key never triggers
+✓ omitting key entirely bleeds state to the wrong row on reorder, identically to key={index}
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+```tsx
+// src/__tests__/missing-key.test.tsx
+import { useState } from 'react';
+import { render, cleanup, fireEvent, getAllByRole } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+
+afterEach(cleanup);
+
+type Item = { id: string; text: string };
+
+function Checkbox({ label }: { label: string }) {
+  const [checked, setChecked] = useState(false);
+  return (
+    <label>
+      <input type="checkbox" checked={checked} onChange={() => setChecked((c) => !c)} />
+      {label}
+    </label>
+  );
+}
+
+function ListNoKeyTest({ items }: { items: Item[] }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <li>
+          <Checkbox label={item.text} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+test('omitting key entirely warns with the exact console message index-as-key never triggers', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(<ListNoKeyTest items={[{ id: 'a', text: 'Alpha' }, { id: 'b', text: 'Bravo' }]} />);
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages.some((m) => m.includes('Each child in a list should have a unique "key" prop'))).toBe(true);
+  spy.mockRestore();
+});
+
+test('omitting key entirely bleeds state to the wrong row on reorder, identically to key={index}', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const items: Item[] = [{ id: 'a', text: 'Alpha' }, { id: 'b', text: 'Bravo' }];
+  const { container, rerender } = render(<ListNoKeyTest items={items} />);
+
+  fireEvent.click(getAllByRole(container, 'checkbox')[0]);
+  const withPrepend = [{ id: 'z', text: 'Zulu' }, ...items];
+  rerender(<ListNoKeyTest items={withPrepend} />);
+
+  const checked = getAllByRole(container, 'checkbox').map((c) => (c as HTMLInputElement).checked);
+  expect(checked).toEqual([true, false, false]);
+  spy.mockRestore();
+});
+```
+
+**วิธีแก้:** เติม `key` ที่เสถียร เหมือน entry 13:
+
+```tsx
+// src/components/ListWithKey.tsx
+export function ListWithKey({ items }: { items: { id: string; text: string }[] }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <li key={item.id}>
+          <Checkbox label={item.text} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+declare function Checkbox(props: { label: string }): React.ReactElement;
+```
+
+**จับได้โดย:** console warning ของ dev-mode ของ React เองแบบไม่มีเงื่อนไข — กรณีเดียวในกลุ่ม "key" ทั้งหมดที่ framework บอกคุณตรง ๆ ว่ามีอะไรผิด แม้จะไม่บอกว่า*ผิดยังไง*ก็ตาม
+
+### 15. `key` บน `Fragment` ที่ลืมใส่ในลิสต์
+
+```tsx
+// @expect-error the shorthand <>...</> cannot accept key at all — see prose
+// src/components/GlossaryShorthand.tsx — as generated
+function GlossaryShorthand({ items }: { items: { id: string; term: string; desc: string }[] }) {
+  return (
+    <dl>
+      {items.map((item) => (
+        <>
+          <dt>{item.term}</dt>
+          <dd>{item.desc}</dd>
+        </>
+      ))}
+    </dl>
+  );
+}
+```
+
+การจับกลุ่ม sibling element (คู่ `<dt>`/`<dd>`) ข้างใน `.map()` ต้องการ `Fragment` ที่มี `key` — แต่ syntax shorthand `<>...</>` รับ attribute **ไม่ได้เลย** รวมถึง `key` ไม่มีทางเขียน `<>` พร้อม key ได้เลย โค้ดที่ generate มาแล้วจับกลุ่ม list children แบบนี้ผลิต list ที่ไม่มี key ออกมาเงียบ ๆ
+
+**อาการ — console output จริง คำต่อคำ (warning เดียวกับตระกูล entry 13/14):**
+
+```text
+Each child in a list should have a unique "key" prop.
+```
+
+```text
+✓ the <>...</> shorthand in a .map() warns: each child in a list needs a unique key
+✓ <Fragment key={id}> fixes it — no warning
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+**วิธีแก้:** import `Fragment` แบบชัดเจนเพื่อให้ `key` มีที่แปะ:
+
+```tsx
+// src/components/GlossaryWithKey.tsx
+import { Fragment } from 'react';
+
+function GlossaryWithKey({ items }: { items: { id: string; term: string; desc: string }[] }) {
+  return (
+    <dl>
+      {items.map((item) => (
+        <Fragment key={item.id}>
+          <dt>{item.term}</dt>
+          <dd>{item.desc}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+export default GlossaryWithKey;
+```
+
+```tsx
+// src/__tests__/fragment-key.test.tsx
+import { Fragment } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+
+afterEach(cleanup);
+
+type Term = { id: string; term: string; desc: string };
+const terms: Term[] = [
+  { id: 'a', term: 'RSC', desc: 'React Server Component' },
+  { id: 'b', term: 'RSC payload', desc: 'serialized tree description' },
+];
+
+function GlossaryShorthandTest({ items }: { items: Term[] }) {
+  return (
+    <dl>
+      {items.map((item) => (
+        <>
+          <dt>{item.term}</dt>
+          <dd>{item.desc}</dd>
+        </>
+      ))}
+    </dl>
+  );
+}
+
+function GlossaryWithKeyTest({ items }: { items: Term[] }) {
+  return (
+    <dl>
+      {items.map((item) => (
+        <Fragment key={item.id}>
+          <dt>{item.term}</dt>
+          <dd>{item.desc}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+test('the <>...</> shorthand in a .map() warns: each child in a list needs a unique key', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(<GlossaryShorthandTest items={terms} />);
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages.some((m) => m.includes('Each child in a list should have a unique "key" prop'))).toBe(true);
+  spy.mockRestore();
+});
+
+test('<Fragment key={id}> fixes it — no warning', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(<GlossaryWithKeyTest items={terms} />);
+  const messages = spy.mock.calls.map((c) => String(c[0]));
+  expect(messages.some((m) => m.includes('Each child in a list should have a unique "key" prop'))).toBe(false);
+  spy.mockRestore();
+});
+```
+
+**จับได้โดย:** console warning ของ dev-mode ของ React เอง — ไม่เคยเป็น compiler error เพราะ shorthand fragment เป็น JSX ที่ถูกต้องสมบูรณ์ในตัวมันเอง มันแค่โดยโครงสร้างแล้วรับ prop ตัวเดียวที่สถานการณ์นี้ต้องการไม่ได้
+
+<SpotTheBug code={`function Glossary({ items }) {
+  return (
+    <dl>
+      {items.map((item) => (
+        <>
+          <dt>{item.term}</dt>
+          <dd>{item.desc}</dd>
+        </>
+      ))}
+    </dl>
+  );
+}`}>
+โค้ดนี้ compile ผ่านสมบูรณ์ — shorthand fragment เป็น JSX ที่ถูกต้องเต็มที่ บั๊กคือมัน**โดยโครงสร้างแล้วรับ**`key`ไม่ได้ การจับกลุ่ม `<dt>`/`<dd>` แบบนี้ข้างใน `.map()` เลยผลิต list ที่ไม่มี key เสมอ พิสูจน์แล้วใน probe ว่ามันกระตุ้น warning จริงของ React `Each child in a list should have a unique "key" prop.` วิธีแก้คือ import `Fragment` จาก `'react'` แล้วเขียน `<Fragment key={item.id}>` แบบชัดเจน — รูปแบบยาวคือรูปแบบ*เดียว*ที่มี key ได้
+</SpotTheBug>
+
+## ใครเป็นเจ้าของ state แต่ละก้อน
+
+### 16. `useEffect` sync state ที่ควรจะ derive ตอน render
+
+```jsx
+// src/components/NameFieldsBad.jsx — as generated
+function NameFieldsBad({ firstName, lastName }) {
+  const [fullName, setFullName] = useState('');
+  useEffect(() => {
+    setFullName(firstName + ' ' + lastName);
+  }, [firstName, lastName]);
+  return <p>{fullName}</p>;
+}
+```
+
+`fullName` คำนวณได้ทั้งหมดจาก `firstName` กับ `lastName` — มันไม่ต้องการ state หรือ effect ของตัวเองเลย การ sync มันด้วย effect เพิ่ม render เกินมาหนึ่งครั้ง (effect ยิง *หลัง* render แรกด้วย `fullName` เก่า แล้ว re-render ด้วยค่าที่ sync แล้ว) และเพิ่มจุดที่สองที่ทั้งสองค่าจะ drift ไม่ตรงกันได้
+
+**วิธีแก้:** derive มันตอน render — ไม่มี state ไม่มี effect:
+
+```jsx
+// src/components/NameFieldsFixed.jsx
+function NameFieldsFixed({ firstName, lastName }) {
+  const fullName = firstName + ' ' + lastName; // derived, not synced
+  return <p>{fullName}</p>;
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ทั้งสองเวอร์ชัน compile และ render output ที่ถูกต้องในที่สุด มีแค่การนับ render (หรือสังเกต effect ส่วนเกินใน DevTools) เท่านั้นที่เผยความสิ้นเปลือง ดู **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)** หัวข้อ "คุณอาจไม่ต้องใช้ effect"
+
+### 17. `setState` ถูกเรียกตรง ๆ ตอน render
+
+```tsx
+// @expect-error real eslint error (react-hooks/set-state-in-render) — see prose
+// src/BadSetState.tsx
+import { useState } from 'react'
+
+export function BadSetState() {
+  const [count, setCount] = useState(0)
+  setCount(count + 1)
+  return <p>{count}</p>
+}
+```
+
+การเรียก setter แบบ unconditional ข้างใน render body คือการละเมิด Rules-of-React จริง: มันสั่ง render ครั้งใหม่ ซึ่งเรียก component อีกที ซึ่งเรียก setter อีกที — ทุก render กระตุ้นอีกครั้งแบบ synchronous
+
+**อาการ — output จริงของ `eslint-plugin-react-hooks@7.1.1`** (`recommended-latest`):
+
+```text
+BadSetState.tsx
+  6:3  error  Error: Cannot call setState during render
+
+Calling setState during render may trigger an infinite loop.
+* To reset state when other state/props change, store the previous value in
+  state and update conditionally: https://react.dev/reference/react/useState#storing-information-from-previous-renders
+* To derive data from other state/props, compute the derived data during
+  render without using state.
+
+  4 | export function BadSetState() {
+  5 |   const [count, setCount] = useState(0)
+> 6 |   setCount(count + 1)
+    |   ^^^^^^^^ Found setState() in render
+  7 |   return <p>{count}</p>
+  8 | }
+  9 |  react-hooks/set-state-in-render
+```
+
+การละเมิดตัวเดียวกันนี้คือสิ่งที่ทำให้ **React Compiler** bail out จากการ memoize function นี้แบบเงียบ ๆ — ส่งผ่านไปแบบไม่แตะ ไม่มี `_c()` memo cache และไม่มี error บอกคุณว่า optimization ถูกข้ามไป ดู **[The React Compiler](/react/th/react-19/the-react-compiler/)** สำหรับ compiled output คู่นั้นเทียบกัน
+
+**วิธีแก้:** derive ค่าตอน render หรือเรียก setter แค่จาก event handler เท่านั้น:
+
+```tsx
+// src/GoodDerived.tsx
+export function GoodDerived({ base }: { base: number }) {
+  const count = base + 1; // derived, no state needed at all
+  return <p>{count}</p>
+}
+```
+
+**จับได้โดย:** กฎ `set-state-in-render` ของ `eslint-plugin-react-hooks` (ส่วนหนึ่งของ `recommended-latest`) เป็น error จริง — และแยกต่างหาก React Compiler ก็ bail out เงียบ ๆ กับโค้ดตัวเดียวกัน
+
+### 18. Mutate state ตรง ๆ ก่อนเรียก setter
+
+```tsx
+// @expect-error real eslint error (react-hooks/immutability) + a real stale-UI bug — see prose
+// src/components/CartBad.tsx — as generated
+function CartBad({ initialItems }: { initialItems: { id: string; name: string; packed: boolean }[] }) {
+  const [items, setItems] = useState(initialItems);
+
+  function markAllPacked() {
+    items.forEach((item) => { item.packed = true; }); // mutates in place
+    setItems(items); // same array reference as before
+  }
+
+  return (
+    <div>
+      <button onClick={markAllPacked}>Mark all packed</button>
+      <ul>{items.map((item) => <li key={item.id}>{item.name} — {item.packed ? 'packed' : 'not packed'}</li>)}</ul>
+    </div>
+  );
+}
+```
+
+ทุก item ถูก mutate จริง (`packed: true` ในหน่วยความจำ) แต่ `setItems(items)` ส่ง **array reference เดิมเป๊ะ** ที่มันมีอยู่แล้ว check bail-out `Object.is` ของ React เห็นว่าไม่เปลี่ยนก็เลยข้าม re-render — UI ยังโชว์ข้อมูลเก่าจนกว่า state change ที่ไม่เกี่ยวข้องจะบังคับ render ณ จุดนั้นข้อมูลที่ถูก mutate ไปแล้วจะโผล่ขึ้นมาทันที ดูเหมือน update ที่ไม่เกี่ยวข้องเป็นตัวทำให้เกิด
+
+**อาการ — output test จริง:**
+
+```text
+✓ mutating state then calling the setter with the SAME reference leaves the UI stale
+✓ spreading into a NEW array (different reference) re-renders correctly, for contrast
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+แยกต่างหาก การ mutate ที่มีโครงสร้างเหมือนกันบน object ธรรมดา (`config.theme = 'dark'`) ก็ผลิต lint error จริง:
+
+```text
+Themed.tsx
+  4:3  error  Error: This value cannot be modified
+
+Modifying component props or hook arguments is not allowed. Consider using a
+local variable instead.
+
+  2 |
+  3 | export function Themed({ config }: { config: Config }) {
+> 4 |   config.theme = 'dark'
+    |   ^^^^^^ value cannot be modified
+  5 |   return <p>{config.theme}</p>
+  6 | }
+  7 |  react-hooks/immutability
+```
+
+**วิธีแก้:** ผลิต array ใหม่ที่มี object ใหม่:
+
+```tsx
+// src/components/CartFixed.tsx
+import { useState } from 'react';
+
+export function CartFixed({ initialItems }: { initialItems: { id: string; name: string; packed: boolean }[] }) {
+  const [items, setItems] = useState(initialItems);
+
+  function markAllPacked() {
+    setItems(items.map((item) => ({ ...item, packed: true }))); // new array, new objects
+  }
+
+  return (
+    <div>
+      <button onClick={markAllPacked}>Mark all packed</button>
+      <ul>{items.map((item) => <li key={item.id}>{item.name} — {item.packed ? 'packed' : 'not packed'}</li>)}</ul>
+    </div>
+  );
+}
+```
+
+**จับได้โดย:** กฎ `immutability` ของ `eslint-plugin-react-hooks` จับรูปแบบ*prop/hook-argument*ของการ mutate นี้ได้; การ mutate local state ที่ reference เดิมไม่มีอะไรอัตโนมัติจับเลย — มีแค่ test ที่จับ UI ค้าง หรือ bug report เท่านั้น ดู **[State Snapshot & Purity](/react/th/foundations/state-snapshot-and-purity/)**
+
+### 19. Context ถูกใช้เป็น global store ที่เปลี่ยนบ่อย
+
+```tsx
+// src/components/CartProvider.tsx — as generated
+function CartProvider({ children }: { children: React.ReactNode }) {
+  const [items, setItems] = useState<Item[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+
+  return (
+    <CartContext
+      value={{
+        items,
+        user,
+        addItem: (item: Item) => setItems((prev) => [...prev, item]),
+      }}
+    >
+      {children}
+    </CartContext>
+  );
+}
+
+type Item = { id: string };
+type User = { id: string };
+declare const CartContext: React.Context<{ items: Item[]; user: User | null; addItem: (item: Item) => void }>;
+```
+
+object `value` ถูกสร้างแบบ inline ทุก render ของ `CartProvider` — object ใหม่เอี่ยมทุกครั้ง แม้ทั้ง `items` และ `user` จะไม่ได้เปลี่ยนจริง ๆ เลยก็ตาม consumer ทุกตัวของ `CartContext` re-render ทุกครั้งที่ `CartProvider` re-render ไม่ว่าจะด้วยเหตุผล*อะไรก็ตาม* และ `memo` บน consumer พวกนั้นหยุดมันไม่ได้ — React เทียบ `value` ของ provider ด้วย reference และ `memo` มองแค่ prop เท่านั้น ไม่เคยมองที่ context
+
+**อาการ — output test จริง:**
+
+```text
+✓ an inline provider value re-renders a memoized consumer on every unrelated update
+✓ a useMemo'd provider value lets memo bail the consumer out
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+parent re-render ที่ไม่เกี่ยวข้องสองครั้ง (tick counter ที่ไม่เกี่ยวข้อง แทนอะไรก็ตามที่เปลี่ยน) ทำให้ consumer ที่ห่อด้วย `memo` re-render สองครั้ง — พิสูจน์เทียบกันด้วย object literal แบบ inline กับตัวที่ผ่าน `useMemo` แล้ว ทุกบรรทัดอื่นเหมือนกันเป๊ะ
+
+**วิธีแก้:** memoize provider value แล้วแยกค่าที่เปลี่ยนเร็วออกเป็น context ของตัวเอง (หรือ external store) แทนที่จะกระจายมันผ่าน provider กว้าง ๆ ตัวเดียวกับข้อมูลที่เปลี่ยนช้า:
+
+```tsx
+// src/components/CartProviderFixed.tsx
+import { useCallback, useMemo, useState } from 'react';
+
+export function CartProviderFixed({ children }: { children: React.ReactNode }) {
+  const [items, setItems] = useState<Item[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const addItem = useCallback((item: Item) => setItems((prev) => [...prev, item]), []);
+  const value = useMemo(
+    () => ({ items, user, addItem, setUser }),
+    [items, user, addItem, setUser],
+  );
+
+  return <CartContext value={value}>{children}</CartContext>;
+}
+
+type Item = { id: string };
+type User = { id: string };
+declare const CartContext: React.Context<{ items: Item[]; user: User | null; addItem: (item: Item) => void }>;
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ไม่มี warning ไม่มี lint rule สำหรับ context value แบบ inline มีแค่ test นับ render (หรือ Profiler trace) เท่านั้นที่เผยมัน ดู **[Context](/react/th/state-and-data/context/)** และ **[External Stores](/react/th/state-and-data/external-stores/)** สำหรับเวลาที่ควรไปไกลกว่า Context
+
+## Effect เทียบกับ event
+
+### 20. `startTransition(async () => {...})` เสีย priority หลัง `await`
+
+```tsx
+// @expect-error compiles and runs; the post-await update silently escapes the Transition — see prose
+// src/components/SearchResultsBad.tsx — as generated
+function SearchResultsBad() {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<string[]>([]);
+
+  function handleChange(nextQuery: string) {
+    startTransition(async () => {
+      setQuery(nextQuery);
+      const data = await fetchResults(nextQuery);
+      setResults(data); // looks fine — it's inside startTransition, right?
+    });
+  }
+
+  return <input onChange={(e) => handleChange(e.target.value)} />;
+}
+
+declare function fetchResults(query: string): Promise<string[]>;
+```
+
+`setResults(data)` รันหลัง `await fetchResults(nextQuery)` แม้จะอยู่ข้างใน callback `startTransition(async () => {...})` ทาง lexical มันก็**ไม่ใช่**ส่วนหนึ่งของ Transition — react.dev ระบุชัดเจนว่ามีแค่โค้ดก่อน `await` แรกเท่านั้นที่ถูกครอบอัตโนมัติ อะไรก็ตามหลังจากนั้นต้องการ `startTransition` ของตัวเองซ้อนเข้าไปอีกที ถ้า component ที่อ่าน `results` suspend การ update นี้จะโชว์ loading fallback แทนที่จะเก็บผลลัพธ์เก่าไว้บนจอ ซึ่งตรงข้ามกับพฤติกรรมที่ Transition มีไว้ป้องกันเป๊ะ
+
+**อาการ — output test ที่พิสูจน์แล้วจริง** (จาก pattern เดียวกันที่พิสูจน์กับ `Suspense`):
+
+```text
+✓ WITHOUT re-wrapping: the update after await is not a Transition, so Suspense shows the fallback immediately
+✓ WITH re-wrapping: the update after await stays a Transition, so Suspense keeps the old content until ready
+```
+
+**วิธีแก้:** ห่อ update หลัง `await` ด้วย `startTransition` ของตัวเอง:
+
+```tsx
+// src/components/SearchResultsFixed.tsx
+import { startTransition, useState } from 'react';
+
+export function SearchResultsFixed() {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<string[]>([]);
+
+  function handleChange(nextQuery: string) {
+    startTransition(async () => {
+      setQuery(nextQuery);
+      const data = await fetchResults(nextQuery);
+      startTransition(() => setResults(data)); // re-wrapped: stays part of the Transition
+    });
+  }
+
+  return (
+    <div>
+      <input value={query} onChange={(e) => handleChange(e.target.value)} />
+      <ul>{results.map((r) => <li key={r}>{r}</li>)}</ul>
+    </div>
+  );
+}
+
+declare function fetchResults(query: string): Promise<string[]>;
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ไม่มี compiler error ไม่มี lint rule มีแค่ test ที่อิง Suspense (หรือ loading flash ที่ user มองเห็นในจุดที่ content เก่าควรจะอยู่) เท่านั้นที่เผยมัน ดู **[Transitions](/react/th/concurrent-and-suspense/transitions/)** และ **[Actions & useActionState](/react/th/react-19/actions-and-useactionstate/)** สำหรับการพิสูจน์เต็มรูปแบบกับ Suspense boundary จริง
+
+### 21. Effect fetch ที่ไม่มีการจัดการ abort/race
+
+```jsx
+// src/components/ProfileBad.jsx — as generated
+function ProfileBad({ userId }) {
+  const [name, setName] = useState('loading');
+  useEffect(() => {
+    fetchUser(userId).then((result) => setName(result));
+  }, [userId]);
+  return <output>{name}</output>;
+}
+```
+
+ถ้า `userId` เปลี่ยนเร็ว (คลิกไล่ผ่าน list) request ที่เก่ากว่าและช้ากว่าอาจ resolve **หลัง** request ที่ใหม่กว่าและเร็วกว่า แล้ว overwrite state ที่สดด้วยข้อมูลเก่า — ไม่มีอะไรตรงนี้ให้ยกเลิก request ที่ล้าสมัย
+
+**อาการ — output test จริง** (คู่ "ช้าแล้วเร็ว" จำลอง ตัวที่ช้าเริ่มก่อนแต่จะ resolve ทีหลัง):
+
+```text
+✓ AbortController prevents the stale (slow) response from overwriting the fresh one
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ถ้าไม่มี abort logic test นี้ล้มเหลวเป๊ะ ๆ: `.then` ของ request ที่ช้ายังยิงหลังตัวที่เร็ว แล้วทิ้ง `name` ไว้ที่ค่าเก่า
+
+**วิธีแก้:** return การเรียก `AbortController.abort()` จาก cleanup แล้ว ignore `AbortError` ที่ตามมา:
+
+```tsx
+// src/components/ProfileFixed.tsx
+import { useEffect, useState } from 'react';
+
+declare function fetchUser(userId: string, signal: AbortSignal): Promise<string>;
+
+function ProfileFixed({ userId }: { userId: string }) {
+  const [name, setName] = useState('loading');
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUser(userId, controller.signal)
+      .then((result) => setName(result))
+      .catch((err: Error) => {
+        if (err.name !== 'AbortError') throw err;
+      });
+    return () => controller.abort();
+  }, [userId]);
+  return <output>{name}</output>;
+}
+
+export default ProfileFixed;
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ไม่มี compiler error ไม่มี lint rule มีแค่ test เรื่อง race condition (หรือ user report ที่ timing-dependent เป็นบางครั้ง) เท่านั้นที่เผยมัน ดู **[useEffect & Effects](/react/th/hooks/useeffect-and-effects/)** สำหรับการพิสูจน์เต็มรูปแบบ
+
+### 22. `Date.now()`/`Math.random()` ถูกอ่านตอน render
+
+```jsx
+// @expect-error real hydration mismatch — see prose
+// src/components/Timestamp.jsx — as generated
+function Timestamp() {
+  return <p>rendered at {Date.now()}</p>;
+}
+```
+
+`Date.now()` (และ `Math.random()`) นิยามตัวเองว่าต่างกันทุกครั้งที่ถูกเรียก Server Component ที่ render มันครั้งเดียวผลิต HTML บางอย่างออกมา ทันทีที่ component เดียวกันนั้นรัน*ซ้ำ*ฝั่ง client เพื่อ hydrate มันเรียก `Date.now()` เป็นครั้งที่สองแล้วได้ค่าที่ต่างออกไป — hydration mismatch แบบตำราตรง ๆ
+
+**อาการ — output จริงของ `hydrateRoot` ที่จับได้** (server render ด้วย timestamp mock ตัวหนึ่ง client hydrate ด้วยอีกตัว ห่างกันห้าวินาที):
+
+```text
+Hydration failed because the server rendered text didn't match the client. As a result this
+tree will be regenerated on the client. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the
+HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  <Timestamp>
+    <p>
++     1700000005000
+-     1700000000000
+```
+
+ข้อความ error ของ React เองระบุ `Date.now()`/`Math.random()` แบบเจาะจงตรง ๆ ว่าเป็นสาเหตุที่รู้กันอยู่แล้ว — นี่ไม่ใช่การเดา framework กำลังวินิจฉัยอาการของตัวเองอยู่
+
+**วิธีแก้:** คำนวณ timestamp ครั้งเดียว นอกส่วนที่รันทั้งฝั่ง server และ client (ส่งมันเป็น prop จากจุดที่รันครั้งเดียวเท่านั้น) หรือย้ายการอ่านเข้า effect เพื่อให้มันรันแค่ฝั่ง client เท่านั้น หลังจาก hydration reconcile เสร็จแล้ว:
+
+```tsx
+// src/components/TimestampFixed.tsx
+import { useEffect, useState } from 'react';
+
+function TimestampFixed() {
+  const [time, setTime] = useState<number | null>(null); // null on both server and first client render
+  useEffect(() => {
+    setTime(Date.now()); // only runs on the client, after hydration
+  }, []);
+  return <p>{time === null ? 'loading…' : `rendered at ${time}`}</p>;
+}
+
+export default TimestampFixed;
+```
+
+```tsx
+// src/__tests__/hydration-mismatch.test.tsx
+import { renderToString } from 'react-dom/server';
+import { hydrateRoot } from 'react-dom/client';
+import { afterEach, expect, test, vi } from 'vitest';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  document.body.innerHTML = '';
+});
+
+function TimestampTest() {
+  return <p>rendered at {Date.now()}</p>;
+}
+
+test('Date.now() read in render produces a real hydration mismatch warning naming Date.now() specifically', async () => {
+  const serverTime = 1_700_000_000_000;
+  vi.spyOn(Date, 'now').mockReturnValue(serverTime);
+  const html = renderToString(<TimestampTest />);
+  expect(html).toContain(String(serverTime));
+
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  document.body.appendChild(container);
+
+  const errors: string[] = [];
+  // The client re-executes the SAME component to hydrate — but Date.now()
+  // now returns a different value than it did on the server.
+  vi.spyOn(Date, 'now').mockReturnValue(serverTime + 5_000);
+
+  hydrateRoot(container, <TimestampTest />, {
+    onRecoverableError: (err: unknown) => { errors.push(`onRecoverableError: ${String(err)}`); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  const joined = errors.join('\n');
+  expect(joined).toContain('Date.now()');
+  expect(joined).toContain('Math.random()');
+  expect(joined.toLowerCase()).toContain('hydrat');
+});
+```
+
+**จับได้โดย:** console error เรื่อง hydration-mismatch ของ React เอง ใน setup SSR/hydration ไหนก็ตาม — ไม่เคยเป็น `tsc` และไม่เคยเกิดใน SPA แบบ client-only ล้วน (ไม่มีการรันครั้งที่สองที่ไม่ตรงกันให้ hydrate ต่อสู้ด้วย) ดู **[Hydration & Streaming](/react/th/react-internals/hydration-and-streaming/)** สำหรับกลไกเต็มรูปแบบ
+
+### 23. `useLayoutEffect` อ่านค่าที่ `useEffect` ตัวพี่น้องกำลังเขียนอยู่
+
+```tsx
+// @expect-error compiles and runs, but the read is always one commit stale — see prose
+// src/components/Backwards.tsx — as generated
+function Backwards({ expand }: { expand: boolean }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [measuredWidth, setMeasuredWidth] = useState(-1);
+
+  // WRITE happens here — useEffect fires AFTER the browser paints.
+  useEffect(() => {
+    if (boxRef.current) boxRef.current.style.width = expand ? '200px' : '100px';
+  }, [expand]);
+
+  // READ happens here — useLayoutEffect fires BEFORE the browser paints,
+  // strictly before the sibling useEffect above, on the SAME commit.
+  useLayoutEffect(() => {
+    if (boxRef.current) setMeasuredWidth(parseInt(boxRef.current.style.width || '0', 10));
+  });
+
+  return (
+    <div>
+      <div ref={boxRef} style={{ width: '100px' }} />
+      <span>{measuredWidth}</span>
+    </div>
+  );
+}
+```
+
+`useLayoutEffect` ยิง**ก่อน**`useEffect`เสมอ ในทุก commit เดียวกัน — ลำดับนี้พิสูจน์แล้ว ไม่ใช่เรื่องบังเอิญ component ที่เขียนค่าใน `useEffect` แล้วอ่านมันกลับใน `useLayoutEffect` หวังจะเห็น write ของ commit ตัวเอง โดยโครงสร้างแล้วรับประกันว่าจะอ่านสิ่งที่ commit *ก่อนหน้า* เขียนไว้ล่าสุดแทน
+
+**อาการ — output ของ log ที่เรียงลำดับ จริง:**
+
+```text
+✓ useLayoutEffect fires before useEffect, on the SAME commit — a read in useLayoutEffect always predates a write in useEffect
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+พิสูจน์ด้วย log array ธรรมดา ข้ามทั้ง mount และการ re-render ครั้งถัดมา: `['layout-effect (read runs here)', 'effect (write runs here)']` ลำดับนี้ทุก commit เดียว — ไม่เคยกลับกัน
+
+**วิธีแก้:** ย้ายการอ่านเข้า `useEffect` ด้วย (phase เดียวกับ write ที่มันขึ้นกับ) หรือปรับโครงสร้างให้ layout effect เขียนของตัวเองตรง ๆ โดยไม่ขึ้นกับ passive effect ของตัวพี่น้อง:
+
+```tsx
+// src/components/BackwardsFixed.tsx
+import { useEffect, useRef, useState } from 'react';
+
+export function BackwardsFixed({ expand }: { expand: boolean }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [measuredWidth, setMeasuredWidth] = useState(-1);
+
+  useEffect(() => {
+    if (!boxRef.current) return;
+    boxRef.current.style.width = expand ? '200px' : '100px';
+    setMeasuredWidth(parseInt(boxRef.current.style.width, 10)); // same phase as the write
+  }, [expand]);
+
+  return (
+    <div>
+      <div ref={boxRef} style={{ width: '100px' }} />
+      <span>{measuredWidth}</span>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/__tests__/layout-effect-order.test.tsx
+import { useEffect, useLayoutEffect } from 'react';
+import { render, cleanup, act } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function BackwardsOrderTest({ log }: { log: string[] }) {
+  useLayoutEffect(() => {
+    log.push('layout-effect (read runs here)');
+  });
+  useEffect(() => {
+    log.push('effect (write runs here)');
+  });
+  return null;
+}
+
+test('useLayoutEffect fires before useEffect, on the SAME commit', () => {
+  const log: string[] = [];
+  const { rerender } = render(<BackwardsOrderTest log={log} />);
+  expect(log).toEqual(['layout-effect (read runs here)', 'effect (write runs here)']);
+
+  log.length = 0;
+  act(() => {
+    rerender(<BackwardsOrderTest log={log} />);
+  });
+  expect(log).toEqual(['layout-effect (read runs here)', 'effect (write runs here)']);
+});
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ไม่มี compiler error ไม่มี lint rule สำหรับลำดับการอ่าน/เขียนข้าม effect มีแค่ test แบบ log เรียงลำดับ (หรือการวัดค่าที่ตามหลังหนึ่งก้าวให้เห็นชัด ๆ) เท่านั้นที่เผยมัน ดู **[Commit Phase & Effects](/react/th/react-internals/commit-phase-and-effects/)** สำหรับเหตุผลจริงที่ทั้งสอง phase ยิงตามลำดับนั้น
+
+## Memo pairing กับสมมติฐานของ compiler
+
+### 24. Object หรือ function literal แบบ inline ทำลาย `React.memo`
+
+```jsx
+// src/components/RowBad.jsx — as generated
+const Row = React.memo(function Row({ style }) {
+  return <li style={style}>{style.label}</li>;
+});
+
+function List({ items }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <Row key={item.id} style={{ color: item.color, label: item.text }} />
+      ))}
+    </ul>
+  );
+}
+```
+
+`Row` ถูกห่อด้วย `React.memo` แต่ทุกจุดที่เรียกมันสร้าง object literal `{ color, label }` ใหม่เอี่ยมทุก render ของ `List` — ทำให้การเทียบ prop แบบ shallow ของ `Row` เห็น prop `style` ว่า "ต่างกัน" เสมอ แม้ `item.color`/`item.text` จะไม่เปลี่ยนแปลงเลยก็ตาม `React.memo` ไม่เคยมีโอกาสข้ามอะไรเลย
+
+**อาการ — output test จริง:**
+
+```text
+✓ a new object literal passed as a prop defeats React.memo — the child re-renders every time
+✓ a stable object reference lets React.memo actually skip re-renders
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+parent re-render สามครั้งผลิต child re-render สามครั้งกับเวอร์ชัน inline-object และ child re-render แค่ครั้งเดียวข้าม parent re-render สามครั้งเดียวกันนั้น ทันทีที่ object reference ถูกเก็บให้เสถียร — component เดียวกัน เนื้อหา prop เดียวกัน ต่างกันแค่ความเสถียรของ reference
+
+**วิธีแก้:** memoize style object หรือปรับโครงสร้างให้รับ prop แบบ primitive (ซึ่งเทียบกันถูกต้องด้วยค่าโดยไม่มีเรื่อง reference เข้ามาเกี่ยวข้องเลย):
+
+```jsx
+// src/components/RowFixed.jsx
+const RowFixed = React.memo(function RowFixed({ color, label }) {
+  return <li style={{ color }}>{label}</li>;
+});
+
+function ListFixed({ items }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <RowFixed key={item.id} color={item.color} label={item.text} />
+      ))}
+    </ul>
+  );
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติ — ไม่มี warning ไม่มี lint rule สำหรับ object literal ใหม่ที่ทำลาย memoization มีแค่ test นับ render (หรือ Profiler trace) เท่านั้นที่เผยมัน ดู **[Memoization & the Compiler](/react/th/hooks/memoization-and-the-compiler/)** สำหรับทางเลือกของ compiler เองที่ละเอียดกว่า
+
+<SpotTheBug code={`const Row = React.memo(function Row({ style }) {
+  return <li style={style}>{style.label}</li>;
+});
+
+function List({ items }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <Row key={item.id} style={{ color: item.color, label: item.text }} />
+      ))}
+    </ul>
+  );
+}`}>
+`Row` ถูกห่อด้วย `React.memo` แต่ทุกจุดที่เรียกมันสร้าง object literal `{ color, label }` ใหม่เอี่ยมทุก render ของ `List` — ทำให้การเทียบ prop แบบ shallow ของ `Row` เห็น prop `style` ว่า "ต่างกัน" เสมอ แม้ `item.color`/`item.text` จะไม่เปลี่ยนแปลงเลยก็ตาม พิสูจน์แล้วใน probe: child ตัวเดียวกันที่ได้รับ inline object ใหม่ re-render ทุก parent render เดียว (parent render 3 ครั้ง เข้า child render ออกมา 3 ครั้ง) ในขณะที่ child ตัวเดียวกันที่ได้รับ object reference ที่เสถียร render แค่ครั้งเดียวข้าม parent render 3 ครั้ง วิธีแก้คือสร้าง style object ด้วย `useMemo` keyed ด้วย `item.color`/`item.text` หรือปรับโครงสร้าง `Row` ให้รับ `color`/`label` เป็น prop แบบ primitive แยกกันแทนที่จะเป็น object เดียว
+</SpotTheBug>
+
+### 25. Return type ของ component annotate เป็น `JSX.Element` ที่ต้อง return `null` ด้วย
+
+```tsx
+// @expect-error real tsc error — see prose
+// src/StatusIcon.tsx
+function StatusIcon({ visible }: { visible: boolean }): JSX.Element {
+  if (!visible) {
+    return null;
+  }
+  return <span className="icon" />;
+}
+```
+
+`JSX.Element` ถูกประกาศใน `@types/react` เป็น `interface Element extends ReactElement<any, any> {}` — มันไม่รวม `null` มีแค่ `ReactNode` เท่านั้นที่รวม component ที่ generate มาแล้ว "ไม่ return อะไรเลย" จาก branch แบบ conditional โดย annotate เป็น `JSX.Element`/`ReactElement` คือหนึ่งในจุดที่ TypeScript ที่ AI เขียนมักจะ compile ไม่ผ่านเงียบ ๆ บ่อยที่สุด
+
+**อาการ — output จริงของ `tsc`:**
+
+```text
+StatusIcon.tsx(3,44): error TS2322: Type 'null' is not assignable to type 'Element'.
+```
+
+**วิธีแก้:** ขยาย return type เป็น `React.ReactNode` เมื่อ branch "ไม่มีอะไรต้อง render" ตัวจริงเป็นสิ่งที่คาดหวังไว้ — ซึ่งเป็นกรณีของ component ส่วนใหญ่:
+
+```tsx
+// src/StatusIconFixed.tsx
+export function StatusIconFixed({ visible }: { visible: boolean }): React.ReactNode {
+  if (!visible) {
+    return null; // ReactNode includes null — this is fine
+  }
+  return <span className="icon" />;
+}
+```
+
+**จับได้โดย:** `tsc --noEmit` ทันที — type error จริง ปัจจุบัน ไม่ใช่ lint nitpick ดู **[TypeScript with React](/react/th/tooling-and-production/typescript-with-react/)** สำหรับ `ReactNode` เทียบกับ `ReactElement`/`JSX.Element` แบบเต็ม รวมถึงเรื่อง namespace-import ของ `JSX` แยกต่างหากใน `@types/react@19`
+
+<Callout title="สรุปหนึ่งบรรทัด">
+ทั้ง 25 pattern ด้านบน type-check ผ่านสะอาดหรือรันโดยไม่ crash — `tsc --noEmit` จับได้แค่ 3 ตัว (argument ของ `useRef`, ความไม่ตรงกันของ `JSX.Element`/`null` และ — ทางอ้อม — การละเมิดระดับ lint เรื่อง immutability/rules-of-hooks เมื่อ `eslint-plugin-react-hooks` ถูกต่อสายเข้าจริง) ที่เหลือต้องการ test จริง, console warning จริง หรือ framework build จริงถึงจะเผยออกมา อ่านทุกตัวตามลำดับที่ index ของโมดูลนี้วางไว้ — hook กับ dependency, boundary, key, state ownership, effect เทียบกับ event, memo pairing — เพราะความล้มเหลวของแต่ละกลุ่มเงียบในแบบเดียวกันเป๊ะ ๆ
+</Callout>
+
+export const quizAiBugCatalog = [
+  {
+    q: "ทำไม entry 1 (effect ที่ขาด cleanup) ถึงไม่มี compiler error หรือ lint warning เลยแม้แต่นิดเดียว?",
+    options: [
+      "เพราะการขาด return statement เป็น syntax error เสมอ",
+      "เพราะ effect ที่ไม่มี cleanup เป็น JavaScript และ React ที่ถูกต้องสมบูรณ์ — วิธีเดียวที่จะเห็น connection ที่ leak คือรัน mount/unmount จริงแล้วนับว่ายังเปิดอยู่กี่ตัว",
+      "เพราะ eslint-plugin-react-hooks ไม่มีอยู่จริง",
+      "เพราะ TypeScript บังคับให้ effect ต้องมี cleanup function",
+    ],
+    answer: 1,
+    explain: "useEffect callback ที่ไม่ return อะไรเลยถูกต้องทั้งทาง syntax และความหมาย — cleanup เป็น optional ในสายตาของ type system และ linter มีแค่ test mount/unmount จริง (พิสูจน์แล้วในบทนี้) เท่านั้นที่เผย connection ที่ leak",
+  },
+  {
+    q: "```tsx\nuseEffect(() => {\n  const id = setInterval(() => {\n    setCount((c) => c + increment);\n  }, 1000);\n  return () => clearInterval(id);\n}, []);\n```\nทำไม interval นี้ถึงใช้ `increment` ของ render แรกตลอดไป แม้ user จะเปลี่ยนมันแล้วก็ตาม?",
+    options: [
+      "setInterval ใช้ global scope เสมอ ไม่สนใจ closure เลย",
+      "dependency array ว่างหมายความว่า effect (และ closure ข้างในมัน) ถูกสร้างแค่ครั้งเดียว ตอน mount — callback อ้างอิง `increment` ค่าที่มีอยู่ตอนนั้นตลอดไป",
+      "React อัพเดต closure ให้เป็นค่าล่าสุดโดยอัตโนมัติ",
+      "นี่คือ TypeScript compile error",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วใน probe: ถ้าไม่มี useEffectEvent การ bump `increment` เปลี่ยน state แต่ไม่เคยสร้าง interval ใหม่ ทุก tick เลยยังบวกด้วย increment เดิม วิธีแก้คือแยกการอ่านออกมาเป็น useEffectEvent ซึ่งเห็นค่าล่าสุดเสมอโดยไม่กลายเป็น reactive dependency",
+  },
+  {
+    q: "Entry 8 บอกว่า useFormState (react-dom) กับ useActionState (react) return 'รูปแบบ 3-tuple เหมือนกัน' รูปแบบนั้นมีอะไรที่ documentation เก่าของ useFormState ไม่พูดถึง?",
+    options: [
+      "ไม่มีอะไร — รูปแบบต่างกันมาตลอด",
+      "isPending — ยืนยันโดยตรงด้วยการยืนยันว่าผลลัพธ์ที่จับได้มีความยาว 3 โดย element ที่สามมี type เป็น boolean",
+      "reducer function",
+      "object FormData เอง",
+    ],
+    answer: 1,
+    explain: "ทั้งสอง hook return [state, formAction, isPending] — พิสูจน์ด้วยการ render แต่ละตัวแล้วยืนยันว่าความยาวและ type ของ element ใน tuple ที่จับได้ตรงกัน ไม่ใช่แค่อ่านจาก documentation",
+  },
+  {
+    q: "```jsx\n{items.map((item) => (\n  <>\n    <dt>{item.term}</dt>\n    <dd>{item.desc}</dd>\n  </>\n))}\n```\nทำไมบั๊กนี้ถึงแก้ด้วยการเติม `key={item.id}` ตรง ๆ เข้า shorthand `<>` ไม่ได้เลย?",
+    options: [
+      "แก้แบบนั้นได้ — นี่เป็นคำถามหลอก",
+      "syntax shorthand <>...</> โดยโครงสร้างแล้วรับ attribute ไม่ได้เลย รวมถึง key — ไม่มีทาง syntax ไหนแปะมันได้",
+      "key ใช้ได้แค่กับ host element อย่าง <li> เท่านั้น ไม่เคยใช้กับ Fragment",
+      "React ไม่รองรับ key บน Fragment เลย",
+    ],
+    answer: 1,
+    explain: "ไม่เหมือน entry 13/14 (ที่ key เป็นไปได้ทาง syntax จริง ๆ แค่ผิดหรือหายไป) shorthand fragment รับ key ไม่ได้เลยไม่ว่า syntax ไหน — วิธีแก้เดียวคือ import Fragment จาก 'react' แล้วใช้รูปแบบยาว <Fragment key={...}>",
+  },
+  {
+    q: "Entry 22 อ้าง React hydration-mismatch error จริงที่ระบุชื่อ `Date.now()` กับ `Math.random()` ตรง ๆ ทำไมบั๊กนี้ถึงไม่เคยโผล่ใน setup Vite SPA ธรรมดาของคอร์สนี้เอง?",
+    options: [
+      "เพราะ Date.now() ถูก TypeScript compiler ห้ามใช้",
+      "hydration mismatch ต้องการการรันครั้งที่สองที่ไม่ตรงกันของ render logic เดียวกัน (client รันสิ่งที่ server render ไว้แล้วซ้ำ) — SPA แบบ client-only ล้วนไม่เคยรัน render ซ้ำกับ HTML ที่ server ส่งมาเลย จึงไม่มีอะไรให้ไม่ตรงกัน",
+      "เพราะ Vite แก้ timestamp mismatch ให้อัตโนมัติ",
+      "มันโผล่เหมือนกันเป๊ะใน SPA ธรรมดา",
+    ],
+    answer: 1,
+    explain: "การพิสูจน์ของ entry นี้เองใช้ renderToString + hydrateRoot พร้อมค่า Date.now() ที่ mock ต่างกันสองค่า เพื่อบังคับการรันสองครั้งที่ไม่ตรงกันซึ่ง hydration mismatch ต้องการ — pattern ที่มีอยู่แค่ใน setup SSR/hydration เท่านั้น ไม่ใช่ใน render แบบ client-only",
+  },
+  {
+    q: "Entry 23 พิสูจน์ว่า useLayoutEffect ยิงก่อน useEffect ทุก commit ทำไมเรื่องนี้ถึงทำให้ 'อ่าน layout ใน useLayoutEffect เขียนมันใน useEffect' กลับด้านโดยเฉพาะ?",
+    options: [
+      "มันไม่ได้กลับด้าน — ลำดับไม่สำคัญสำหรับการอ่าน DOM",
+      "เพราะการอ่าน (useLayoutEffect) รันก่อน write (useEffect) ที่มันพยายามสังเกตเสมอ ใน commit เดียวกัน — มันเลยเห็นได้แค่สิ่งที่ useEffect ของ commit ก่อนหน้าเขียนไว้ล่าสุดเท่านั้น ไม่เคยเห็นของ commit ปัจจุบัน",
+      "เพราะ useLayoutEffect อ่าน ref ไม่ได้เลย",
+      "เพราะ useEffect รันก่อนเสมอใน React 19",
+    ],
+    answer: 1,
+    explain: "พิสูจน์ด้วย log ที่เรียงลำดับข้ามทั้ง mount และการ re-render: ['layout-effect (read)', 'effect (write)'] ทุก commit เดียว การอ่านที่อยากเห็น write ของ commit ปัจจุบันต้องอยู่ phase เดียวกับ write นั้น — คือ useEffect อ่าน write ของ useEffect ตัวพี่น้องของตัวเอง ไม่ใช่ useLayoutEffect ที่อ่านล่วงหน้าไปก่อน",
+  },
+];
+
+<Quiz client:visible id="reading-react/ai-bug-catalog" questions={quizAiBugCatalog} />
+
+<ProgressTracker client:visible id="reading-catalog" />
