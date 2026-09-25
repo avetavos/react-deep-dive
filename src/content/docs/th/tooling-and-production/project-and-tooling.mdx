@@ -57,7 +57,7 @@ framework ดูแลเรื่องที่ build tool ทิ้งให�
 - **JSX transform สมัยใหม่** — ไม่ต้อง `import React from 'react'` ที่หัวทุกไฟล์แค่เพื่อใช้ JSX อีกต่อไป; compiler inject runtime import ให้ (ยังต้อง import hooks และ API ที่ใช้)
 - **Strict Mode** — ครอบ app ด้วย `<StrictMode>` ใน development เพื่อจับ render ที่ไม่ pure และบั๊ก effect (การ double-invoke ที่คุณเจอใน Foundations)
 
-<Callout title="The one-line takeaway">
+<Callout title="สรุปหนึ่งบรรทัด">
 **Create React App ถูก deprecated แล้ว** — เริ่มโปรเจกต์ใหม่ด้วย **Vite** (`npm create vite@latest -- --template react-ts`) สำหรับ client SPA หรือ **framework** (Next.js / React Router) เมื่อต้องการ routing, SSR หรือ Server Components พึ่ง **React DevTools**, **Fast Refresh**, JSX transform อัตโนมัติ และ **Strict Mode** เพื่อ dev loop ที่เร็วและปลอดภัย
 </Callout>
 

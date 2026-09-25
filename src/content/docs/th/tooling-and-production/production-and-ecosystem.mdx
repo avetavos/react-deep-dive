@@ -72,7 +72,7 @@ export const ecoDiagram = `flowchart TB
 - เปิด **`<StrictMode>`** ไว้ — เป็น dev-only guard ที่ไม่มีต้นทุนใน production
 - แยก **server state** (data library) ออกจาก **client state** (local/store)
 
-<Callout title="The one-line takeaway">
+<Callout title="สรุปหนึ่งบรรทัด">
 ship **production build** (อย่า ship dev build), **code-split** ที่ route ด้วย `lazy` + `Suspense` และวาง **error boundary** ที่ root ต่อเข้า monitoring React เป็น view layer — ประกอบ ecosystem ที่ลงตัวสำหรับส่วนที่เหลือ: **React Router** (routing), **TanStack Query** (server state), **React Hook Form** (form), **Zustand/Redux Toolkit** (client state) — และแยก server state กับ client state เป็นคนละเรื่อง
 </Callout>
 

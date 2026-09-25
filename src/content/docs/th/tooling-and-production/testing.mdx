@@ -64,7 +64,7 @@ export const pyramidDiagram = `flowchart TB
 
 แรงส่วนใหญ่ของคุณอยู่ตรงกลาง — RTL component test — เพราะที่นั่นคือที่ที่ logic ของ React อยู่จริง test end-to-end ไม่กี่ตัวครอบ happy path สำคัญข้าม app จริง
 
-<Callout title="The one-line takeaway">
+<Callout title="สรุปหนึ่งบรรทัด">
 test React ด้วย **React Testing Library บน Vitest** และ test **behavior ไม่ใช่ implementation**: render component, โต้ตอบด้วย `userEvent` และ query ด้วย **role/label/text** — อย่า assert internal state หรือการเรียก hook วิธีนี้ทำให้ refactor ที่ไม่เปลี่ยน behavior ไม่ทำให้ test พัง ลงแรงส่วนใหญ่กับ component test พร้อม Playwright end-to-end ไม่กี่ตัวสำหรับ flow สำคัญ
 </Callout>
 

@@ -85,7 +85,7 @@ function TextInput({ placeholder, ref }: InputProps) {
 
 `forwardRef` ยังทำงานได้ และ code เก่าที่ใช้ `React.forwardRef<HTMLInputElement, Props>` ก็ไม่มีปัญหา แต่สำหรับ component ใหม่ใน React 19 ข้าม `forwardRef` ไปได้เลย — wrapper น้อยลงหนึ่งชั้นและไม่ต้องเล่นกล generic
 
-<Callout title="The one-line takeaway">
+<Callout title="สรุปหนึ่งบรรทัด">
 type component ด้วยการ type **props object** (ข้าม `React.FC`); type `children` เป็น `React.ReactNode`; ให้ type argument กับ hook เมื่อค่าเริ่มต้นกำกวม (`useState<User | null>(null)`, `useRef<HTMLInputElement>(null)`); และ type event ด้วย `React.ChangeEvent`/`MouseEvent` ใน **React 19 `ref` เป็น prop ธรรมดา** — type เป็น `React.Ref<T>` ใน props และเลิกใช้ `forwardRef` สำหรับ code ใหม่
 </Callout>
 
