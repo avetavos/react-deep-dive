@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## A component that never reaches the browser
 
@@ -78,8 +79,115 @@ export default function Page() {
 
 One honest caveat: you don't get Server Components from bare `react` + a bundler. RSC needs a framework or build setup that understands the server/client split and can serialize the boundary — in practice, **Next.js (App Router)**, and other RSC-capable frameworks. The concepts here are React's; the wiring is the framework's.
 
+## Server Functions: `'use server'`
+
+So far, data has only flowed one direction — server to client. The other half of the story is calling *back* into the server: a **Server Function** is an async function marked with `'use server'` that the client can call directly, as if it were a local function, even though it actually triggers a network request. Per react.dev:
+
+> Add `'use server'` at the top of an async function body to mark the function as callable by the client. We call these functions Server Functions.
+> — [react.dev/reference/rsc/use-server](https://react.dev/reference/rsc/use-server)
+
+You can mark a single function, or put `'use server'` at the top of a whole file to make every export in it a Server Function:
+
+```ts
+// src/actions.ts
+import { db } from './lib/db';
+
+export async function addToCart(productId: string, quantity: number) {
+  'use server';
+  await db.cart.add({ productId, quantity });
+}
+```
+
+Import it into a Client Component and hand it to `useActionState` exactly like the plain client-side actions from the next lesson — the only difference is *where* the function body actually runs:
+
+```tsx
+// src/AddToCartButton.tsx
+'use client';
+
+import { useActionState } from 'react';
+import { addToCart } from './actions';
+
+type State = string | null;
+
+// addToCart is a Server Function: calling it here serializes (productId,
+// quantity) and sends them to the server, where the real function body runs.
+async function submit(_prevState: State, formData: FormData): Promise<State> {
+  const productId = String(formData.get('productId'));
+  const quantity = Number(formData.get('quantity'));
+  await addToCart(productId, quantity);
+  return null;
+}
+
+export function AddToCartButton({ productId }: { productId: string }) {
+  const [error, formAction, isPending] = useActionState(submit, null);
+  return (
+    <form action={formAction}>
+      <input type="hidden" name="productId" value={productId} />
+      <input type="number" name="quantity" defaultValue={1} min={1} />
+      <button type="submit" disabled={isPending}>Add to cart</button>
+      {error && <p>{error}</p>}
+    </form>
+  );
+}
+```
+
+```ts
+// src/lib/db.ts
+export const db = {
+  cart: {
+    add: async (_args: { productId: string; quantity: number }) => {},
+  },
+};
+```
+
+Both fences above type-check with plain `tsc` — the *shapes* are ordinary TypeScript. What they can't do is actually run: `'use server'` only means something to an RSC-capable bundler that rewrites the call into a network request. This course's Vite probe has no such bundler, so there is nothing this page can honestly show you *executing* — only that the code is well-typed. For the real, running wiring (the framework half of this story), see the Next.js Deep Dive course's [What are Server Actions?](/nextjs/en/server-actions-and-mutations/what-are-server-actions/).
+
+The arguments and return value of a Server Function cross the network, so the same serialization rule from the previous section applies to them too: primitives, plain objects/arrays, and promises travel; functions and class instances don't.
+
+## RSC payload and Flight, briefly
+
+When a Server Component renders, React doesn't send HTML strings to the client — it sends a **serialized description of the element tree** (informally called the "RSC payload," produced by a wire format nicknamed "Flight"). The client's React reconstructs Client Components from that description and slots in the Server Components' already-rendered output. This is what makes `use()` on a promise work across the boundary, and it's also *why* the boundary has serialization rules in the first place — the payload is data, not code. The full request lifecycle (routing, this payload, streaming, hydration) is covered end to end in the Next.js Deep Dive course's [request lifecycle lesson](/nextjs/en/foundations/the-request-lifecycle/); this course only needs you to know the payload exists and why it constrains what can cross the boundary.
+
+## Mental Model
+
+Three things move across the server/client line, and each has its own rule: **rendered output** flows server → client as the RSC payload (always allowed, that's the whole point); **props** flow server → client and must be serializable; **calls** flow client → server only through a Server Function, whose arguments and return value are serialized the same way. Nothing here is really about "where code runs" in the abstract — it's about what has to survive being turned into data and sent over a wire.
+
+## Trade-offs
+
+| Choice | What you get | Cost |
+|---|---|---|
+| Server Component | Direct server-resource access, zero client bundle cost, can be `async` | No state, no events, no browser APIs — ever |
+| Client Component (`'use client'`) | Full interactivity | Ships to the browser; its whole module tree becomes client bundle |
+| Server Function (`'use server'`) | Client can trigger server-side work without a hand-written API route | Only serializable arguments/return values; requires an RSC-capable framework to actually run |
+
+## Common Misconceptions
+
+- **"`'use client'` means this code only runs on the client."** It means the opposite direction of what people expect: it marks a module as *renderable from the client*, so its exports become client references a Server Component can render. The file still gets executed wherever it's rendered, including being pre-rendered on the server for the initial HTML.
+- **"Any function can be a Server Function if you import it into a Client Component."** Only a function whose body (or whose file) starts with `'use server'` becomes a callable server reference. Importing an ordinary function into a Client Component just runs it on the client, like any other import.
+- **"RSC is a React feature you can use in any React app."** The concepts (Server/Client Components, `'use server'`) are part of React, but only a framework that implements the RSC protocol — serializing the payload, wiring the network call for Server Functions — can actually run them. Plain `react` + Vite cannot.
+
+## Reading AI-generated code
+
+When you see `'use server'` or `'use client'` in a generated snippet, check:
+
+- Is `'use client'` actually present in every file that calls `useState`, `useEffect`, or attaches an event handler? Its absence doesn't error in this Vite probe (the directive is just a string to plain `tsc`), but a real RSC framework will reject the file the moment it tries to use a client-only API without it.
+- Is a Server Function invoked from an event handler or a form `action` — or is it called directly during render? Calling it during render is a side effect in the render body, which breaks the same purity rule as any other side effect, and it also means the "request" fires on every render, not on user intent.
+- Are the arguments passed to a Server Function serializable? A generated snippet that passes a callback, a `Map`, or a class instance as an argument will fail once it actually crosses the network boundary in a real framework, even though nothing in this course's Vite probe can catch that for you.
+- Does a Client Component receive a function prop *from a Server Component* (not from another Client Component)? That specific direction is the one that can't be serialized.
+
+<SpotTheBug code={`'use client'
+
+import { addToCart } from './actions'
+
+export function AddToCartButton({ productId }: { productId: string }) {
+  addToCart(productId, 1)
+  return <button>Add to cart</button>
+}`}>
+`addToCart` is called directly in the component body, not from an event handler or a form `action`. That means it fires on *every render* of `AddToCartButton` — including re-renders caused by unrelated state changes higher in the tree — instead of once when the user clicks. This is the same "side effect during render" problem Foundations covers for `useState`/mutation, just with a network call standing in for the side effect. The fix is to only call it from `onClick`, or better, wire it as the `<form action={...}>` the way `useActionState` does earlier in this lesson.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-A **Server Component** runs on the server, can be `async` and fetch data directly, and never ships its code to the browser — the client gets the rendered result. Add `'use client'` to cross into an interactive **Client Component** (state, events). Props across the boundary must be **serializable** (including promises, which the client reads with `use()`). RSC is adopted through a framework like Next.js App Router, not bare React.
+A **Server Component** runs on the server, can be `async` and fetch data directly, and never ships its code to the browser — the client gets the rendered result (the RSC payload). Add `'use client'` to cross into an interactive **Client Component** (state, events); add `'use server'` to a function to make it a **Server Function** the client can call, which serializes its arguments and return value over the same boundary. Props, Server Function arguments, and Server Function return values must all be **serializable** — RSC is adopted through a framework like Next.js App Router, not bare React.
 </Callout>
 
 export const quizRsc = [
@@ -92,6 +200,7 @@ export const quizRsc = [
       'It requires useEffect to fetch data',
     ],
     answer: 1,
+    explain: 'A Server Component executes entirely on the server; the client only ever receives the serialized RSC payload describing what to render, never the component\'s own code.',
   },
   {
     q: 'How can a Server Component fetch data?',
@@ -102,6 +211,7 @@ export const quizRsc = [
       'Through a client-only API',
     ],
     answer: 1,
+    explain: 'Because it runs on the server, a Server Component can be an async function and await data directly — no loading state or client round-trip required.',
   },
   {
     q: 'What does the `use client` directive mark?',
@@ -112,6 +222,7 @@ export const quizRsc = [
       'A CSS module',
     ],
     answer: 1,
+    explain: '`\'use client\'` marks a module as renderable from the client: its exports become client references that a Server Component can render, and the file can use state, effects, and event handlers.',
   },
   {
     q: 'Which prop can NOT be passed from a Server Component to a Client Component?',
@@ -122,6 +233,51 @@ export const quizRsc = [
       'A promise',
     ],
     answer: 2,
+    explain: 'Props crossing the server/client boundary must be serializable. Functions and class instances cannot be serialized, so they cannot cross; promises can, because the client resolves them with use().',
+  },
+  {
+    q: 'Per react.dev, what does adding `\'use server\'` to an async function do?',
+    options: [
+      'It runs the function only in a Web Worker',
+      'It marks the function as callable by the client — calling it sends a request with the serialized arguments',
+      'It disables the function in production',
+      'It makes the function synchronous',
+    ],
+    answer: 1,
+    explain: 'react.dev: "Add \'use server\' at the top of an async function body to mark the function as callable by the client." These are called Server Functions.',
+  },
+  {
+    q: '```tsx\n\'use client\'\nimport { addToCart } from \'./actions\'\n\nexport function AddToCartButton({ productId }: { productId: string }) {\n  addToCart(productId, 1)\n  return <button>Add to cart</button>\n}\n```\nWhat is wrong with this component?',
+    options: [
+      'Nothing — this correctly adds the item once the button exists',
+      '`addToCart` runs during render, so it fires again on every re-render instead of on user intent',
+      '`\'use client\'` is not allowed with Server Functions',
+      'The button is missing an onClick handler entirely, so nothing happens',
+    ],
+    answer: 1,
+    explain: 'Calling a Server Function directly in the component body is a side effect during render — it runs on every render of AddToCartButton, not just when the user clicks. It should be called from an event handler or wired as the form action instead.',
+  },
+  {
+    q: 'What does the "RSC payload" (Flight) actually contain?',
+    options: [
+      'Raw HTML strings for the whole page',
+      'A serialized description of the element tree that the client\'s React reconstructs, with Client Component references slotted in',
+      'A compiled JavaScript bundle of every Server Component',
+      'Only the CSS for the page',
+    ],
+    answer: 1,
+    explain: 'The RSC payload is data, not markup or code — a serialized tree description. That\'s also why the boundary has serialization rules: the payload has to represent everything crossing it as data.',
+  },
+  {
+    q: '```ts\n// src/lib/db.ts\nexport const db = {\n  cart: { add: async (_args: { productId: string; quantity: number }) => {} },\n}\n\n// src/actions.ts\nimport { db } from \'./lib/db\'\n\nexport async function addToCart(productId: string, quantity: number) {\n  \'use server\'\n  await db.cart.add({ productId, quantity })\n}\n```\nWhat does `tsc --noEmit` passing on this pair of files actually confirm?',
+    options: [
+      'That addToCart will really run on a server when called from a deployed app',
+      'Only that the shapes type-check as ordinary TypeScript — \'use server\' is a plain string directive tsc does not specially interpret',
+      'That the function is automatically protected from being called by unauthenticated users',
+      'That this course\'s Vite probe includes an RSC-capable bundler',
+    ],
+    answer: 1,
+    explain: 'use server does not change any TypeScript type. A clean tsc run only proves the function\'s shape is valid TypeScript — whether it actually executes on a server, and how, depends entirely on an RSC-capable framework\'s bundler, which this course\'s plain Vite probe does not have.',
   },
 ];
 

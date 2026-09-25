@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## pattern ที่ React 19 ลบทิ้ง
 
@@ -104,8 +105,195 @@ export const actionDiagram = `sequenceDiagram
 
 ทั้งการเต้นสามจังหวะ — loading flag, error slot, try/catch/finally — ยุบเหลือ hook เดียวที่ลืม reset spinner ไม่ได้
 
+## กับดัก `startTransition(async () => {...})`
+
+ลึกลงไป pending state ของ Action ถูก track เป็น **Transition** — นั่นคือเหตุผลที่ `isPending` แม่นยำโดยไม่ต้องจัดการ flag เอง แต่พอคุณเขียน `async` function ของตัวเองแล้วส่งให้ `startTransition` ตรง ๆ (pattern ที่พบบ่อยสำหรับ helper แบบ "ทำสิ่งนี้โดยไม่ block UI" ที่ไม่ใช่ form Action) คุณอาจเจอขอบคมที่ react.dev บอกไว้ตรง ๆ:
+
+> Any async calls that are awaited in the `action` will be included in the Transition, but currently require wrapping any `set` functions after the `await` in an additional `startTransition`.
+> — [react.dev/reference/react/useTransition](https://react.dev/reference/react/useTransition#react-doesnt-treat-my-state-update-after-await-as-a-transition)
+
+พูดง่าย ๆ: `setState` ที่เรียก **ก่อน** `await` ใน `startTransition(async () => {...})` ยังอยู่ใน Transition; `setState` ที่เรียก **หลัง** `await` ไม่อยู่ใน Transition แล้ว เว้นแต่คุณจะห่อมันด้วย `startTransition` ซ้อนอีกชั้น React หลุด track async scope ข้าม `await` ไป — นี่เป็นข้อจำกัดของ JavaScript (ยังไม่มี `AsyncContext`) ไม่ใช่ bug ของ React
+
+เรื่องนี้สำคัญจริงตอนมี `Suspense` เข้ามาเกี่ยวข้อง: update ที่เป็น Transition แล้ว suspend จะเก็บ content เดิมไว้บนจอจนกว่า data จะพร้อม; update ที่ไม่ใช่ Transition แล้ว suspend จะโชว์ fallback ทันที ดังนั้น `setShow(true)` ตัวเดียวกันเป๊ะ ๆ อาจเก็บ UI ให้นิ่งหรือกระพริบ loading state ก็ได้ ขึ้นอยู่กับว่ามันถูกห่อใหม่หลัง `await` หรือเปล่า:
+
+```tsx
+// src/__tests__/transition-async-await.test.tsx
+import { describe, it, expect } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { startTransition, use, useState, Suspense } from 'react'
+
+function makeResource() {
+  let resolve!: () => void
+  const promise = new Promise<void>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+function Panel({ resource }: { resource: { promise: Promise<void> } }) {
+  use(resource.promise)
+  return <p>Loaded</p>
+}
+
+function App({ rewrap }: { rewrap: boolean }) {
+  const [show, setShow] = useState(false)
+  const [resource] = useState(() => makeResource())
+  ;(globalThis as any).__resolve = resource.resolve
+
+  function handleClick() {
+    startTransition(async () => {
+      await Promise.resolve() // simulate an awaited async step
+      if (rewrap) {
+        // ✅ re-wrapped: this setState stays part of the Transition
+        startTransition(() => setShow(true))
+      } else {
+        // ❌ not re-wrapped: this setState is a normal, non-Transition update
+        setShow(true)
+      }
+    })
+  }
+
+  return (
+    <>
+      <button onClick={handleClick}>go</button>
+      <Suspense fallback={<p>Loading fallback</p>}>
+        {show ? <Panel resource={resource} /> : <p>Old content</p>}
+      </Suspense>
+    </>
+  )
+}
+
+describe('startTransition(async () => {...}) — setState after await', () => {
+  it('WITHOUT re-wrapping: the update after await is not a Transition, so Suspense shows the fallback immediately', async () => {
+    render(<App rewrap={false} />)
+    fireEvent.click(screen.getByText('go'))
+    await waitFor(() => expect(screen.getByText('Loading fallback')).toBeTruthy())
+    ;(globalThis as any).__resolve()
+    await waitFor(() => expect(screen.getByText('Loaded')).toBeTruthy())
+  })
+
+  it('WITH re-wrapping: the update after await stays a Transition, so Suspense keeps the old content until ready', async () => {
+    render(<App rewrap={true} />)
+    fireEvent.click(screen.getByText('go'))
+    // Give the microtask queue a chance to run; old content must still be there.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(screen.getByText('Old content')).toBeTruthy()
+    expect(screen.queryByText('Loading fallback')).toBeNull()
+    ;(globalThis as any).__resolve()
+    await waitFor(() => expect(screen.getByText('Loaded')).toBeTruthy())
+  })
+})
+```
+
+ทั้งสอง case ผ่านหมด — นั่นคือประเด็น บั๊กนี้ไม่ใช่ crash; มันคือ UX ที่แย่ลงซึ่ง "ดูถูกต้อง" ทุกครั้งที่ code review (compile ผ่าน, รันได้, data ก็มาแสดงในที่สุด) และจะโผล่ให้เห็นก็ตอนที่ user จริงเจอ network ช้าเท่านั้น
+
+## `requestFormReset`: reset form นอกเหนือจากการ submit
+
+React auto-reset field แบบ uncontrolled ของ form หลัง Action submit สำเร็จอยู่แล้ว — แต่บางครั้งคุณต้อง reset form โดย *ไม่* submit (ปุ่ม "Clear" หรือ reset ตาม event อื่น) `requestFormReset(form)` ทำแบบนั้นได้แบบ imperative เหมือน setter ของ `useOptimistic` มันเป็น API ที่ใช้ได้เฉพาะใน Action: เรียกนอก Transition/Action ก็ยังทำงาน แต่ React จะ log warning
+
+```tsx
+// src/__tests__/request-form-reset.test.tsx
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { requestFormReset } from 'react-dom'
+import { startTransition, useRef } from 'react'
+
+function ClearableForm({ insideTransition }: { insideTransition: boolean }) {
+  const formRef = useRef<HTMLFormElement>(null)
+  function clear() {
+    if (insideTransition) {
+      // ✅ requestFormReset is an Action-only API, like useOptimistic.
+      startTransition(() => requestFormReset(formRef.current!))
+    } else {
+      // ❌ called directly from an event handler.
+      requestFormReset(formRef.current!)
+    }
+  }
+  return (
+    <form ref={formRef}>
+      <input name="title" defaultValue="draft title" />
+      <button type="button" onClick={clear}>Clear</button>
+    </form>
+  )
+}
+
+describe('requestFormReset', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('outside a Transition/Action: still resets the field, but logs a console.error', async () => {
+    const errors: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '))
+    })
+    render(<ClearableForm insideTransition={false} />)
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'something the user typed' } })
+    fireEvent.click(screen.getByText('Clear'))
+    expect(input.value).toBe('draft title')
+    await waitFor(() => expect(errors.length).toBeGreaterThan(0))
+    expect(errors.some((e) => e.includes('requestFormReset was called outside a transition or action'))).toBe(true)
+  })
+
+  it('inside startTransition: resets the field with no warning', async () => {
+    const errors: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '))
+    })
+    render(<ClearableForm insideTransition={true} />)
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'something the user typed' } })
+    fireEvent.click(screen.getByText('Clear'))
+    await waitFor(() => expect(input.value).toBe('draft title'))
+    expect(errors.length).toBe(0)
+  })
+})
+```
+
+ทั้งสอง test ผ่านกับ React 19.3.0 จริง — รวมถึงข้อความ console ที่ตรงตัวอักษร จับได้จากการรันจริง: `requestFormReset was called outside a transition or action. To fix, move the update to an action, or wrap with startTransition.` ข้อความนี้ไม่มีอยู่ในเอกสาร prose ของ react.dev สำหรับ `requestFormReset` ตอนที่เขียนบทนี้ — เป็นรายละเอียดที่ได้มาจากการรันโค้ดจริงเท่านั้น ซึ่งเป็นเหตุผลที่คอร์สนี้ทำแบบนี้
+
+## Mental Model
+
+`isPending` ของ Action จริง ๆ แล้วคือ "มี Transition ที่ active ห่อ async work นี้อยู่ไหม" — นั่นคือเหตุผลที่ caveat เรื่อง async-Transition ของเอกสารสำคัญตรงนี้เป๊ะ ๆ อะไรที่อ่านหรือเขียน state *หลัง* `await` ใน `startTransition` ต้องมี `startTransition` ซ้อนของตัวเองถึงจะยังอยู่ใน Transition นั้น; อะไรก่อน `await` แรกครอบคลุมอยู่แล้ว
+
+## ข้อแลกเปลี่ยน
+
+| Pattern | ได้อะไร | ต้นทุน |
+|---|---|---|
+| `<form action={asyncFn}>` + `useActionState` | pending/state ถูก track ให้ทั้งหมดโดย React | action signature ต้องเป็น `(prevState, formData)` ไม่ใช่ `(formData)` |
+| `startTransition(async () => {...})` เขียนเอง | ควบคุมเต็มที่ว่าอะไรนับเป็น "pending" | ต้องห่อ `set` ทุกตัวหลัง `await` เองด้วยมือ ไม่งั้นหลุดจาก Transition แบบเงียบ ๆ |
+| `requestFormReset(form)` | reset แบบ imperative นอกเหนือจากการ submit | API ใช้ได้เฉพาะใน Action — เรียกนอก Transition/Action แล้ว React log warning ตามที่พิสูจน์ข้างบน |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ทุกอย่างใน `startTransition(async () => {...})` เป็นส่วนหนึ่งของ Transition"** มีแค่ส่วน synchronous ก่อน `await` แรก บวกกับอะไรที่ห่อ `startTransition` ซ้อนใหม่หลังแต่ละ `await` เท่านั้นที่นับจริง ๆ
+- **"`requestFormReset` ก็แค่ `form.reset()` ที่เปลี่ยนชื่อ"** มันตั้งใจให้ใช้คู่กับ Action โดยเฉพาะ — เรียกนอก Action แล้วเกิด console warning จริงที่พิสูจน์ได้ ซึ่ง `form.reset()` ธรรมดาไม่มีวันทำแบบนั้น
+- **"ถ้า Transition ไม่ error แปลว่ามันทำงานตามที่คาดหวัง"** กับดัก async-await ข้างบนไม่เคย throw หรือ log อะไรเองเลย — อาการเดียวคือ Suspense fallback กระพริบตรงที่ควรเก็บ content เดิมไว้ ความเงียบไม่ใช่หลักฐานว่าถูกต้องตรงนี้
+
+## อ่านโค้ดที่ AI เขียน
+
+- callback `startTransition(async () => {...})` ที่ AI สร้าง อัปเดต state *หลัง* `await` โดยไม่มี `startTransition` ซ้อนไหม update นั้นหลุดจาก Transition แบบเงียบ ๆ — เช็คทุก `set` ที่อยู่หลัง `await` ใด ๆ ใน async function เดียวกัน
+- `requestFormReset` ถูกเรียกตรง ๆ จาก event handler หรือถูกห่อด้วย `startTransition`/Action ทั้งคู่ "ทำงาน" แต่มีแค่แบบเดียวที่ไม่มี console warning
+- action ที่ส่งให้ `useActionState` รับ `(previousState, formData)` จริงไหม ไม่ใช่แค่ `(formData)` (สอนเต็มไปแล้วในหัวข้อก่อนหน้าของบทนี้ — ยังเป็นข้อผิดพลาดที่พบบ่อยที่สุดที่ต้องเช็คซ้ำ)
+
+<SpotTheBug code={`function SearchResults() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<string[]>([])
+
+  function handleChange(nextQuery: string) {
+    startTransition(async () => {
+      setQuery(nextQuery)
+      const data = await fetchResults(nextQuery)
+      setResults(data) // looks fine — it's inside startTransition, right?
+    })
+  }
+
+  return <input onChange={(e) => handleChange(e.target.value)} />
+}`}>
+`setResults(data)` รันหลัง `await fetchResults(nextQuery)` ดังนั้นแม้จะอยู่ใน `startTransition(async () => {...})` ตาม lexical scope แต่มัน **ไม่ได้** เป็นส่วนหนึ่งของ Transition — react.dev บอกชัดว่า state update หลัง `await` ต้องมี `startTransition` ซ้อนของตัวเองถึงจะยังนับเป็น Transition ถ้า `SearchResults` render อะไรที่ suspend ตาม `results` โค้ดนี้จะโชว์ loading fallback แทนที่จะเก็บผลลัพธ์เดิมไว้บนจอ เหมือน test ที่พิสูจน์ไว้ข้างบนเป๊ะ ๆ วิธีแก้: ห่อบรรทัดนั้นด้วย `startTransition(() => setResults(data))`
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-**Action** คือ async function ที่ส่งให้ `<form action={fn}>`; React เรียก action นั้นพร้อม `FormData` และจัดการการ submit ให้ **`useActionState(action, initialState)`** ห่อ action นั้นและคืน **`[state, formAction, isPending]`** — action รับ `(previousState, formData)` และ return state ถัดไป และ pending ถูก track อัตโนมัติ นี่แทนที่ boilerplate เดิมที่ต้องมี `useState`-สำหรับ-data + `useState`-สำหรับ-loading + `try/catch/finally`
+**Action** คือ async function ที่ส่งให้ `<form action={fn}>`; React เรียก action นั้นพร้อม `FormData` และจัดการการ submit ให้ **`useActionState(action, initialState)`** ห่อ action นั้นและคืน **`[state, formAction, isPending]`** — action รับ `(previousState, formData)` และ return state ถัดไป และ pending ถูก track อัตโนมัติ นี่แทนที่ boilerplate เดิมที่ต้องมี `useState`-สำหรับ-data + `useState`-สำหรับ-loading + `try/catch/finally` ทั้ง pending tracking ของ `useActionState` และ `startTransition(async () => {...})` ที่เขียนเองมีขอบคมเดียวกัน: `set` ที่เรียกหลัง `await` ต้องมี `startTransition` ซ้อนของตัวเอง ไม่งั้นหลุดจาก Transition แบบเงียบ ๆ — พิสูจน์แล้วข้างบน พร้อมกับ warning ของ `requestFormReset` ที่ใช้ได้เฉพาะใน Action
 </Callout>
 
 export const quizActions = [
@@ -118,6 +306,7 @@ export const quizActions = [
       'router redirect',
     ],
     answer: 1,
+    explain: 'Action คือ async function ใด ๆ ที่ส่งให้ <form action={fn}> (หรือ startTransition); React เรียกมันพร้อม FormData ที่ submit และจัดการ pending state ให้',
   },
   {
     q: '`useActionState(action, initialState)` คืนอะไร?',
@@ -128,6 +317,7 @@ export const quizActions = [
       'promise',
     ],
     answer: 1,
+    explain: 'มันคืน tuple สามค่า: state ล่าสุดที่ action return มา, form action ที่พร้อม bind และ flag pending — ทุกอย่างถูกจัดการให้',
   },
   {
     q: 'action ที่ส่งให้ useActionState รับ argument อะไร?',
@@ -138,6 +328,7 @@ export const quizActions = [
       'ไม่รับอะไรเลย',
     ],
     answer: 1,
+    explain: 'นี่คือ shape ที่คนมักทำผิด: form action ธรรมดารับแค่ (formData) แต่ useActionState ต้องการ (previousState, formData)',
   },
   {
     q: 'useActionState แทนที่ boilerplate อะไร?',
@@ -148,6 +339,51 @@ export const quizActions = [
       'ตัว function component',
     ],
     answer: 1,
+    explain: 'มันยุบ pattern useState-สำหรับ-data + useState-สำหรับ-loading + try/catch/finally แบบคลาสสิกให้เหลือ hook เดียวที่ลืม reset pending flag ไม่ได้',
+  },
+  {
+    q: 'ตาม react.dev คุณต้องทำอะไรกับ `set` ที่เรียก หลัง `await` ใน `startTransition(async () => {...})`?',
+    options: [
+      'ไม่ต้องทำอะไร — ทุกอย่างใน startTransition เป็น Transition อัตโนมัติ',
+      'ห่อมันด้วย startTransition ซ้อนของตัวเอง ไม่งั้นจะไม่ถูกนับเป็นส่วนหนึ่งของ Transition',
+      'ย้ายมันไปก่อน await แทน',
+      'เรียกมันสองครั้งเพื่อบังคับให้ React สังเกตเห็น',
+    ],
+    answer: 1,
+    explain: 'react.dev: state update หลัง await ใน async Transition "currently require wrapping any set functions after the await in an additional startTransition" — เป็นข้อจำกัดของ JavaScript ไม่ใช่ bug ของ React',
+  },
+  {
+    q: '```tsx\nfunction SearchResults() {\n  function handleChange(nextQuery: string) {\n    startTransition(async () => {\n      setQuery(nextQuery)\n      const data = await fetchResults(nextQuery)\n      setResults(data)\n    })\n  }\n  // ...\n}\n```\n`setResults(data)` ตรงนี้เป็นส่วนหนึ่งของ Transition ไหม?',
+    options: [
+      'ใช่ — มันอยู่ใน startTransition callback ตาม lexical scope',
+      'ไม่ — มันรันหลัง await และไม่เคยถูกห่อด้วย startTransition ซ้อนใหม่',
+      'ใช่ แต่เฉพาะใน development mode',
+      'ไม่ — เพราะ setQuery รันก่อนหน้า',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้วย test Suspense + use() จริง: ถ้าไม่ห่อใหม่ pattern นี้เป๊ะ ๆ จะโชว์ loading fallback ทันทีแทนที่จะเก็บ content เดิมไว้ เพราะ update หลัง await หลุดจาก Transition',
+  },
+  {
+    q: 'เกิดอะไรขึ้นเมื่อเรียก `requestFormReset(form)` จาก event handler ธรรมดา นอก Transition หรือ Action?',
+    options: [
+      'มัน throw แล้ว component crash',
+      'form ยัง reset อยู่ แต่ React log console.error ว่าควรอยู่ใน transition หรือ action',
+      'ไม่มีอะไรเกิดขึ้นเลยแบบเงียบ ๆ',
+      'ใช้ได้เฉพาะใน Server Components เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วตรง ๆ: field ยัง reset กลับไปที่ defaultValue แต่ console โชว์ "requestFormReset was called outside a transition or action. To fix, move the update to an action, or wrap with startTransition."',
+  },
+  {
+    q: '```tsx\nfunction clear() {\n  requestFormReset(formRef.current)\n}\n\nreturn <button type="button" onClick={clear}>Clear</button>\n```\nคำอธิบายที่ตรงที่สุดว่าปุ่มนี้ทำอะไร?',
+    options: [
+      'ไม่ทำอะไรเลย — requestFormReset ใช้ได้เฉพาะใน form action เท่านั้น จึงเป็น no-op',
+      'มัน reset field ของ form กลับไปที่ defaultValue และทำงานได้ แต่ log dev warning เพราะไม่ได้ถูกเรียกใน Transition หรือ Action',
+      'มัน throw ทันทีเพราะ requestFormReset ต้องการ Transition ที่ active อยู่',
+      'มันลบ form element ออกจาก DOM',
+    ],
+    answer: 1,
+    explain: 'requestFormReset ยัง reset จริงเมื่อเรียกจาก event handler ธรรมดา — พิสูจน์แล้วข้างบน — แต่เพราะมันเป็น API ที่ใช้ได้เฉพาะใน Action, React จึง log "requestFormReset was called outside a transition or action" ลง console ทุกครั้งที่รัน',
   },
 ];
 

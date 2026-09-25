@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The pattern React 19 deletes
 
@@ -104,8 +105,195 @@ export const actionDiagram = `sequenceDiagram
 
 The whole three-piece dance — loading flag, error slot, try/catch/finally — collapses into one hook that can't forget to reset the spinner.
 
+## The `startTransition(async () => {...})` pitfall
+
+Under the hood, an Action's pending state is tracked as a **Transition** — that's how `isPending` stays accurate without you managing a flag by hand. The moment you write your own `async` function and hand it to `startTransition` directly (a common pattern for a "do this without blocking the UI" helper that isn't a form Action), you can hit a sharp edge react.dev states plainly:
+
+> Any async calls that are awaited in the `action` will be included in the Transition, but currently require wrapping any `set` functions after the `await` in an additional `startTransition`.
+> — [react.dev/reference/react/useTransition](https://react.dev/reference/react/useTransition#react-doesnt-treat-my-state-update-after-await-as-a-transition)
+
+In plain terms: a `setState` call **before** an `await` inside `startTransition(async () => {...})` stays part of the Transition; a `setState` call **after** an `await` does not, unless you wrap it in a *second*, nested `startTransition`. React loses track of the async scope across the `await` — this is a JavaScript limitation (no `AsyncContext` yet), not a bug.
+
+This matters concretely with `Suspense`: a Transition update that suspends keeps the old content on screen until the data is ready; a non-Transition update that suspends shows the fallback immediately. So the exact same `setShow(true)` either keeps your UI stable or flashes a loading state, purely depending on whether it's re-wrapped after the `await`:
+
+```tsx
+// src/__tests__/transition-async-await.test.tsx
+import { describe, it, expect } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { startTransition, use, useState, Suspense } from 'react'
+
+function makeResource() {
+  let resolve!: () => void
+  const promise = new Promise<void>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+function Panel({ resource }: { resource: { promise: Promise<void> } }) {
+  use(resource.promise)
+  return <p>Loaded</p>
+}
+
+function App({ rewrap }: { rewrap: boolean }) {
+  const [show, setShow] = useState(false)
+  const [resource] = useState(() => makeResource())
+  ;(globalThis as any).__resolve = resource.resolve
+
+  function handleClick() {
+    startTransition(async () => {
+      await Promise.resolve() // simulate an awaited async step
+      if (rewrap) {
+        // ✅ re-wrapped: this setState stays part of the Transition
+        startTransition(() => setShow(true))
+      } else {
+        // ❌ not re-wrapped: this setState is a normal, non-Transition update
+        setShow(true)
+      }
+    })
+  }
+
+  return (
+    <>
+      <button onClick={handleClick}>go</button>
+      <Suspense fallback={<p>Loading fallback</p>}>
+        {show ? <Panel resource={resource} /> : <p>Old content</p>}
+      </Suspense>
+    </>
+  )
+}
+
+describe('startTransition(async () => {...}) — setState after await', () => {
+  it('WITHOUT re-wrapping: the update after await is not a Transition, so Suspense shows the fallback immediately', async () => {
+    render(<App rewrap={false} />)
+    fireEvent.click(screen.getByText('go'))
+    await waitFor(() => expect(screen.getByText('Loading fallback')).toBeTruthy())
+    ;(globalThis as any).__resolve()
+    await waitFor(() => expect(screen.getByText('Loaded')).toBeTruthy())
+  })
+
+  it('WITH re-wrapping: the update after await stays a Transition, so Suspense keeps the old content until ready', async () => {
+    render(<App rewrap={true} />)
+    fireEvent.click(screen.getByText('go'))
+    // Give the microtask queue a chance to run; old content must still be there.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(screen.getByText('Old content')).toBeTruthy()
+    expect(screen.queryByText('Loading fallback')).toBeNull()
+    ;(globalThis as any).__resolve()
+    await waitFor(() => expect(screen.getByText('Loaded')).toBeTruthy())
+  })
+})
+```
+
+Both cases pass — that's the point. The bug isn't a crash; it's a UX regression that "looks correct" in every code review (it compiles, it runs, the data eventually shows up) and only reveals itself as an unwanted loading flash under a real user's network conditions.
+
+## `requestFormReset`: resetting a form outside of a submission
+
+React auto-resets a form's uncontrolled fields after a form Action succeeds — but sometimes you need to reset a form *without* submitting it (a "Clear" button, or resetting after some other event). `requestFormReset(form)` does that imperatively. Like `useOptimistic`'s setter, it's an Action-only API: call it outside a Transition/Action and it still works, but React logs a warning.
+
+```tsx
+// src/__tests__/request-form-reset.test.tsx
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { requestFormReset } from 'react-dom'
+import { startTransition, useRef } from 'react'
+
+function ClearableForm({ insideTransition }: { insideTransition: boolean }) {
+  const formRef = useRef<HTMLFormElement>(null)
+  function clear() {
+    if (insideTransition) {
+      // ✅ requestFormReset is an Action-only API, like useOptimistic.
+      startTransition(() => requestFormReset(formRef.current!))
+    } else {
+      // ❌ called directly from an event handler.
+      requestFormReset(formRef.current!)
+    }
+  }
+  return (
+    <form ref={formRef}>
+      <input name="title" defaultValue="draft title" />
+      <button type="button" onClick={clear}>Clear</button>
+    </form>
+  )
+}
+
+describe('requestFormReset', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('outside a Transition/Action: still resets the field, but logs a console.error', async () => {
+    const errors: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '))
+    })
+    render(<ClearableForm insideTransition={false} />)
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'something the user typed' } })
+    fireEvent.click(screen.getByText('Clear'))
+    expect(input.value).toBe('draft title')
+    await waitFor(() => expect(errors.length).toBeGreaterThan(0))
+    expect(errors.some((e) => e.includes('requestFormReset was called outside a transition or action'))).toBe(true)
+  })
+
+  it('inside startTransition: resets the field with no warning', async () => {
+    const errors: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '))
+    })
+    render(<ClearableForm insideTransition={true} />)
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'something the user typed' } })
+    fireEvent.click(screen.getByText('Clear'))
+    await waitFor(() => expect(input.value).toBe('draft title'))
+    expect(errors.length).toBe(0)
+  })
+})
+```
+
+Both tests pass against React 19.3.0 — including the exact console message, captured verbatim from a real run: `requestFormReset was called outside a transition or action. To fix, move the update to an action, or wrap with startTransition.` That message isn't in react.dev's prose docs for `requestFormReset` at the time of writing; it's the kind of detail you only get by actually running the code, which is why this course does.
+
+## Mental Model
+
+An Action's `isPending` is really "is there an active Transition wrapping this async work" — which is exactly why the docs' async-Transition caveat matters here specifically. Anything that reads or writes state *after* an `await` inside `startTransition` needs its own nested `startTransition` to stay inside that Transition; anything before the first `await` is already covered.
+
+## Trade-offs
+
+| Pattern | What it gives you | Cost |
+|---|---|---|
+| `<form action={asyncFn}>` + `useActionState` | Pending/state tracking handled entirely by React | Action signature is `(prevState, formData)`, not `(formData)` |
+| Hand-rolled `startTransition(async () => {...})` | Full control over what counts as "pending" | Must manually re-wrap every `set` call after an `await`, or it silently escapes the Transition |
+| `requestFormReset(form)` | Imperative reset outside of a submission | Action-only API — call it outside a Transition/Action and React logs a warning, proven above |
+
+## Common Misconceptions
+
+- **"Everything inside `startTransition(async () => {...})` is part of the Transition."** Only the synchronous portion before the first `await`, plus anything explicitly re-wrapped in a nested `startTransition` after each `await`, actually counts.
+- **"`requestFormReset` is just `form.reset()` with a different name."** It's specifically meant to pair with Actions — calling it outside one produces a real, provable console warning, which plain `form.reset()` never would.
+- **"If a Transition doesn't error, it did what I expected."** The async-await pitfall above never throws or logs anything on its own — the only symptom is a Suspense fallback flashing where old content should have stayed. Silence is not proof of correctness here.
+
+## Reading AI-generated code
+
+- Does a generated `startTransition(async () => {...})` callback update state *after* an `await` without a nested `startTransition`? That update silently escapes the Transition — check every `set` call that comes after any `await` in the same async function.
+- Is `requestFormReset` called from inside an event handler directly, or wrapped in `startTransition`/an Action? Both "work," but only one avoids the console warning.
+- Does the action passed to `useActionState` really take `(previousState, formData)`, not just `(formData)`? (Covered fully in this lesson's earlier section — still the single most common mistake to re-check.)
+
+<SpotTheBug code={`function SearchResults() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<string[]>([])
+
+  function handleChange(nextQuery: string) {
+    startTransition(async () => {
+      setQuery(nextQuery)
+      const data = await fetchResults(nextQuery)
+      setResults(data) // looks fine — it's inside startTransition, right?
+    })
+  }
+
+  return <input onChange={(e) => handleChange(e.target.value)} />
+}`}>
+`setResults(data)` runs *after* `await fetchResults(nextQuery)`, so despite being lexically inside the `startTransition(async () => {...})` callback, it is **not** part of the Transition — react.dev is explicit that state updates after an `await` require their own nested `startTransition` to stay marked as one. If `SearchResults` renders something that suspends based on `results`, this will show a loading fallback instead of keeping the previous results on screen, exactly like the proven test above. The fix: wrap the line in `startTransition(() => setResults(data))`.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-An **Action** is an async function passed to `<form action={fn}>`; React calls it with the `FormData` and handles submission for you. **`useActionState(action, initialState)`** wraps it and returns **`[state, formAction, isPending]`** — the action receives `(previousState, formData)` and returns the next state, and pending is tracked automatically. This replaces the old `useState`-for-data + `useState`-for-loading + `try/catch/finally` boilerplate with a single call.
+An **Action** is an async function passed to `<form action={fn}>`; React calls it with the `FormData` and handles submission for you. **`useActionState(action, initialState)`** wraps it and returns **`[state, formAction, isPending]`** — the action receives `(previousState, formData)` and returns the next state, and pending is tracked automatically. This replaces the old `useState`-for-data + `useState`-for-loading + `try/catch/finally` boilerplate with a single call. Both `useActionState`'s pending tracking and a hand-rolled `startTransition(async () => {...})` share the same sharp edge: a `set` call after an `await` needs its own nested `startTransition`, or it silently falls out of the Transition — proven above, along with `requestFormReset`'s Action-only warning.
 </Callout>
 
 export const quizActions = [
@@ -118,6 +306,7 @@ export const quizActions = [
       'A router redirect',
     ],
     answer: 1,
+    explain: 'An Action is any async function handed to <form action={fn}> (or startTransition); React calls it with the submitted FormData and manages pending state for you.',
   },
   {
     q: 'What does `useActionState(action, initialState)` return?',
@@ -128,6 +317,7 @@ export const quizActions = [
       'A promise',
     ],
     answer: 1,
+    explain: 'It returns a three-item tuple: the latest state your action returned, a form action ready to bind, and a pending flag — all managed for you.',
   },
   {
     q: 'What arguments does the action passed to useActionState receive?',
@@ -138,6 +328,7 @@ export const quizActions = [
       'None',
     ],
     answer: 1,
+    explain: 'This is the shape people get wrong: a plain form action takes only (formData), but useActionState requires (previousState, formData).',
   },
   {
     q: 'What boilerplate does useActionState replace?',
@@ -148,6 +339,51 @@ export const quizActions = [
       'The component function',
     ],
     answer: 1,
+    explain: 'It collapses the classic useState-for-data + useState-for-loading + try/catch/finally pattern into a single hook that can\'t forget to reset the pending flag.',
+  },
+  {
+    q: 'Per react.dev, what must you do with a `set` call that comes AFTER an `await` inside `startTransition(async () => {...})`?',
+    options: [
+      'Nothing — everything inside startTransition is automatically part of the Transition',
+      'Wrap it in its own nested startTransition, or it will not be treated as part of the Transition',
+      'Move it before the await instead',
+      'Call it twice to force React to notice it',
+    ],
+    answer: 1,
+    explain: 'react.dev: state updates after an await inside an async Transition "currently require wrapping any set functions after the await in an additional startTransition" — a JavaScript limitation, not a React bug.',
+  },
+  {
+    q: '```tsx\nfunction SearchResults() {\n  function handleChange(nextQuery: string) {\n    startTransition(async () => {\n      setQuery(nextQuery)\n      const data = await fetchResults(nextQuery)\n      setResults(data)\n    })\n  }\n  // ...\n}\n```\nIs `setResults(data)` part of the Transition here?',
+    options: [
+      'Yes — it is lexically inside the startTransition callback',
+      'No — it runs after an await and was never re-wrapped in a nested startTransition',
+      'Yes, but only in development mode',
+      'No — because setQuery ran first',
+    ],
+    answer: 1,
+    explain: 'Proven with a real Suspense + use() test: without re-wrapping, this exact pattern shows a loading fallback immediately instead of keeping old content, because the post-await update escaped the Transition.',
+  },
+  {
+    q: 'What happens when `requestFormReset(form)` is called from a plain event handler, outside a Transition or Action?',
+    options: [
+      'It throws and crashes the component',
+      'It still resets the form, but React logs a console.error that it should be inside a transition or action',
+      'It silently does nothing',
+      'It is only usable inside Server Components',
+    ],
+    answer: 1,
+    explain: 'Proven directly: the field still resets to its defaultValue, but the console shows "requestFormReset was called outside a transition or action. To fix, move the update to an action, or wrap with startTransition."',
+  },
+  {
+    q: '```tsx\nfunction clear() {\n  requestFormReset(formRef.current)\n}\n\nreturn <button type="button" onClick={clear}>Clear</button>\n```\nWhat is the most accurate description of what this button does?',
+    options: [
+      'Nothing — requestFormReset only works inside a form action, so this is a no-op',
+      'It resets the form\'s fields back to their defaultValue and works, but logs a dev warning because it was not called inside a Transition or Action',
+      'It throws immediately because requestFormReset requires a Transition to be active',
+      'It deletes the form element from the DOM',
+    ],
+    answer: 1,
+    explain: 'requestFormReset still performs the reset when called from a plain event handler — proven above — but because it is an Action-only API, React logs "requestFormReset was called outside a transition or action" to the console every time this runs.',
   },
 ];
 

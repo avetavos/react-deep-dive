@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The busywork it removes
 
@@ -52,7 +53,238 @@ export const compilerDiagram = `flowchart TB
   after --> result["Plain code +\nauto-inserted memoization"]
   rules["Rules of React\n(pure render, no mutation)"] --> after`;
 
-Status, honestly: the React Compiler is the current, official auto-memoization tool, adopted via build configuration and function-level directives, and rolling out across the ecosystem. Treat it as the direction of travel — write compiler-friendly (pure) code now, and lean on it rather than hand-memoizing everything.
+Status: as of this writing the React Compiler is **stable**, not experimental. React's own blog announced it plainly:
+
+> We're releasing the compiler's first stable release today, plus linting and tooling improvements to make adoption easier.
+> — [react.dev/blog](https://react.dev/blog)
+
+`npm view babel-plugin-react-compiler version` confirms it: the published version is `1.0.0`, not a `0.x` or `-rc` tag. Treat it as the default, not an experiment — write compiler-friendly (pure) code now, and lean on it rather than hand-memoizing everything.
+
+## Installing it for Vite
+
+The compiler ships as a Babel plugin, and how you wire it into Vite depends on your `@vitejs/plugin-react` version — this is exactly the kind of detail that goes stale fast, so check yours (`npm ls @vitejs/plugin-react`) before copying an install snippet from memory. This course's probe has `@vitejs/plugin-react@6.1.1`, and react.dev is explicit about the cutoff:
+
+> In `@vitejs/plugin-react@6.0.0`, the inline Babel option was removed.
+> — [react.dev/learn/react-compiler/installation](https://react.dev/learn/react-compiler/installation)
+
+For `6.0.0` and later, install `@rolldown/plugin-babel` alongside `babel-plugin-react-compiler` and use the exported `reactCompilerPreset` as a *separate* plugin, not an inline `react({ babel: {...} })` option (that option no longer exists — passing it is a silent no-op at best and a type error under strict TypeScript, since `Options` has no `babel` field in `6.1.1`):
+
+```ts
+// vite.config.example.ts — @vitejs/plugin-react >= 6.0.0 (illustrative; see prose for why this fence isn't type-checked)
+import { defineConfig } from 'vite'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset()] }),
+  ],
+})
+```
+
+Pre-`6.0.0`, the old inline form still applies:
+
+```js
+react({
+  babel: { plugins: ['babel-plugin-react-compiler'] },
+})
+```
+
+This lesson doesn't run `npm run build` through either wiring (that would need `@rolldown/plugin-babel` installed in the shared course probe, which this lesson doesn't own) — but it **does** run the actual compiler transform beneath both of them, directly through `@babel/core` + `babel-plugin-react-compiler`, so the part that matters — what the compiler does to your code — is real, not simulated:
+
+To see what this actually does, here's `babel-plugin-react-compiler@1.0.0` (via `@babel/core`, run directly in this course's probe, not simulated) transforming one plain component:
+
+```jsx
+// input — the ProductList component from earlier in this lesson
+function ProductList({ products, query }) {
+  const filtered = products.filter((p) => p.name.includes(query));
+  return (
+    <ul>
+      {filtered.map((p) => <Product key={p.id} product={p} onSelect={() => select(p.id)} />)}
+    </ul>
+  );
+}
+```
+
+Real output, byte-for-byte from that run:
+
+```text
+import { c as _c } from "react/compiler-runtime";
+import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
+function ProductList(t0) {
+  const $ = _c(7);
+  const {
+    products,
+    query
+  } = t0;
+  let t1;
+  if ($[0] !== products || $[1] !== query) {
+    let t2;
+    if ($[3] !== query) {
+      t2 = p => p.name.includes(query);
+      $[3] = query;
+      $[4] = t2;
+    } else {
+      t2 = $[4];
+    }
+    const filtered = products.filter(t2);
+    t1 = filtered.map(_temp);
+    $[0] = products;
+    $[1] = query;
+    $[2] = t1;
+  } else {
+    t1 = $[2];
+  }
+  let t2;
+  if ($[5] !== t1) {
+    t2 = /*#__PURE__*/_jsxDEV("ul", {
+      children: t1
+    }, void 0, false);
+    $[5] = t1;
+    $[6] = t2;
+  } else {
+    t2 = $[6];
+  }
+  return t2;
+}
+function _temp(p_0) {
+  return /*#__PURE__*/_jsxDEV(Product, {
+    product: p_0,
+    onSelect: () => select(p_0.id)
+  }, p_0.id, false);
+}
+```
+
+`_c(7)` allocates a 7-slot memo cache from `react/compiler-runtime`; each `$[n]` slot is one memoized value or dependency, checked with `!==` (`Object.is`-style) before recomputing. This is exactly the "equivalent of `useMemo`/`useCallback`/`memo`" the docs describe — just generated for you, with more fine-grained slots than a human would bother writing by hand.
+
+## `compilationMode`: which functions get compiled
+
+By default the compiler doesn't compile *every* function in your codebase — it infers which ones are components or hooks. The `compilationMode` option controls that inference:
+
+- **`'infer'` (default)** — compiles functions written like components (PascalCase, return JSX) or hooks (`use`-prefixed, call other hooks), plus anything explicitly marked `"use memo"`.
+- **`'annotation'`** — compiles *only* functions marked with `"use memo"`. This is the recommended starting point for a large, unfamiliar codebase: nothing changes until you opt a component in.
+- **`'syntax'`** — compiles only components/hooks written with Flow's component/hook syntax (not relevant to a plain TypeScript codebase).
+- **`'all'`** — compiles every top-level function. Not recommended: it can compile plain helper functions that were never components.
+
+```ts
+// vite.config.annotation.example.ts — @vitejs/plugin-react >= 6.0.0
+import { defineConfig } from 'vite'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset({ compilationMode: 'annotation' })] }),
+  ],
+})
+```
+
+## Directives: `"use memo"` and `"use no memo"`
+
+Two function-level directives pair with `compilationMode` for gradual adoption: `"use memo"` opts a single function *in* under `annotation` mode, and `"use no memo"` opts a function *out* even under `infer` mode — an escape hatch for a component you suspect the compiler mishandles, while you fix the underlying issue:
+
+```tsx
+// src/ProblematicComponent.tsx
+export function ProblematicComponent() {
+  "use no memo"; // TODO: remove once the Rules of React violation below is fixed
+  return null;
+}
+```
+
+The documented adoption path is: start in `annotation` mode and mark well-tested components with `"use memo"`; once confident, switch the whole project to `infer` mode and use `"use no memo"` only for the rare holdout.
+
+## What makes the compiler bail out
+
+The compiler is deliberately conservative: per React's own docs, **compiler errors are rare because it's designed to skip problematic code rather than fail the build**. When it can't prove a function follows the Rules of React, it leaves that function completely untouched rather than risk memoizing something unsafely.
+
+Take the `setState`-during-render example from Foundations — a real Rules of React violation:
+
+```tsx
+// src/BadSetState.tsx
+import { useState } from 'react'
+
+// Violates the Rules of React: calls setCount unconditionally during render.
+export function BadSetState() {
+  const [count, setCount] = useState(0)
+  setCount(count + 1)
+  return <p>{count}</p>
+}
+```
+
+Compiling this with the same `babel-plugin-react-compiler@1.0.0` call as `ProductList` above produces this — no `_c()`, no memo cache, the function passed through completely as-is:
+
+```text
+import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
+function BadSetState() {
+  const [count, setCount] = useState(0);
+  setCount(count + 1); // setState during render — Rules of React violation
+  return /*#__PURE__*/_jsxDEV("p", {
+    children: count
+  }, void 0, false);
+}
+```
+
+That's the bail-out in action: silent, safe, and easy to miss if you're not looking for the missing `_c()` call.
+
+## The ESLint rules catch it before you ship
+
+`eslint-plugin-react-hooks` v6 ships the compiler's own diagnostics as lint rules — `recommended-latest` turns on rule-of-hooks *and* the newer compiler-specific rules (`set-state-in-render`, `immutability`, `purity`, `set-state-in-effect`, and more), so you get the same bail-out reasons as ESLint errors, at edit time, without adopting the compiler itself. Running ESLint on the exact `BadSetState.tsx` above (`eslint-plugin-react-hooks@6.1.1`, `recommended-latest` config):
+
+```text
+/BadSetState.tsx
+  6:3  error  Error: Calling setState during render may trigger an infinite loop
+
+Calling setState during render will trigger another render, and can lead to infinite loops. (https://react.dev/reference/react/useState).
+
+  4 | export function BadSetState() {
+  5 |   const [count, setCount] = useState(0)
+> 6 |   setCount(count + 1)
+    |   ^^^^^^^^ Found setState() in render
+  7 |   return <p>{count}</p>
+  8 | }
+  9 |  react-hooks/set-state-in-render
+
+✖ 1 problem (1 error, 0 warnings)
+```
+
+That's the same violation the compiler silently bailed out on above — except the lint rule fails your build (or your editor) immediately, with a file and line number, instead of quietly skipping optimization.
+
+## Mental Model
+
+The compiler is not "smarter `useMemo`" — it's a static analysis pass that either can prove your function is safe to memoize, or leaves it completely alone. There is no partial credit: a function either gets the full `_c()` memo-cache treatment, or it passes through byte-for-byte as you wrote it. That binary outcome is why the eslint rules matter as much as the compiler itself — they're the only way to find out *which* of the two you got, before you go looking for a missing performance win that never happened.
+
+## Trade-offs
+
+| Choice | What it gives you | Cost |
+|---|---|---|
+| `compilationMode: 'infer'` (default) | Compiles anything that looks like a component/hook, no per-file opt-in needed | On an unfamiliar codebase, you can't always predict what got compiled without checking output |
+| `compilationMode: 'annotation'` + `"use memo"` | Nothing changes until you explicitly opt a component in — safest rollout | Extra directive to add and remove per component during migration |
+| `"use no memo"` escape hatch | Lets you ship today around a component the compiler mishandles | Silent by design — nothing reminds you to remove it once the underlying issue is fixed |
+| `eslint-plugin-react-hooks@6` `recommended-latest` | Catches the same bail-out reasons as real lint errors, without adopting the compiler | Its rule set (`immutability`, `purity`, `set-state-in-render`, …) is stricter than plain `rules-of-hooks` — expect new errors on existing code the first time you turn it on |
+
+## Common Misconceptions
+
+- **"If the compiler can't memoize my component, the build fails."** It doesn't — per React's own docs, compiler errors are rare because it's designed to skip problematic code rather than fail the build. A skipped component looks identical to an un-compiled one; nothing in the build output flags it unless you diff the transformed code or run the eslint rules.
+- **"`useMemo`/`useCallback` are now useless, so I should delete them."** They still work exactly as before — the compiler generates its own equivalent alongside them, it doesn't remove yours. The guidance is to stop *adding new* manual memoization, not to rip out working code for no reason.
+- **"`"use no memo"` is just a performance opt-out, so it's low-risk to add."** It's a compiler opt-out, not a perf toggle — the whole point of adding it is that you suspect the function breaks the Rules of React (mutation, impurity), and the compiler skipping it doesn't fix that underlying bug, it just stops the compiler from being blamed for it.
+
+## Reading AI-generated code
+
+- Does a generated component mutate a prop, a hook argument, or anything it doesn't own — directly reassigning a field, calling `.sort()`/`.push()` on an array it was handed, and so on? That's exactly what makes the compiler bail out silently, with no build error to flag it.
+- If the code includes `"use no memo"`, is there a comment explaining *why*, and does the reason still apply? A generated snippet that copies this directive without an explanation is hiding a Rules-of-React problem it never actually fixed.
+- Does the code assume `useMemo`/`useCallback` are required for correctness (not just performance)? Generated code that reaches for them reflexively on every value, "just in case," is optimizing for a world without the compiler.
+- Has `eslint-plugin-react-hooks` actually been run against the generated code with the `recommended-latest` config — the one that includes the compiler-specific rules — or only against `recommended` (rules-of-hooks + exhaustive-deps only, which won't catch a mutation bug)?
+
+<SpotTheBug code={`type Config = { theme: string }
+
+export function Themed({ config }: { config: Config }) {
+  config.theme = 'dark'
+  return <p>{config.theme}</p>
+}`}>
+`Themed` reassigns `config.theme` directly — mutating a prop it was handed, which is exactly what the Rules of React forbid ("don't mutate props, state, or values you don't own"). Compiling this exact function with `babel-plugin-react-compiler@1.0.0` produces the function completely untouched — no `_c()`, no memo cache, passed through byte-for-byte, the same silent bail-out shown earlier for `setState` during render. `eslint-plugin-react-hooks@6.1.1` (`recommended-latest`) catches it immediately: `Error: This value cannot be modified` / `Modifying component props or hook arguments is not allowed. Consider using a local variable instead.` (rule `react-hooks/immutability`). The fix is to copy before mutating — `const themed = { ...config, theme: 'dark' }` — so the component reads and returns a value it actually owns.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
 The **React Compiler** is a build-time tool that automatically inserts the equivalent of `useMemo`/`useCallback`/`memo`, so you write plain code and still skip unnecessary work — it "automatically applies the equivalent of `memo` to all components." It only works on code that follows the **Rules of React** (pure render, no mutation), which is exactly why purity matters. The advice shifts from "where do I add memoization?" to "is my code compiler-friendly?"
@@ -68,6 +300,7 @@ export const quizCompiler = [
       'Type-checks your props',
     ],
     answer: 1,
+    explain: 'The compiler is a build-time Babel transform: it analyzes each component and generates the equivalent of manual useMemo/useCallback/memo calls for you, backed by a per-component memo cache.',
   },
   {
     q: 'With the compiler adopted, what is the guidance on manual memoization?',
@@ -78,6 +311,7 @@ export const quizCompiler = [
       'Memoize only class components',
     ],
     answer: 1,
+    explain: 'Manual useMemo/useCallback still work, but the compiler generates the same optimization automatically — so the default shifts to writing plain code and reaching for manual memoization only when the compiler cannot help (e.g. libraries shipped un-compiled).',
   },
   {
     q: 'What must your code follow for the compiler to safely memoize it?',
@@ -88,6 +322,40 @@ export const quizCompiler = [
       'A minimum bundle size',
     ],
     answer: 1,
+    explain: 'The compiler can only prove a function safe to memoize if it follows the Rules of React: pure render, no mutating props, state, or other values the function does not own.',
+  },
+  {
+    q: '```ts\ntype Config = { theme: string }\n\nexport function Themed({ config }: { config: Config }) {\n  config.theme = \'dark\'\n  return <p>{config.theme}</p>\n}\n```\nWhat happens when this is compiled with babel-plugin-react-compiler, and does anything catch it beforehand?',
+    options: [
+      'It compiles with a full memo cache, exactly like any other component',
+      'The compiler passes it through completely untouched (no _c(), no memo cache) — and eslint-plugin-react-hooks v6\'s immutability rule flags the mutation as an error before you even build',
+      'The build fails outright with a compiler error',
+      'It compiles, but throws a runtime error the first time it renders',
+    ],
+    answer: 1,
+    explain: 'Verified directly: compiling this exact function produces the function passed through byte-for-byte with no _c() call, and eslint-plugin-react-hooks@6.1.1 (recommended-latest) reports "Modifying component props or hook arguments is not allowed" via the react-hooks/immutability rule.',
+  },
+  {
+    q: '```ts\n// vite.config.ts, @vitejs/plugin-react >= 6.0.0\nimport react from \'@vitejs/plugin-react\'\nexport default { plugins: [react({ babel: { plugins: [\'babel-plugin-react-compiler\'] } })] }\n```\nWhy might this NOT enable the React Compiler on a current @vitejs/plugin-react install?',
+    options: [
+      'babel-plugin-react-compiler does not exist',
+      'In @vitejs/plugin-react@6.0.0+, the inline babel option was removed — this config option silently does nothing (or fails to type-check) instead of running the compiler',
+      'Vite does not support Babel plugins at all',
+      'This syntax only works with webpack, never Vite',
+    ],
+    answer: 1,
+    explain: 'react.dev\'s installation docs state plainly: "In @vitejs/plugin-react@6.0.0, the inline Babel option was removed." Current versions need the separate @rolldown/plugin-babel + reactCompilerPreset wiring instead of an inline babel option.',
+  },
+  {
+    q: 'What is the difference between compilationMode: \'annotation\' and the default \'infer\'?',
+    options: [
+      'They are identical; annotation is just a deprecated alias',
+      '\'annotation\' compiles only functions explicitly marked "use memo", while \'infer\' compiles anything that looks like a component or hook automatically',
+      '\'infer\' only works with class components',
+      '\'annotation\' compiles every function in the codebase, including plain helpers',
+    ],
+    answer: 1,
+    explain: '\'infer\' (the default) recognizes component/hook shaped functions automatically; \'annotation\' compiles nothing until you opt a specific function in with the "use memo" directive — the recommended safer starting point for a large codebase.',
   },
 ];
 

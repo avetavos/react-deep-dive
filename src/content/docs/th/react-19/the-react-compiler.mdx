@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## งานจุกจิกที่ลบทิ้ง
 
@@ -45,14 +46,245 @@ function ProductList({ products, query }) {
 
 compiler จะ memoize ได้อย่างปลอดภัยเฉพาะ code ที่ตาม **Rules of React** — หลัก ๆ คือ **render ต้อง pure** และคุณ **ต้องไม่ mutate** props, state หรือค่าที่ไม่ได้เป็นของคุณ ถ้าคุณละเมิดกฎเหล่านั้น (mutate ตอน render, อ่าน/เขียนของภายนอกใน render body) compiler จะการันตีไม่ได้ว่า component ปลอดภัยที่จะ memoize และอาจข้าม component นั้นไป นี่คือผลตอบแทนเชิงปฏิบัติของ purity ที่คุณเรียนใน Foundations: ไม่ใช่แค่สุขอนามัยเรื่องความถูกต้อง แต่คือสิ่งที่ปลดล็อก optimization อัตโนมัติ
 
-<Mermaid title="manual vs compiler memoization" code={compilerDiagram} />
+<Mermaid title="manual vs compiler memoization (แผนภาพ)" code={compilerDiagram} />
 
 export const compilerDiagram = `flowchart TB
   before["Before: you add\nuseMemo / useCallback / memo\nby hand (noisy, error-prone)"] --> after["React Compiler\n(build time)"]
   after --> result["Plain code +\nauto-inserted memoization"]
   rules["Rules of React\n(pure render, no mutation)"] --> after`;
 
-สถานะตามจริง: React Compiler เป็นเครื่องมือ auto-memoization อย่างเป็นทางการในปัจจุบัน ใช้งานผ่าน build configuration และ directive ระดับ function และกำลังทยอย roll out ทั่ว ecosystem มอง compiler เป็นทิศทางที่กำลังไป — เขียน code ที่เป็นมิตรกับ compiler (pure) ตั้งแต่ตอนนี้ แล้วพึ่ง compiler แทนการ memoize ทุกอย่างด้วยมือ
+สถานะ: ณ เวลาที่เขียนบทนี้ React Compiler **stable** แล้ว ไม่ใช่ experimental blog ของ React เองประกาศตรง ๆ
+
+> We're releasing the compiler's first stable release today, plus linting and tooling improvements to make adoption easier.
+> — [react.dev/blog](https://react.dev/blog)
+
+`npm view babel-plugin-react-compiler version` ยืนยัน: version ที่ publish คือ `1.0.0` ไม่ใช่ `0.x` หรือ tag `-rc` ให้ถือว่ามันเป็น default ไม่ใช่ของทดลอง — เขียน code ที่เป็นมิตรกับ compiler (pure) ตั้งแต่ตอนนี้ แล้วพึ่ง compiler แทนการ memoize ทุกอย่างด้วยมือ
+
+## ติดตั้งสำหรับ Vite
+
+compiler ship เป็น Babel plugin และวิธี wire เข้า Vite ขึ้นอยู่กับ version ของ `@vitejs/plugin-react` — นี่คือรายละเอียดประเภทที่ล้าสมัยไวมาก จึงต้องเช็คของตัวเอง (`npm ls @vitejs/plugin-react`) ก่อน copy install snippet จากความจำ probe ของคอร์สนี้มี `@vitejs/plugin-react@6.1.1` และ react.dev บอกจุดตัดชัดเจน
+
+> In `@vitejs/plugin-react@6.0.0`, the inline Babel option was removed.
+> — [react.dev/learn/react-compiler/installation](https://react.dev/learn/react-compiler/installation)
+
+สำหรับ `6.0.0` ขึ้นไป ให้ติดตั้ง `@rolldown/plugin-babel` คู่กับ `babel-plugin-react-compiler` แล้วใช้ `reactCompilerPreset` ที่ export มาเป็น plugin *แยกต่างหาก* ไม่ใช่ option `react({ babel: {...} })` แบบ inline (option นั้นไม่มีอยู่แล้ว — ใส่ไปแล้วอย่างดีที่สุดคือ no-op เงียบ ๆ หรือแย่กว่านั้นคือ type error ภายใต้ TypeScript strict เพราะ `Options` ไม่มี field `babel` ใน `6.1.1`):
+
+```ts
+// vite.config.example.ts — @vitejs/plugin-react >= 6.0.0 (illustrative; see prose for why this fence isn't type-checked)
+import { defineConfig } from 'vite'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset()] }),
+  ],
+})
+```
+
+ก่อน `6.0.0` รูปแบบ inline เดิมยังใช้ได้:
+
+```js
+react({
+  babel: { plugins: ['babel-plugin-react-compiler'] },
+})
+```
+
+บทนี้ไม่ได้รัน `npm run build` ผ่าน wiring แบบใดแบบหนึ่ง (นั่นต้องมี `@rolldown/plugin-babel` ติดตั้งใน probe ของคอร์สที่ใช้ร่วมกัน ซึ่งบทนี้ไม่ได้เป็นเจ้าของ) — แต่มัน **รัน** compiler transform จริงที่อยู่เบื้องหลังทั้งสอง wiring โดยตรงผ่าน `@babel/core` + `babel-plugin-react-compiler` ดังนั้นส่วนที่สำคัญ — สิ่งที่ compiler ทำกับ code ของคุณ — เป็นของจริง ไม่ใช่ simulate:
+
+เพื่อดูว่ามันทำอะไรจริง ๆ นี่คือ `babel-plugin-react-compiler@1.0.0` (ผ่าน `@babel/core` รันตรงใน probe ของคอร์สนี้ ไม่ได้ simulate) transform component ธรรมดาตัวหนึ่ง:
+
+```jsx
+// input — the ProductList component from earlier in this lesson
+function ProductList({ products, query }) {
+  const filtered = products.filter((p) => p.name.includes(query));
+  return (
+    <ul>
+      {filtered.map((p) => <Product key={p.id} product={p} onSelect={() => select(p.id)} />)}
+    </ul>
+  );
+}
+```
+
+output จริง byte-ต่อ-byte จากการรันนั้น:
+
+```text
+import { c as _c } from "react/compiler-runtime";
+import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
+function ProductList(t0) {
+  const $ = _c(7);
+  const {
+    products,
+    query
+  } = t0;
+  let t1;
+  if ($[0] !== products || $[1] !== query) {
+    let t2;
+    if ($[3] !== query) {
+      t2 = p => p.name.includes(query);
+      $[3] = query;
+      $[4] = t2;
+    } else {
+      t2 = $[4];
+    }
+    const filtered = products.filter(t2);
+    t1 = filtered.map(_temp);
+    $[0] = products;
+    $[1] = query;
+    $[2] = t1;
+  } else {
+    t1 = $[2];
+  }
+  let t2;
+  if ($[5] !== t1) {
+    t2 = /*#__PURE__*/_jsxDEV("ul", {
+      children: t1
+    }, void 0, false);
+    $[5] = t1;
+    $[6] = t2;
+  } else {
+    t2 = $[6];
+  }
+  return t2;
+}
+function _temp(p_0) {
+  return /*#__PURE__*/_jsxDEV(Product, {
+    product: p_0,
+    onSelect: () => select(p_0.id)
+  }, p_0.id, false);
+}
+```
+
+`_c(7)` จอง memo cache 7 slot จาก `react/compiler-runtime`; แต่ละ slot `$[n]` คือหนึ่งค่าหรือ dependency ที่ถูก memoize เช็คด้วย `!==` (แบบ `Object.is`) ก่อนคำนวณใหม่ นี่คือ "สิ่งที่เทียบเท่า `useMemo`/`useCallback`/`memo`" ที่ docs อธิบายเป๊ะ ๆ — แค่ถูกสร้างให้อัตโนมัติ ด้วย slot ที่ละเอียดกว่าที่มนุษย์จะมานั่งเขียนเอง
+
+## `compilationMode`: function ไหนถูก compile
+
+โดย default compiler ไม่ได้ compile *ทุก* function ใน codebase — มัน infer ว่าตัวไหนเป็น component หรือ hook option `compilationMode` ควบคุมการ infer นั้น:
+
+- **`'infer'` (default)** — compile function ที่เขียนเหมือน component (PascalCase, return JSX) หรือ hook (ขึ้นต้นด้วย `use`, เรียก hook อื่น) บวกกับอะไรก็ตามที่ mark `"use memo"` ไว้ชัดเจน
+- **`'annotation'`** — compile *เฉพาะ* function ที่ mark ด้วย `"use memo"` นี่คือจุดเริ่มต้นที่แนะนำสำหรับ codebase ขนาดใหญ่ที่ยังไม่คุ้นเคย: ไม่มีอะไรเปลี่ยนจนกว่าคุณจะ opt component เข้ามาเอง
+- **`'syntax'`** — compile เฉพาะ component/hook ที่เขียนด้วย syntax ของ Flow (ไม่เกี่ยวกับ codebase TypeScript ธรรมดา)
+- **`'all'`** — compile ทุก top-level function ไม่แนะนำ: มันอาจ compile helper function ธรรมดาที่ไม่เคยเป็น component เลย
+
+```ts
+// vite.config.annotation.example.ts — @vitejs/plugin-react >= 6.0.0
+import { defineConfig } from 'vite'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset({ compilationMode: 'annotation' })] }),
+  ],
+})
+```
+
+## Directive: `"use memo"` กับ `"use no memo"`
+
+directive ระดับ function สองตัวจับคู่กับ `compilationMode` เพื่อ adopt แบบค่อยเป็นค่อยไป: `"use memo"` opt function เดียว *เข้า* ภายใต้ mode `annotation` และ `"use no memo"` opt function *ออก* แม้อยู่ภายใต้ mode `infer` — เป็น escape hatch สำหรับ component ที่คุณสงสัยว่า compiler จัดการผิด ในระหว่างที่คุณแก้ปัญหาที่แท้จริง:
+
+```tsx
+// src/ProblematicComponent.tsx
+export function ProblematicComponent() {
+  "use no memo"; // TODO: remove once the Rules of React violation below is fixed
+  return null;
+}
+```
+
+เส้นทาง adoption ตามเอกสารคือ: เริ่มที่ mode `annotation` แล้ว mark component ที่ทดสอบดีแล้วด้วย `"use memo"`; เมื่อมั่นใจแล้วค่อยสลับทั้ง project ไปเป็น mode `infer` แล้วใช้ `"use no memo"` เฉพาะกรณีหายากที่เหลือ
+
+## อะไรทำให้ compiler bail out
+
+compiler ระมัดระวังโดยตั้งใจ: ตามเอกสารของ React เอง **compiler error เกิดขึ้นน้อยมาก เพราะมันถูกออกแบบให้ข้าม code ที่มีปัญหาแทนที่จะทำให้ build fail** เมื่อมันพิสูจน์ไม่ได้ว่า function ตาม Rules of React มันจะปล่อย function นั้นไว้เฉย ๆ ทั้งหมด แทนที่จะเสี่ยง memoize แบบไม่ปลอดภัย
+
+ลองดูตัวอย่าง `setState`-ระหว่าง-render จาก Foundations — การละเมิด Rules of React จริง:
+
+```tsx
+// src/BadSetState.tsx
+import { useState } from 'react'
+
+// Violates the Rules of React: calls setCount unconditionally during render.
+export function BadSetState() {
+  const [count, setCount] = useState(0)
+  setCount(count + 1)
+  return <p>{count}</p>
+}
+```
+
+Compile ด้วย `babel-plugin-react-compiler@1.0.0` call เดียวกับ `ProductList` ข้างบน ได้ผลนี้ — ไม่มี `_c()` ไม่มี memo cache function ผ่านมาทั้งดุ้นแบบเดิมเป๊ะ:
+
+```text
+import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
+function BadSetState() {
+  const [count, setCount] = useState(0);
+  setCount(count + 1); // setState during render — Rules of React violation
+  return /*#__PURE__*/_jsxDEV("p", {
+    children: count
+  }, void 0, false);
+}
+```
+
+นั่นคือ bail-out ในการปฏิบัติจริง: เงียบ, ปลอดภัย และพลาดง่ายถ้าไม่ได้มองหา `_c()` ที่หายไป
+
+## กฎ ESLint จับได้ก่อน ship
+
+`eslint-plugin-react-hooks` v6 ship diagnostic ของ compiler เองมาเป็น lint rule — `recommended-latest` เปิดทั้ง rule-of-hooks *และ* rule เฉพาะของ compiler ที่ใหม่กว่า (`set-state-in-render`, `immutability`, `purity`, `set-state-in-effect` และอื่น ๆ) คุณจึงได้เหตุผล bail-out เดียวกันเป็น ESLint error ตอน edit time โดยไม่ต้อง adopt compiler เลย รัน ESLint กับ `BadSetState.tsx` ตัวเดียวกันข้างบน (`eslint-plugin-react-hooks@6.1.1`, config `recommended-latest`):
+
+```text
+/BadSetState.tsx
+  6:3  error  Error: Calling setState during render may trigger an infinite loop
+
+Calling setState during render will trigger another render, and can lead to infinite loops. (https://react.dev/reference/react/useState).
+
+  4 | export function BadSetState() {
+  5 |   const [count, setCount] = useState(0)
+> 6 |   setCount(count + 1)
+    |   ^^^^^^^^ Found setState() in render
+  7 |   return <p>{count}</p>
+  8 | }
+  9 |  react-hooks/set-state-in-render
+
+✖ 1 problem (1 error, 0 warnings)
+```
+
+นั่นคือการละเมิดตัวเดียวกับที่ compiler bail out เงียบ ๆ ข้างบน — ต่างกันตรงที่ lint rule ทำให้ build (หรือ editor) fail ทันที พร้อมไฟล์และเลขบรรทัด แทนที่จะข้าม optimization ไปเงียบ ๆ
+
+## Mental Model
+
+compiler ไม่ใช่ "`useMemo` ที่ฉลาดกว่า" — มันคือ static analysis pass ที่จะพิสูจน์ได้ว่า function ของคุณปลอดภัยที่จะ memoize หรือไม่ก็ปล่อยมันไว้เฉย ๆ ทั้งหมด ไม่มีคะแนนบางส่วน: function จะได้รับการดูแลแบบ memo-cache `_c()` เต็มรูปแบบ หรือไม่ก็ผ่านมาแบบเดิม byte-ต่อ-byte ผลลัพธ์แบบ binary นี้คือเหตุผลที่ eslint rule สำคัญพอ ๆ กับตัว compiler เอง — มันเป็นทางเดียวที่จะรู้ว่าคุณได้แบบไหนใน *สอง* แบบนั้น ก่อนที่คุณจะไปตามหา performance win ที่ไม่เคยเกิดขึ้นจริง
+
+## ข้อแลกเปลี่ยน
+
+| ตัวเลือก | ได้อะไร | ต้นทุน |
+|---|---|---|
+| `compilationMode: 'infer'` (default) | compile ทุกอย่างที่ดูเหมือน component/hook ไม่ต้อง opt-in ทีละไฟล์ | ใน codebase ที่ยังไม่คุ้นเคย บางทีทายไม่ได้ว่าอะไรถูก compile โดยไม่เช็ค output |
+| `compilationMode: 'annotation'` + `"use memo"` | ไม่มีอะไรเปลี่ยนจนกว่าคุณจะ opt component เข้ามาเอง — rollout ที่ปลอดภัยที่สุด | ต้องเพิ่ม/ลบ directive ทีละ component ระหว่าง migration |
+| escape hatch `"use no memo"` | ให้ ship ได้วันนี้รอบ ๆ component ที่ compiler จัดการผิด | เงียบโดยตั้งใจ — ไม่มีอะไรเตือนให้เอาออกเมื่อปัญหาที่แท้จริงถูกแก้แล้ว |
+| `eslint-plugin-react-hooks@6` `recommended-latest` | จับเหตุผล bail-out เดียวกันเป็น lint error จริง โดยไม่ต้อง adopt compiler | rule set ของมัน (`immutability`, `purity`, `set-state-in-render`, …) เข้มกว่า `rules-of-hooks` เฉย ๆ — เตรียมใจว่าจะเจอ error ใหม่กับ code เดิมตอนเปิดครั้งแรก |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ถ้า compiler memoize component ฉันไม่ได้ build จะ fail"** ไม่ fail — ตามเอกสารของ React เอง compiler error เกิดขึ้นน้อยมาก เพราะมันถูกออกแบบให้ข้าม code ที่มีปัญหาแทนที่จะทำให้ build fail component ที่ถูกข้ามหน้าตาเหมือน component ที่ไม่ได้ compile เป๊ะ — ไม่มีอะไรใน build output บอกเลย เว้นแต่คุณจะ diff transformed code หรือรัน eslint rule
+- **"`useMemo`/`useCallback` ไม่มีประโยชน์แล้ว ควรลบทิ้ง"** มันยังทำงานเหมือนเดิมทุกอย่าง — compiler สร้างสิ่งที่เทียบเท่าคู่ขนานไปกับของคุณ ไม่ได้ลบของคุณออก คำแนะนำคือหยุด *เพิ่ม* manual memoization ใหม่ ไม่ใช่ไปรื้อ code ที่ทำงานอยู่แล้วโดยไม่มีเหตุผล
+- **"`"use no memo"` เป็นแค่ performance opt-out เพิ่มเข้าไปก็ไม่เสี่ยงอะไร"** มันคือ compiler opt-out ไม่ใช่ perf toggle ประเด็นทั้งหมดของการเพิ่มมันคือคุณสงสัยว่า function ละเมิด Rules of React (mutation, ไม่ pure) และการที่ compiler ข้ามมันไปไม่ได้แก้ bug ที่แท้จริงนั้น มันแค่หยุดไม่ให้ compiler ถูกโทษเรื่องนี้เท่านั้น
+
+## อ่านโค้ดที่ AI เขียน
+
+- component ที่ AI สร้าง mutate prop, hook argument หรืออะไรที่ไม่ได้เป็นของมันไหม — reassign field ตรง ๆ, เรียก `.sort()`/`.push()` บน array ที่รับมา ฯลฯ นั่นคือสิ่งที่ทำให้ compiler bail out เงียบ ๆ โดยไม่มี build error เตือนเลย
+- ถ้า code มี `"use no memo"` มี comment อธิบาย *ทำไม* ไหม และเหตุผลนั้นยังใช้ได้อยู่ไหม โค้ดที่ AI สร้างที่ copy directive นี้มาโดยไม่มีคำอธิบาย กำลังซ่อนปัญหา Rules-of-React ที่ไม่เคยถูกแก้จริง
+- code สมมติว่า `useMemo`/`useCallback` จำเป็นต่อความถูกต้อง (ไม่ใช่แค่ performance) ไหม โค้ดที่ AI สร้างที่เอื้อมไปหยิบมันแบบสะท้อนกลับทุกค่า "เผื่อไว้ก่อน" กำลัง optimize สำหรับโลกที่ไม่มี compiler
+- `eslint-plugin-react-hooks` ถูกรันกับ code ที่ AI สร้างด้วย config `recommended-latest` จริงไหม — ตัวที่รวม rule เฉพาะของ compiler — หรือรันแค่ `recommended` (rules-of-hooks + exhaustive-deps เท่านั้น ซึ่งจับ mutation bug ไม่ได้)
+
+<SpotTheBug code={`type Config = { theme: string }
+
+export function Themed({ config }: { config: Config }) {
+  config.theme = 'dark'
+  return <p>{config.theme}</p>
+}`}>
+`Themed` reassign `config.theme` ตรง ๆ — mutate prop ที่มันรับมา ซึ่งเป็นสิ่งที่ Rules of React ห้ามเป๊ะ ๆ ("อย่า mutate props, state หรือค่าที่ไม่ได้เป็นของคุณ") การ compile function นี้ตัวเดียวกันด้วย `babel-plugin-react-compiler@1.0.0` ได้ function ที่ผ่านมาแบบเดิมทั้งดุ้น — ไม่มี `_c()`, ไม่มี memo cache, byte-ต่อ-byte เดียวกับ bail-out เงียบ ๆ ที่โชว์ไปแล้วสำหรับ `setState` ระหว่าง render `eslint-plugin-react-hooks@6.1.1` (`recommended-latest`) จับได้ทันที: `Error: This value cannot be modified` / `Modifying component props or hook arguments is not allowed. Consider using a local variable instead.` (rule `react-hooks/immutability`) วิธีแก้คือ copy ก่อน mutate — `const themed = { ...config, theme: 'dark' }` — เพื่อให้ component อ่านและ return ค่าที่มันเป็นเจ้าของจริง ๆ
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
 **React Compiler** เป็นเครื่องมือ build-time ที่ใส่สิ่งที่เทียบเท่า `useMemo`/`useCallback`/`memo` อัตโนมัติ คุณจึงเขียน code แบบเรียบง่ายและยังข้ามงานที่ไม่จำเป็น — compiler "ใส่สิ่งที่เทียบเท่า `memo` ให้ทุก component อัตโนมัติ" ทำงานได้เฉพาะกับ code ที่ตาม **Rules of React** (render pure, ไม่ mutate) นั่นคือเหตุผลว่าทำไม purity ถึงสำคัญ คำแนะนำเปลี่ยนจาก "ฉันควรใส่ memoization ตรงไหน?" เป็น "code ฉันเป็นมิตรกับ compiler ไหม?"
@@ -68,6 +300,7 @@ export const quizCompiler = [
       'type-check props ให้',
     ],
     answer: 1,
+    explain: 'compiler คือ Babel transform ตอน build time: มันวิเคราะห์แต่ละ component แล้วสร้างสิ่งที่เทียบเท่ากับการเรียก useMemo/useCallback ด้วยมือให้คุณ หนุนหลังด้วย memo cache ต่อ component',
   },
   {
     q: 'เมื่อ adopt compiler แล้ว คำแนะนำเรื่อง manual memoization คืออะไร?',
@@ -78,6 +311,7 @@ export const quizCompiler = [
       'memoize เฉพาะ class component',
     ],
     answer: 1,
+    explain: 'manual useMemo/useCallback ยังทำงานได้ แต่ compiler สร้าง optimization แบบเดียวกันให้อัตโนมัติ — default จึงเปลี่ยนเป็นเขียน code ธรรมดาและใช้ manual memoization เฉพาะตอนที่ compiler ช่วยไม่ได้ (เช่น library ที่ ship แบบยังไม่ compile)',
   },
   {
     q: 'code ของคุณต้องตามอะไรเพื่อให้ compiler memoize ได้อย่างปลอดภัย?',
@@ -88,6 +322,40 @@ export const quizCompiler = [
       'ขนาด bundle ขั้นต่ำ',
     ],
     answer: 1,
+    explain: 'compiler จะพิสูจน์ได้ว่า function ปลอดภัยที่จะ memoize ก็ต่อเมื่อมันตาม Rules of React: render pure, ไม่ mutate props, state หรือค่าอื่นที่ function ไม่ได้เป็นเจ้าของ',
+  },
+  {
+    q: '```ts\ntype Config = { theme: string }\n\nexport function Themed({ config }: { config: Config }) {\n  config.theme = \'dark\'\n  return <p>{config.theme}</p>\n}\n```\nเกิดอะไรขึ้นเมื่อ compile ด้วย babel-plugin-react-compiler และมีอะไรจับได้ก่อนไหม?',
+    options: [
+      'compile ด้วย memo cache เต็มรูปแบบ เหมือน component ทั่วไป',
+      'compiler ปล่อยผ่านทั้งดุ้นโดยไม่แตะ (ไม่มี _c(), ไม่มี memo cache) — และ rule immutability ของ eslint-plugin-react-hooks v6 จับ mutation เป็น error ได้ก่อน build ด้วยซ้ำ',
+      'build fail ทันทีด้วย compiler error',
+      'compile ได้ แต่ throw runtime error ตอน render ครั้งแรก',
+    ],
+    answer: 1,
+    explain: 'ยืนยันตรง ๆ: compile function นี้ตัวเดียวกันได้ function ที่ผ่านมาแบบเดิม byte-ต่อ-byte โดยไม่มี _c() เลย และ eslint-plugin-react-hooks@6.1.1 (recommended-latest) รายงาน "Modifying component props or hook arguments is not allowed" ผ่าน rule react-hooks/immutability',
+  },
+  {
+    q: '```ts\n// vite.config.ts, @vitejs/plugin-react >= 6.0.0\nimport react from \'@vitejs/plugin-react\'\nexport default { plugins: [react({ babel: { plugins: [\'babel-plugin-react-compiler\'] } })] }\n```\nทำไม config นี้อาจ**ไม่**เปิด React Compiler บน @vitejs/plugin-react version ปัจจุบัน?',
+    options: [
+      'babel-plugin-react-compiler ไม่มีอยู่จริง',
+      'ใน @vitejs/plugin-react@6.0.0 ขึ้นไป inline babel option ถูกถอดออกแล้ว — option นี้จึงไม่ทำอะไรเลยเงียบ ๆ (หรือ type-check ไม่ผ่าน) แทนที่จะรัน compiler',
+      'Vite ไม่รองรับ Babel plugin เลย',
+      'syntax นี้ใช้ได้กับ webpack เท่านั้น ไม่เคยใช้กับ Vite',
+    ],
+    answer: 1,
+    explain: 'เอกสารติดตั้งของ react.dev บอกตรง ๆ: "In @vitejs/plugin-react@6.0.0, the inline Babel option was removed." version ปัจจุบันต้องใช้ @rolldown/plugin-babel + reactCompilerPreset แยกต่างหาก แทน inline babel option',
+  },
+  {
+    q: 'compilationMode: \'annotation\' ต่างจาก \'infer\' (default) อย่างไร?',
+    options: [
+      'เหมือนกันทุกอย่าง annotation เป็นแค่ alias ที่เลิกใช้แล้ว',
+      '\'annotation\' compile เฉพาะ function ที่ mark "use memo" ไว้ชัดเจน ส่วน \'infer\' compile อะไรก็ตามที่ดูเหมือน component หรือ hook โดยอัตโนมัติ',
+      '\'infer\' ใช้ได้เฉพาะ class component',
+      '\'annotation\' compile ทุก function ใน codebase รวมถึง helper ธรรมดา',
+    ],
+    answer: 1,
+    explain: '\'infer\' (default) จำ function ที่มีรูปร่างเป็น component/hook ได้อัตโนมัติ; \'annotation\' ไม่ compile อะไรเลยจนกว่าคุณจะ opt function นั้นเข้ามาด้วย directive "use memo" — จุดเริ่มต้นที่ปลอดภัยกว่าสำหรับ codebase ขนาดใหญ่',
   },
 ];
 

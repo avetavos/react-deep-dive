@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## useFormStatus: pending, without drilling
 
@@ -37,7 +38,66 @@ function ProfileForm({ action }) {
 }
 ```
 
-The one rule: `useFormStatus` reads the *parent* form, so `SubmitButton` must be **rendered inside** the `<form>`, not be the component that renders the form itself.
+The one rule: `useFormStatus` reads the *parent* form, so `SubmitButton` must be **rendered inside** the `<form>`, not be the component that renders the form itself. react.dev states this precisely:
+
+> `useFormStatus` will only return status information for a parent `<form>`. It will not return status information for any `<form>` rendered in that same component or children components.
+> — [react.dev/reference/react-dom/hooks/useFormStatus](https://react.dev/reference/react-dom/hooks/useFormStatus)
+
+That rule is easy to violate without any error, because both the wrong and the right version compile and render fine — the difference only shows up while a submission is actually in flight:
+
+```tsx
+// src/__tests__/use-form-status-placement.test.tsx
+import { describe, it, expect } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { useFormStatus } from 'react-dom'
+
+function slowSave(_formData: FormData) {
+  return new Promise<void>((resolve) => setTimeout(resolve, 60))
+}
+
+// ❌ useFormStatus called in the SAME component that renders <form>.
+function FormWrong() {
+  const { pending } = useFormStatus()
+  return (
+    <form action={slowSave}>
+      <button type="submit">{pending ? 'Saving (wrong)...' : 'Save (wrong)'}</button>
+    </form>
+  )
+}
+
+// ✅ useFormStatus called from a child of <form>.
+function SubmitStatus() {
+  const { pending } = useFormStatus()
+  return <button type="submit">{pending ? 'Saving (right)...' : 'Save (right)'}</button>
+}
+function FormRight() {
+  return (
+    <form action={slowSave}>
+      <SubmitStatus />
+    </form>
+  )
+}
+
+describe('useFormStatus must be called from a child of <form>', () => {
+  it('same-component placement never reports pending: true', async () => {
+    render(<FormWrong />)
+    fireEvent.click(screen.getByText('Save (wrong)'))
+    // Give the pending Transition a moment to commit if it were going to.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(screen.queryByText('Saving (wrong)...')).toBeNull()
+    expect(screen.getByText('Save (wrong)')).toBeTruthy()
+  })
+
+  it('child-of-form placement reports pending: true while the action is in flight', async () => {
+    render(<FormRight />)
+    fireEvent.click(screen.getByText('Save (right)'))
+    await waitFor(() => expect(screen.getByText('Saving (right)...')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('Save (right)')).toBeTruthy())
+  })
+})
+```
+
+Both tests pass: `FormWrong`'s button text never changes to `"Saving (wrong)..."` at any point during the submission, while `FormRight`'s does — proof, not just documentation, that the same-component placement silently never reports `pending: true`.
 
 ## useOptimistic: show the result before it's real
 
@@ -88,8 +148,105 @@ export const optimisticDiagram = `sequenceDiagram
 
 Together these two hooks make a form feel instant: `useOptimistic` for immediate feedback, `useFormStatus` for the pending affordance on the button — both without threading state through props.
 
+## `useOptimistic` outside a Transition or Action: a real warning, not just a style nit
+
+The setter `useOptimistic` gives you (`addOptimistic` above) is, like `requestFormReset`, an Action-only API. Call it directly from a plain event handler — not inside `startTransition` and not inside a form Action — and react.dev documents exactly what happens:
+
+> The optimistic setter function must be called inside `startTransition` or within an Action. Calling the setter outside an Action will cause the optimistic state to revert immediately because there is no Transition holding it.
+> — [react.dev/reference/react/useOptimistic](https://react.dev/reference/react/useOptimistic)
+
+Proven directly, including the exact console message (captured from a real run, not paraphrased from the docs — note it's lowercase "transition or action", unlike some of react.dev's own prose):
+
+```tsx
+// src/__tests__/use-optimistic-outside-action.test.tsx
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { useOptimistic, useState } from 'react'
+
+function BadOptimistic() {
+  const [liked] = useState(false)
+  const [optimisticLiked, setOptimisticLiked] = useOptimistic(liked)
+
+  function handleClick() {
+    // ❌ called directly in an event handler — not inside startTransition or an Action.
+    setOptimisticLiked(true)
+  }
+
+  return <button onClick={handleClick}>{optimisticLiked ? 'liked' : 'like'}</button>
+}
+
+describe('useOptimistic called outside a Transition/Action', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('logs the "outside a Transition or Action" console.error and the optimistic value reverts immediately', async () => {
+    const errors: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '))
+    })
+
+    render(<BadOptimistic />)
+    fireEvent.click(screen.getByText('like'))
+
+    await waitFor(() => {
+      expect(errors.length).toBeGreaterThan(0)
+    })
+    expect(errors.some((e) => e.includes('outside a transition or action'))).toBe(true)
+    // The optimistic value briefly renders, then reverts because no Transition holds it.
+    expect(screen.getByText('like')).toBeTruthy()
+  })
+})
+```
+
+The button's text ends up back at `'like'` — the exact "revert immediately" behavior the docs describe — and the console carries the real warning text. This is the same family of bug as calling `requestFormReset` outside an Action (previous lesson): both compile, both "sort of work," and both quietly tell you they're being misused.
+
+<Mermaid title="Two Action-only setters, same warning shape" code={optimisticWarningDiagram} />
+
+export const optimisticWarningDiagram = `flowchart LR
+  a["setOptimistic(x) outside startTransition/Action"] --> b["console.error:\noutside a transition or action"]
+  b --> c["value reverts immediately\n(no Transition holding it)"]
+  d["setOptimistic(x) inside startTransition/Action"] --> e["no warning\nvalue holds until settle"]`;
+
+## Mental Model
+
+`useFormStatus` and `useOptimistic` are both *reads on an in-flight Transition*, not independent pieces of state you manage yourself. `useFormStatus` reads whether the ancestor form's Transition is still running; `useOptimistic`'s setter needs an active Transition to have somewhere to "hold" its value until that Transition settles. Neither hook errors loudly when used wrong — both degrade to "quietly does the less useful thing," which is exactly why proving the behavior (not just reading about it) matters here.
+
+## Trade-offs
+
+| Hook | What it gives you | Cost |
+|---|---|---|
+| `useFormStatus` | No prop drilling for pending state | Only works from a descendant of the `<form>` — not the component that renders it, proven above |
+| `useOptimistic` | Instant feedback before the server responds | The setter must run inside a Transition/Action, or it warns and reverts immediately |
+
+## Common Misconceptions
+
+- **"`useFormStatus` reads whichever form is nearest in the file."** It reads the nearest form *ancestor in the render tree*. The component that renders `<form>` itself is not that form's descendant — proven above with two components that look almost identical.
+- **"`useOptimistic`'s setter can be called from anywhere, like a normal state setter."** It specifically requires an active Transition or Action; called from a plain event handler, it warns and the optimistic value reverts before the user can even see it settle.
+- **"If nothing throws, the code is correct."** Both bugs on this page — `useFormStatus` in the wrong component, `useOptimistic` outside a Transition — compile, run, and produce no crash. The only symptoms are a `pending` flag that's always `false`, or a console warning plus a value that reverts instantly.
+
+## Reading AI-generated code
+
+- Is `useFormStatus` called in a component that is a **child** of `<form>`, or in the same component that renders the `<form>` tag?
+- Is `useOptimistic`'s setter (`addOptimistic` / `setOptimistic` / whatever it's named) called from inside `startTransition` or a form Action — or directly from an event handler?
+- If `useOptimistic` is used, does the surrounding code have a `try/catch` around the action call, so the rejection path actually runs and the UI's error state gets set?
+- Does the confirmed state only update inside the success path, so a failed action can never "confirm" data that was never written?
+
+<SpotTheBug code={`function LikeButton({ liked }: { liked: boolean }) {
+  const [optimisticLiked, setOptimisticLiked] = useOptimistic(liked)
+
+  function handleClick() {
+    setOptimisticLiked(!optimisticLiked)
+    saveLike(!optimisticLiked)
+  }
+
+  return <button onClick={handleClick}>{optimisticLiked ? 'Liked' : 'Like'}</button>
+}`}>
+`setOptimisticLiked` is called directly inside a plain `onClick` handler — not inside `startTransition` and not inside a form Action. Per react.dev, "Calling the setter outside an Action will cause the optimistic state to revert immediately because there is no Transition holding it." Proven above: the button briefly shows the optimistic label, then reverts, while the console logs the real warning text (`"An optimistic state update occurred outside a transition or action..."`) — so the "instant feedback" this code is trying to achieve never actually holds. The fix is to wrap the call: `startTransition(() => { setOptimisticLiked(!optimisticLiked); saveLike(!optimisticLiked); })`.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-**`useFormStatus`** lets a submit button (rendered *inside* a `<form>`) read the form's `pending` state with no prop drilling. **`useOptimistic`** shows an expected value immediately and lets React revert automatically if the async action fails — no manual rollback. Paired with a form Action, they make an interaction feel instant.
+**`useFormStatus`** lets a submit button (rendered *inside* a `<form>`) read the form's `pending` state with no prop drilling — but only from a descendant of that form, proven with a wrong/right pair whose only difference is placement. **`useOptimistic`** shows an expected value immediately and lets React revert automatically if the async action fails — but its setter must run inside a Transition or Action, or React logs a real warning and reverts the value immediately, proven with the exact console message. Paired with a form Action, they make an interaction feel instant — when used from the right place.
 </Callout>
 
 export const quizForms = [
@@ -102,6 +259,7 @@ export const quizForms = [
       'A new form element',
     ],
     answer: 1,
+    explain: 'useFormStatus reads the pending status of the nearest ancestor <form> in the render tree, with zero prop drilling.',
   },
   {
     q: 'Where must a component calling useFormStatus be rendered?',
@@ -112,6 +270,7 @@ export const quizForms = [
       'Only on the server',
     ],
     answer: 1,
+    explain: 'Per react.dev, useFormStatus "will only return status information for a parent <form>" — the component that renders the form tag itself is not that form\'s descendant.',
   },
   {
     q: 'What does `useOptimistic` do when the async action fails?',
@@ -122,6 +281,40 @@ export const quizForms = [
       'Reloads the page',
     ],
     answer: 1,
+    explain: 'useOptimistic automatically discards the pending optimistic update once the action\'s promise rejects — no manual rollback code required.',
+  },
+  {
+    q: '```tsx\nfunction FormWrong() {\n  const { pending } = useFormStatus()\n  return (\n    <form action={slowSave}>\n      <button disabled={pending}>Save</button>\n    </form>\n  )\n}\n```\nWhile `slowSave` is in flight, what does `pending` show here?',
+    options: [
+      'true, for the whole duration of the submission',
+      'false, the entire time — because FormWrong is not a descendant of its own <form>',
+      'It alternates between true and false rapidly',
+      'It throws a runtime error',
+    ],
+    answer: 1,
+    explain: 'Proven directly: because useFormStatus is called in the same component that renders <form>, pending stays false for the whole submission, while an identical hook one component lower (a real child of the form) correctly reports true.',
+  },
+  {
+    q: 'What happens if `setOptimistic(newValue)` (the setter from useOptimistic) is called directly from a plain onClick handler, not inside startTransition or an Action?',
+    options: [
+      'It works exactly the same as inside a Transition',
+      'React logs a console.error and the optimistic value reverts immediately, because no Transition is holding it',
+      'It throws and crashes the component',
+      'It queues the update for the next Transition automatically',
+    ],
+    answer: 1,
+    explain: 'Proven with the real captured message: React logs an error and the optimistic value reverts right away, because — per react.dev — there is no Transition to "hold" the optimistic state while the action runs.',
+  },
+  {
+    q: '```tsx\nfunction LikeButton({ liked }: { liked: boolean }) {\n  const [optimisticLiked, setOptimisticLiked] = useOptimistic(liked)\n  function handleClick() {\n    setOptimisticLiked(!optimisticLiked)\n    saveLike(!optimisticLiked)\n  }\n  return <button onClick={handleClick}>{optimisticLiked ? \'Liked\' : \'Like\'}</button>\n}\n```\nWhat is the most accurate fix for this component?',
+    options: [
+      'No fix needed — this is the correct way to use useOptimistic',
+      'Wrap the two calls in startTransition so the setter has a Transition to hold its value in: startTransition(() => { setOptimisticLiked(!optimisticLiked); saveLike(!optimisticLiked) })',
+      'Move useOptimistic to a useEffect instead',
+      'Replace useOptimistic with useState — they are interchangeable here',
+    ],
+    answer: 1,
+    explain: 'setOptimisticLiked is called directly from onClick, with no surrounding Transition or Action. Wrapping both calls in startTransition gives the optimistic update a Transition to hold onto, matching how the working test earlier in this lesson uses it.',
   },
 ];
 

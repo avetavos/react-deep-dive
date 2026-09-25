@@ -1,0 +1,337 @@
+---
+title: 'Activity & View Transitions'
+description: 'Activity สำหรับซ่อน subtree โดยยังเก็บ state ไว้, ViewTransition กับ addTransitionType สำหรับ animate การอัปเดต (ship แล้วใน React 19.3), และ cacheSignal สำหรับเคลียร์ cache ฝั่ง server — อะไร ship แล้ว เอกสารตรงไหนยังตามไม่ทัน และอะไรพิสูจน์ได้จริงวันนี้'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## `<Activity>`: ซ่อน subtree โดยไม่เสีย state (React 19.2)
+
+ก่อน React 19.2 "ซ่อน tab นี้แต่เก็บ state ไว้" มีตัวเลือกที่ตรงไปตรงมาแค่แบบเดียว: mount ทิ้งไว้แล้วซ่อนด้วย CSS (state รอด แต่ Effect ทุกตัว — subscription, timer, `useEffectEvent` handler — ยังรันต่อไปทั้งที่ไม่มีใครมองเห็น) หรือ unmount ไปเลย (Effect cleanup ถูกต้อง แต่ state ทุกบิต — ตำแหน่ง scroll, input ที่ยังไม่ได้ save, ตัวนับจาก `useState` — หายหมด)
+
+**`<Activity>`** คือตัวเลือกที่สาม ห่อ subtree ด้วย `<Activity mode="visible">` หรือ `<Activity mode="hidden">`:
+
+```tsx
+// src/components/ActivityDemo.tsx
+import { Activity, useState } from 'react'
+
+function Panel() {
+  const [count, setCount] = useState(0)
+  return (
+    <div>
+      <p>{count}</p>
+      <button onClick={() => setCount((c) => c + 1)}>increment</button>
+    </div>
+  )
+}
+
+export function Tabs({ activeTab }: { activeTab: 'a' | 'b' }) {
+  return (
+    <>
+      <Activity mode={activeTab === 'a' ? 'visible' : 'hidden'}>
+        <Panel />
+      </Activity>
+    </>
+  )
+}
+```
+
+เมื่อ `mode="hidden"` React จะซ่อน subtree ด้วย `display: none` — และตามเอกสาร **"all its children's Effects are cleaned up. Conceptually, the children are unmounted, but React saves their state for later."** นั่นคือ feature ทั้งหมดในประโยคเดียว: Effect ถูก teardown เหมือน unmount จริง (subscription ปิด, timer เคลียร์) แต่ state ไม่ถูก reset เพราะ fiber tree เองยังถูกเก็บไว้ ไม่ได้ถูกทิ้ง
+
+พิสูจน์ตรง ๆ — Effect ที่ log `mount`/`cleanup` สลับระหว่าง `visible` กับ `hidden` หลัง increment state ไปสองครั้ง
+
+```tsx
+// src/__tests__/activity.test.tsx
+import { Activity, useEffect, useState } from 'react'
+import { render, screen, act } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, it, expect } from 'vitest'
+
+const log: string[] = []
+
+function Panel() {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    log.push('effect: mount')
+    return () => { log.push('effect: cleanup') }
+  }, [])
+  return (
+    <div>
+      <p data-testid="count">{count}</p>
+      <button onClick={() => setCount((c) => c + 1)}>increment</button>
+    </div>
+  )
+}
+
+function App({ mode }: { mode: 'visible' | 'hidden' }) {
+  return (
+    <Activity mode={mode}>
+      <Panel />
+    </Activity>
+  )
+}
+
+describe('<Activity mode="hidden">', () => {
+  it('tears down Effects when hidden and re-runs them when shown again, but keeps state', async () => {
+    log.length = 0
+    const user = userEvent.setup()
+    const { rerender } = render(<App mode="visible" />)
+    expect(log).toEqual(['effect: mount'])
+
+    await user.click(screen.getByText('increment'))
+    await user.click(screen.getByText('increment'))
+    expect(screen.getByTestId('count').textContent).toBe('2')
+
+    // Hide it: React tears down the Effect but does NOT unmount the component.
+    act(() => {
+      rerender(<App mode="hidden" />)
+    })
+    expect(log).toEqual(['effect: mount', 'effect: cleanup'])
+
+    // Show it again: the Effect re-runs, and `count` is still 2 — state survived
+    // being hidden, unlike a real unmount which would have reset it to 0.
+    act(() => {
+      rerender(<App mode="visible" />)
+    })
+    expect(log).toEqual(['effect: mount', 'effect: cleanup', 'effect: mount'])
+    expect(screen.getByTestId('count').textContent).toBe('2')
+  })
+})
+```
+
+รันจริงกับ React 19.3.0 ใน jsdom + Testing Library
+
+```text
+✓ src/__tests__/activity.test.tsx > <Activity mode="hidden"> > tears down Effects
+  when hidden and re-runs them when shown again, but keeps state 99ms
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+`count` ยังเป็น `2` หลังผ่าน hide/show ไปรอบหนึ่ง และ Effect log แสดง `mount` แล้ว `cleanup` (ตอน hide) แล้ว `mount` อีกครั้ง (ตอน show) — ไม่เคยเป็น `mount` ใหม่แบบ state reset เลย การรวมกันแบบนั้น — Effect ทำตัวเหมือน unmount, state ทำตัวเหมือนไม่เคยหายไปไหน — คือสิ่งที่ `<Activity>` ให้เหนือกว่าทั้งการซ่อนด้วย CSS ล้วน ๆ และ conditional rendering จริง React ยัง render การ mount ครั้งแรก (และ update ใด ๆ ข้างใน) ของ Activity ที่ hidden ด้วย priority ต่ำกว่า content ที่ visible ด้วย ซึ่งเป็นเหตุผลที่เอกสารอธิบายว่าเหมาะกับการ "pre-render" tab ที่คาดว่า user จะสลับไปต่อ
+
+## `<ViewTransition>` กับ `addTransitionType`: ship แล้วใน 19.3 แต่เอกสาร reference ยังตามไม่ทัน
+
+`<ViewTransition>` ห่อ subtree เพื่อว่าเมื่อมัน enter, exit หรือ update ระหว่าง Transition React จะสั่ง View Transition API ของ browser ให้ animate การเปลี่ยนแปลงนั้น; `addTransitionType(type)` แปะชื่อ (เช่น `"submit-comment"`) ให้ Transition ที่กำลังรันอยู่ เพื่อให้ prop `enter`/`exit`/`update` ของ `<ViewTransition>` ตอบสนองต่างกันได้ตามว่า *transition ไหน* ที่ทำให้เกิด update นี้
+
+สถานะตรงนี้ต้องอ่านสองแหล่งประกอบกัน เพราะแรกเห็นดูเหมือนขัดกัน blog ประกาศ release ของ React เองพูดชัดเจนไม่กำกวม:
+
+> React 19.3 adds new features like View Transitions, Fragment Refs, browser(), Trusted Types, and more.
+> — [React 19.3](https://react.dev/blog), 9 กันยายน 2026
+
+นั่นคือ blog post ของ release ที่มีเลขเวอร์ชันแบบ stable — ไม่ใช่ "React Labs" preview แบบทดลอง — และ `react@19.3.0` ก็คือ version ภายใต้ npm dist-tag `latest` ที่คอร์สนี้ track อยู่พอดี ทั้งสองชื่อถูก export จาก build นั้นโดยไม่มี experimental gate เลย: `react.Activity`, `react.ViewTransition` และ `react.addTransitionType` มีอยู่จริงและใช้งานได้ใน install แบบ stable ธรรมดา
+
+แต่ในขณะเดียวกัน หน้า reference `<ViewTransition>` ของ react.dev เอง ยัง pin ตัวอย่างโค้ดสด ๆ ของมันไว้กับ version string แบบ `19.3.0-canary-f1f7ed2a-20260904` และไม่มี note "stable since" เลย อ่านสองอย่างนี้ประกอบกัน ภาพที่ตรงที่สุดคือ: **feature นี้ ship จริงใน release 19.3 ที่ stable แล้ว แต่เอกสาร reference ของมันยังตามไม่ทันความจริงข้อนั้น** — เป็นช่องว่างจริงระหว่าง "release แล้ว" กับ "เอกสารบันทึกไว้ว่า release แล้วครบถ้วน" ไม่ใช่สัญญาณว่าตัว API เองยังทดลองอยู่ ให้ถือว่า *feature* ใช้ได้แล้ว ส่วน *รายละเอียดปลีกย่อย* (พฤติกรรม prop ที่ละเอียด, edge case) ยังอยู่ระหว่างเซ็ตตัว — เช็คอะไรที่เป็น load-bearing กับสถานะปัจจุบันของ react.dev ก่อนใช้จริงเสมอ
+
+สิ่งที่พิสูจน์ได้โดยไม่ต้องมี View Transition API ของ browser (jsdom ไม่มี — ไม่มี `document.startViewTransition`)
+
+```tsx
+// src/__tests__/view-transition-and-transition-type.test.tsx
+import { ViewTransition, addTransitionType, startTransition } from 'react'
+import { render, screen, act } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+
+// jsdom has no native View Transition API (no document.startViewTransition),
+// so React should render children as plain DOM with no animation, not throw.
+function Card({ label }: { label: string }) {
+  return (
+    <ViewTransition>
+      <p>{label}</p>
+    </ViewTransition>
+  )
+}
+
+describe('<ViewTransition> in an environment with no View Transition API (jsdom)', () => {
+  it('renders its children without throwing', () => {
+    render(<Card label="one" />)
+    expect(screen.getByText('one')).toBeTruthy()
+  })
+})
+
+describe('addTransitionType', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('warns when called outside startTransition', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    act(() => {
+      addTransitionType('outside-demo')
+    })
+    expect(errorSpy).toHaveBeenCalledWith(
+      'addTransitionType can only be called inside a `startTransition()` callback. It must be associated with a specific Transition.',
+    )
+  })
+
+  it('inside startTransition: no warning', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    act(() => {
+      startTransition(() => addTransitionType('inside-demo'))
+    })
+    expect(errorSpy).not.toHaveBeenCalled()
+  })
+})
+```
+
+```text
+✓ <ViewTransition> in an environment with no View Transition API (jsdom) >
+  renders its children without throwing 29ms
+✓ addTransitionType > warns when called outside startTransition 1ms
+✓ addTransitionType > inside startTransition: no warning 0ms
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+ข้อเท็จจริงที่พิสูจน์ได้สองข้อ คือ graceful degrade ใน environment ที่ไม่รองรับ และ bail-out rule จริงหนึ่งข้อ: `<ViewTransition>` ไม่เคย throw แค่เพราะ browser (หรือ jsdom) ไม่มี View Transition API — มัน render children ธรรมดาโดยไม่มี animation เท่านั้น ส่วน `addTransitionType` อ่านตรง ๆ จาก source ของ react-dom **"can only be called inside a `startTransition()` callback"** — เรียกจาก event handler ธรรมดาแล้ว React จะ log error ข้อความนี้เป๊ะ ๆ ลง console (มันยังใส่ type ให้อยู่ดี โดยห่อ call ของคุณด้วย `startTransition` ของมันเองแบบเงียบ ๆ แต่มัน warn ว่าคุณทำผิดวิธี)
+
+## `cacheSignal`: server-only เท่านั้น และคืน `null` ฝั่ง client (React 19.2)
+
+`cache()` (สอนในโมดูล Concurrent) จำผลลัพธ์ของ function ไว้ตลอดอายุของการ render บน server ครั้งเดียว **"cacheSignal allows you to know when the `cache()` lifetime is over"** — มันให้ `AbortSignal` ที่ fire เมื่อ React ใช้ render นั้นเสร็จแล้ว เพื่อให้ function fetch data ที่ถูก cache ไว้ยกเลิก request ที่กำลังทำอยู่ได้ แทนที่จะทำงานต่อไปโดยไม่มีความหมายหลังจาก response ถูกส่งไปแล้ว
+
+ข้อจำกัดที่บอกตรง ๆ **"`cacheSignal` is currently for use in React Server Components only. In Client Components, it will always return `null`."** probe ของคอร์สนี้เป็น Vite + React DOM ธรรมดา — ไม่มี server render ไม่มี RSC runtime จึงไม่มีอะไรให้เรียก `cacheSignal` แล้วมีความหมายจากตรงนี้ นี่ไม่ใช่ช่องว่างของบทนี้ แต่เป็น boundary เดียวกับที่บท Server Components วาดไว้แล้ว: API ที่เป็น RSC-only ต้องใช้ framework ที่รองรับ RSC ถึงจะมีความหมาย
+
+```tsx
+// @expect-error requires an RSC-capable framework (Next.js App Router) — src/server-demo/reports.ts, see link below
+'use server'
+
+import { cache, cacheSignal } from 'react'
+
+export const getReport = cache(async (id: string) => {
+  const signal = cacheSignal() // real Signal on the server during a render; null on the client
+  const response = await fetch(`https://api.example.com/reports/${id}`, { signal: signal as AbortSignal | undefined })
+  return response.json()
+})
+```
+
+ข้อสังเกตเรื่องความแม่นยำอีกจุดหนึ่งในระหว่างนี้: `@types/react` กำหนด type ของ return value จาก `cacheSignal()` เป็น `null | CacheSignal` โดย `CacheSignal` เป็น interface ว่างของตัวเอง — ไม่ใช่ `AbortSignal` ตรง ๆ ทั้งที่เอกสารอธิบายว่ามันเป็น `AbortSignal` และพฤติกรรมจริงตอน runtime ก็เป็นแบบนั้น ส่งมันตรง ๆ ให้ option `signal` ของ `fetch` type-check ไม่ผ่านถ้าไม่ cast (`signal as AbortSignal | undefined` แบบข้างบน) — ช่องว่างเล็ก ๆ แต่จริงระหว่างเอกสารที่เป็น prose กับ type ที่ ship จริง
+
+สำหรับ framework wiring ที่รัน Server Components จริงและให้ render จริงกับ `cacheSignal` ไว้เกาะ ดูที่ [Server Components ในคอร์ส Next.js](/nextjs/th/foundations/the-request-lifecycle/)
+
+<Mermaid title="สามวิธีทิ้ง subtree ไว้ข้างหลัง" code={activityDiagram} />
+
+export const activityDiagram = `flowchart LR
+  a["Unmount"] --> a1["Effects clean up"]
+  a --> a2["State is lost"]
+  b["CSS display:none"] --> b1["Effects keep running"]
+  b --> b2["State survives"]
+  c["Activity mode=hidden"] --> c1["Effects clean up"]
+  c --> c2["State survives"]`;
+
+## Mental Model
+
+`<Activity>` ตอบคำถามที่ React ส่วนอื่นตอบไม่ได้: "ซ่อนอยู่ แต่ยังเป็นของฉัน" — fiber ที่ยังอยู่ในตำแหน่งเดิมพร้อม state เดิมใน tree ในขณะที่จากมุมมองของระบบ Effect แล้วมันทำตัวเหมือน unmount ไปแล้วเป๊ะ ๆ `<ViewTransition>` กับ `addTransitionType` เป็นเรื่องแยก: มันให้ Transition สั่ง animation engine ของ browser เองได้ พร้อมแปะป้ายว่า *ทำไม* update นี้ถึงเกิดขึ้น — ship แล้วตั้งแต่ React 19.3 ทั้งที่เอกสาร reference ยังตามไม่ทันความจริงข้อนั้น `cacheSignal` ปิด loop ของ `cache()` จากอีกฝั่งของ request — มันไม่เกี่ยวกับว่าอะไรถูกแสดง แต่เกี่ยวกับว่า server หยุดทำงานให้ render ที่ไม่มีใครรออีกต่อไปได้เมื่อไร
+
+## ข้อแลกเปลี่ยน
+
+| API | ได้อะไร | ต้นทุน |
+|---|---|---|
+| `<Activity mode="hidden">` | state รอดจากการถูกซ่อน; Effect ยัง teardown ถูกต้อง | subtree ที่ hidden ยังอยู่ใน DOM (`display: none`) ไม่ถูกลบออก — คือ memory กับ DOM node ที่คุณเลือกจะเก็บไว้ |
+| `<ViewTransition>` / `addTransitionType` | animation ของ browser จริง ๆ ขับเคลื่อนด้วย state update ธรรมดา ship แล้วตั้งแต่ React 19.3 | ตัวอย่าง reference ของ react.dev เองยัง track canary build อยู่ — feature ออกแล้ว แต่รายละเอียดปลีกย่อยยังไม่ถูกบันทึกไว้ว่า stable ครบ |
+| `cacheSignal` | ให้ server fetch ที่ถูก cache ไว้ยกเลิกตัวเองได้เมื่อ render เสร็จ | Server Components เท่านั้น — เป็น `null` เสมอฝั่ง client จึงมองไม่เห็นจาก Vite probe ของคอร์สนี้ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`<Activity mode="hidden">` ก็แค่ `display: none` ที่มีขั้นตอนเพิ่ม"** การซ่อนด้วย CSS ล้วน ๆ ไม่แตะ Effect เลย — subscription กับ timer ยังรันต่อไปทั้งที่ user มองไม่เห็นอะไรเลย `<Activity>` เพิ่มการ teardown Effect เข้ามาด้วย ซึ่งเป็นเหตุผลทั้งหมดที่มันมีอยู่แทนที่จะเป็นแค่ `<div style={{ display: hidden ? 'none' : 'block' }}>` ธรรมดา
+- **"ตัวอย่างที่ pin canary ของ react.dev แปลว่า feature นี้ยังไม่ออกจริง"** blog ประกาศ release ของ React 19.3 ระบุ View Transitions ไว้ตรง ๆ ว่าเป็น feature ที่ ship ใน 19.3 และ API ก็ใช้งานได้โดยไม่มี experimental gate ใน build `react@19.3.0` ที่ stable ที่คอร์สนี้ตรวจสอบแล้ว version string แบบ canary เป็นแค่เอกสารที่ตามไม่ทัน ไม่ใช่สัญญาณว่าตัว feature เองยังทดลองอยู่ — อ่าน release announcement กับหน้า reference ประกอบกัน อย่าอ่านแค่หน้า reference อย่างเดียว
+- **"`cacheSignal` คืน `null` คือ bug ในการ setup ของฉัน"** เป็นพฤติกรรมที่ระบุไว้ในเอกสาร: เรียกจาก Client Component (หรืออย่างในที่นี้ จาก Vite app ธรรมดาที่ไม่มี RSC runtime เลย) แล้ว `null` คือคำตอบที่ถูกต้องตามคาด — ไม่มี server cache lifetime อะไรให้มันอธิบาย
+
+## อ่านโค้ดที่ AI เขียน
+
+- โค้ดที่ใช้ `<ViewTransition>` หรือ `addTransitionType` อ้างแค่ตัวอย่างที่ pin canary ของหน้า reference เป็นหลักฐานว่า feature "ยังไม่ออกจริง" ไหม เช็ค release blog จริง (React 19.3) ด้วย — feature ship แล้ว มีแค่บางส่วนของเอกสาร reference ที่ยังตามไม่ทัน
+- `addTransitionType` ถูกเรียกจากข้างใน `startTransition` (หรือ Action) หรือจาก event handler ธรรมดา แบบหลังยัง "ทำงาน" ได้ (มัน self-wrap ให้) แต่ log warning — โค้ดที่ AI สร้างที่ไม่พูดถึง warning นี้เลยในคำอธิบายของมันเองถือว่าไม่ครบ
+- `cacheSignal` ถูกใช้ที่ไหนนอกเหนือจาก Server Function / Server Component ไหม ถ้าโค้ดที่ AI สร้างเรียกมันในไฟล์ `'use client'` แล้วคาดว่าจะได้ signal จริงกลับมา นั่นคือ bug: พฤติกรรมตามเอกสารคือ `null` ฝั่ง client เสมอ
+- component ที่ถูกซ่อนด้วย `<Activity>` ถูกคาดหวังว่าจะ reset state เหมือน unmount ด้วยไหม ถ้าโค้ดที่สร้างพึ่งพาสิ่งนั้น — เช่น สมมติว่า form ที่ซ่อนอยู่จะ clear ตัวเอง — นั่นกำลังอธิบาย primitive ผิดตัว นั่นคืองานของ conditional rendering (หรือ `key` reset) ไม่ใช่ `<Activity>`
+
+<SpotTheBug code={`import { Activity, useState } from 'react'
+
+function Form() {
+  const [draft, setDraft] = useState('')
+  return (
+    <input value={draft} onChange={(e) => setDraft(e.target.value)} />
+  )
+}
+
+export function Wizard({ step }: { step: 'draft' | 'review' }) {
+  return (
+    <>
+      {/* Comment claims: "hiding the draft step clears it for the next visit" */}
+      <Activity mode={step === 'draft' ? 'visible' : 'hidden'}>
+        <Form />
+      </Activity>
+    </>
+  )
+}`}>
+คำกล่าวอ้างใน comment กลับตาลปัตรสำหรับ `<Activity>`: การซ่อน subtree ด้วย `mode="hidden"` ถูกออกแบบมาเพื่อ **เก็บรักษา** state ไว้ ไม่ใช่ clear มัน พิสูจน์แล้วข้างบน — ค่า `count` state รอดจากการวนรอบ hide/show เต็มรอบโดยไม่เปลี่ยน ในขณะที่ Effect log แสดง `cleanup` จริงแล้วตามด้วย `mount` ใหม่ ดังนั้นการสลับ `step` ออกจาก `"draft"` แล้วกลับมา จะโชว์ค่า `draft` ที่ user พิมพ์ค้างไว้ครึ่งหนึ่งเหมือนเดิมเป๊ะ ไม่ใช่ input ว่างเปล่า ถ้าเจตนาจริง ๆ คือ "clear draft เมื่อออกจาก step นี้" `<Activity>` เป็นเครื่องมือที่ผิด — การ conditional render `<Form />` (ให้มัน unmount จริง) หรือ reset ด้วย `key` ที่เปลี่ยนไป ทั้งสองแบบ clear state ได้จริง ส่วน `<Activity>` จะไม่มีวัน clear ให้ตามการออกแบบ
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**`<Activity mode="hidden">`** (19.2) ซ่อน subtree ด้วย `display: none` และ teardown Effect เหมือน unmount จริง ในขณะที่ยังเก็บ state ไว้ — พิสูจน์แล้วด้วย Effect log และตัวนับที่รอดข้ามรอบ hide/show **`<ViewTransition>`** กับ **`addTransitionType`** เป็น export ที่จริงและใช้งานได้ ship แล้วใน release 19.3 (ตาม blog ประกาศ release ของ React เอง) ที่สั่ง View Transition API ของ browser จาก Transition ธรรมดา — แต่ตัวอย่าง reference ของ react.dev เองยัง pin canary build อยู่ ให้เช็คพฤติกรรมละเอียดกับเอกสารปัจจุบันเสมอ แทนที่จะสมมติว่าเอกสารครอบคลุมครบแล้ว **`cacheSignal`** (19.2) บอก server function ที่ห่อด้วย `cache()` ว่า render lifetime ของมันจบแล้วเมื่อไร และเป็น `null` นอก React Server Components เสมอ — รวมถึงใน Vite probe ของคอร์สนี้ด้วย
+</Callout>
+
+export const quizActivity = [
+  {
+    q: 'เมื่อ subtree ของ `<Activity mode="hidden">` ถูกซ่อน เกิดอะไรขึ้นกับ Effect และ state ของมัน?',
+    options: [
+      'ทั้ง Effect และ state ถูก clear หมด เหมือน unmount',
+      'Effect ถูก cleanup (เหมือน unmount) แต่ state ถูกเก็บไว้สำหรับตอนที่ถูกโชว์อีกครั้ง',
+      'ทั้ง Effect และ state ไม่เปลี่ยนอะไรเลย — ทำตัวเหมือน CSS display:none เป๊ะ',
+      'Effect ยังรันต่อในพื้นหลัง แต่ state ถูก clear',
+    ],
+    answer: 1,
+    explain: 'ตามเอกสาร การซ่อน Activity จะ cleanup Effect ของ children — เหมือน unmount ในเชิงแนวคิด — แต่ React เก็บ state ของมันไว้ให้ จึงกลับมาไม่เปลี่ยนแปลงเมื่อถูกโชว์อีกครั้ง',
+  },
+  {
+    q: '```tsx\nfunction Panel() {\n  useEffect(() => {\n    log("mount")\n    return () => log("cleanup")\n  }, [])\n  return <p>panel</p>\n}\n```\nถ้าห่อด้วย `<Activity mode="hidden">` แล้วสลับกลับเป็น `mode="visible"` effect log จะแสดงอะไร?',
+    options: [
+      '["mount"] เท่านั้น — effect ไม่รันซ้ำ',
+      '["mount", "cleanup", "mount"] — cleanup รันตอน hide แล้ว effect รันซ้ำตอน show',
+      '["mount", "mount"] — cleanup ไม่รันเลยสำหรับ Activity ที่ hidden',
+      'error เพราะ Activity ไม่รองรับ useEffect',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ตรง ๆ ด้วย Effect log จริงใน vitest + RTL test: การซ่อนจะรัน cleanup function และการโชว์อีกครั้งจะรัน effect body ซ้ำ — ในขณะที่ state ที่นิยามด้วย useState ใน component เดียวกันไม่ถูกแตะเลย',
+  },
+  {
+    q: 'blog ประกาศ release ของ React 19.3 บอกว่า "React 19.3 adds new features like View Transitions... and more" ทั้งที่หน้า reference `<ViewTransition>` ของ react.dev เอง ยัง pin ตัวอย่างสด ๆ ไว้กับ version string แบบ canary การอ่านสองข้อเท็จจริงนี้ประกอบกันแบบไหนถูกต้องที่สุด?',
+    options: [
+      'หน้า reference ถูก ส่วน blog ผิด — View Transitions ยังไม่มีจริงใน 19.3',
+      'feature นี้ ship จริงใน release 19.3 ที่ stable แล้ว เอกสาร reference แค่ยังตามไม่ทันจนตัวอย่างยังชี้ไปที่ version ที่ไม่ stable',
+      'ทั้งสองแหล่งผิดหมด และ View Transitions ไม่มีอยู่จริง',
+      'blog พูดถึงแค่ Server Components เท่านั้น ไม่เกี่ยวกับ View Transitions',
+    ],
+    answer: 1,
+    explain: 'blog post ของ release ที่มีเลขเวอร์ชันคือแหล่งประกาศ feature ที่ ship แล้วที่น่าเชื่อถือที่สุด ส่วน version string แบบ canary ในตัวอย่าง reference เป็นแค่เอกสารที่ตามไม่ทัน ไม่ใช่หลักฐานว่าตัว feature เองยังไม่ ship อ่านแค่แหล่งใดแหล่งหนึ่งเดียวจะได้ภาพที่ไม่ครบ (หรือผิด)',
+  },
+  {
+    q: '```ts\nfunction onClick() {\n  addTransitionType("save-clicked")\n}\n```\nถ้าเรียกตรง ๆ จาก onClick handler ธรรมดาแบบนี้ (ไม่อยู่ใน startTransition) จะเกิดอะไรขึ้น?',
+    options: [
+      'มัน throw error และทำให้ component พัง',
+      'มันไม่ทำอะไรเลยเงียบ ๆ',
+      'มัน log console.error ว่าต้องถูกเรียกข้างใน startTransition แต่ยังใส่ type ให้โดย wrap ตัวเองเป็น startTransition',
+      'มันแปลง component ทั้งตัวเป็น Server Component อัตโนมัติ',
+    ],
+    answer: 2,
+    explain: 'ยืนยันตรง ๆ จาก source ของ react-dom: addTransitionType เช็คว่ามี Transition ที่ active อยู่ไหม ถ้าไม่มี มัน log warning ข้อความนี้เป๊ะ ๆ แล้ว fallback ไปเรียก startTransition(addTransitionType.bind(null, type)) เอง',
+  },
+  {
+    q: '`cacheSignal()` คืนค่าอะไรเมื่อถูกเรียกจาก Client Component?',
+    options: [
+      'AbortSignal จริงที่ผูกกับตอนปิด tab ของ browser',
+      'null เสมอ — cacheSignal ถูกระบุไว้ว่าใช้ได้เฉพาะ React Server Components',
+      'undefined พร้อม TypeError ที่ throw ตอนใช้ครั้งถัดไป',
+      'ค่าเดียวกับที่มันจะคืนบน server',
+    ],
+    answer: 1,
+    explain: 'react.dev ระบุว่า cacheSignal ใช้ได้เฉพาะ React Server Components เท่านั้น และ "In Client Components, it will always return null" ซึ่งเป็นเหตุผลเดียวกับที่ probe ของคอร์สนี้ (Vite ล้วน) แสดง signal จริงให้ดูไม่ได้',
+  },
+];
+
+<Quiz client:visible id="react-19/activity-and-view-transitions" questions={quizActivity} />
+
+<ProgressTracker client:visible id="react-19/activity-and-view-transitions" />
