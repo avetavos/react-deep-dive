@@ -1,6 +1,6 @@
 ---
 title: 'Testing'
-description: 'test React แบบที่ user ใช้จริง — React Testing Library บน Vitest, query ด้วย role, userEvent และทำไมต้อง test behavior ไม่ใช่ implementation detail'
+description: 'test React แบบที่ user ใช้จริง — React Testing Library บน Vitest ของจริง: query, userEvent, warning "not wrapped in act" อธิบายและจับภาพจริง, async transition กับ Suspense, mock fetch, renderHook และ harness ของคอร์สนี้เองเป็นตัวอย่าง compile-every-snippet'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## test behavior ไม่ใช่ implementation
 
@@ -21,6 +22,19 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 ## test widget แบบ end to end
 
 ```tsx
+// src/__tests__/Counter.tsx
+import { useState } from 'react';
+
+export default function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <button onClick={() => setCount((c) => c + 1)}>count: {count}</button>
+  );
+}
+```
+
+```tsx
+// src/__tests__/counter.test.tsx
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { expect, test } from 'vitest';
@@ -40,11 +54,303 @@ test('increments when the button is clicked', async () => {
 });
 ```
 
-นิสัยสำคัญ:
+นี่คือ test จริงที่ harness รัน — `npm run verify -- --test tooling-and-production/testing` compile และรัน test นี้บน probe จริงของ Vite + React 19.3 + Vitest + RTL นิสัยสำคัญ:
 
 - **query ด้วย role/label/text** ตามลำดับนี้ — `getByRole` ดีที่สุดเพราะสะท้อนวิธีที่ assistive tech (และ user) หา element ซึ่งยัง nudge ให้คุณเขียน markup ที่ accessible
-- **ใช้ `userEvent`** ไม่ใช่ `fireEvent` ดิบ ๆ สำหรับ interaction — simulate การกระทำของ user จริง (focus, key sequence) ได้แม่นกว่า
+- **ใช้ `userEvent`** ไม่ใช่ `fireEvent` ดิบ ๆ สำหรับ interaction — simulate การกระทำของ user จริง (focus, key sequence) ได้แม่นกว่า และ `await` การ flush act ของตัวเองให้ด้วย
 - **assert สิ่งที่ render ออกมา** (`toBeInTheDocument`, text ที่เห็น) ไม่ใช่ `component.state`
+
+## warning "not wrapped in act(...)" หมายความว่าอะไรจริง ๆ
+
+นี่คือ warning ที่คนเขียน test React ทุกคนต้องเจอสักวันและไม่เข้าใจในครั้งแรก สาเหตุจริง: state update เกิดขึ้น **นอก** act() scope ไหนก็ตามที่ RTL รู้จัก — ส่วนใหญ่เพราะบางอย่างสั่งมันแบบ async (`setTimeout`, promise ที่ไม่ได้ await) หลังจาก interaction แบบ synchronous ของ test คุณ return ไปแล้ว
+
+```tsx
+// src/__tests__/LateSetState.tsx
+import { useState } from 'react';
+
+export default function LateSetState() {
+  const [msg, setMsg] = useState('idle');
+  function handleClick() {
+    setTimeout(() => {
+      setMsg('done'); // state update scheduled outside any act() scope
+    }, 0);
+  }
+  return <button onClick={handleClick}>{msg}</button>;
+}
+```
+
+trigger ด้วย `fireEvent` (ซึ่งไม่รอสิ่งใดหลัง dispatch event) แล้วไม่ await timeout ปล่อยให้ warning ขึ้นจริง:
+
+```tsx
+// src/__tests__/act-warning.test.tsx
+import { fireEvent, render, waitFor } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import LateSetState from './LateSetState';
+
+afterEach(() => vi.restoreAllMocks());
+
+test('an un-awaited setTimeout state update triggers the "not wrapped in act" warning', async () => {
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { getByRole } = render(<LateSetState />);
+  fireEvent.click(getByRole('button')); // schedules the timeout, does not await it
+  await new Promise((r) => setTimeout(r, 20)); // let the timeout fire, unmanaged
+  expect(errorSpy.mock.calls.some((args) => String(args[0]).includes('not wrapped in act'))).toBe(true);
+});
+
+test('waitFor wraps the same update in act — no warning, and the DOM is asserted safely', async () => {
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { getByRole } = render(<LateSetState />);
+  fireEvent.click(getByRole('button'));
+  await waitFor(() => expect(getByRole('button')).toHaveTextContent('done'));
+  expect(errorSpy.mock.calls.some((args) => String(args[0]).includes('not wrapped in act'))).toBe(false);
+});
+```
+
+ข้อความจริงที่ React log ออกมา จับได้จาก test แรกด้านบน (ไม่ใช่ paraphrase):
+
+```text
+An update to %s inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser.
+Learn more at https://react.dev/link/wrap-tests-with-act
+```
+
+(`%s` ถูกแทนด้วยชื่อ component — ในที่นี้คือ `LateSetState`) ทางแก้ใน test ที่สองไม่ใช่การปิด warning — แต่คือ **รอ update ด้วย helper ที่ห่อด้วย `act` ให้เอง**: `waitFor`, `findBy*` หรือ `await user.click(...)` (userEvent ห่อให้ภายในอยู่แล้ว) warning นี้คือสัญญาณจริง: มันหมายความว่า assertion ของคุณอาจรันก่อนที่ React จะ apply update จริง ทำให้ test ไม่เสถียรตามจังหวะแทนที่จะถูกต้องแน่นอน
+
+## test async transition
+
+update ที่มาจาก `startTransition(async () => …)` มาถึงหลัง `await` ซึ่งหมายความว่า `getBy*` แบบ synchronous ทันทีหลัง click จะรันเร็วเกินไป ใช้ `findBy*` — มัน poll จนกว่า element จะปรากฏ ซึ่งตรงกับสิ่งที่ transition ที่ await ต้องการเป๊ะ:
+
+```tsx
+// src/__tests__/SearchResults.tsx
+import { useState, useTransition } from 'react';
+
+declare function searchApi(query: string): Promise<string[]>;
+
+export default function SearchResults({ search }: { search: typeof searchApi }) {
+  const [results, setResults] = useState<string[]>([]);
+  const [isPending, startTransition] = useTransition();
+
+  function handleSearch() {
+    startTransition(async () => {
+      const found = await search('react');
+      // Per react.dev: a `set` call after an `await` inside a transition needs
+      // its OWN startTransition to still be treated as part of the transition.
+      startTransition(() => setResults(found));
+    });
+  }
+
+  return (
+    <div>
+      <button onClick={handleSearch}>Search</button>
+      {isPending ? <p>Searching…</p> : null}
+      <ul>{results.map((r) => <li key={r}>{r}</li>)}</ul>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/__tests__/search-results.test.tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { expect, test } from 'vitest';
+import SearchResults from './SearchResults';
+
+test('a startTransition(async) search updates the DOM once the promise resolves', async () => {
+  const user = userEvent.setup();
+  const search = () => Promise.resolve(['hooks', 'suspense']);
+  render(<SearchResults search={search} />);
+
+  await user.click(screen.getByRole('button', { name: 'Search' }));
+
+  // findBy* polls (default 1000ms) until the element appears — the right
+  // tool for an update that lands after an awaited async transition, instead
+  // of a synchronous getBy* that would run before the promise settles.
+  expect(await screen.findByText('hooks')).toBeInTheDocument();
+  expect(screen.getByText('suspense')).toBeInTheDocument();
+});
+```
+
+## test Suspense
+
+`use()` ที่อ่าน Promise จะ suspend component จนกว่า promise จะ settle React 19.2+ เพิ่ม check ที่เข้มขึ้นตรงนี้ ควรรู้ไว้ก่อนที่มันจะทำให้แปลกใจ:
+
+```tsx
+// src/__tests__/Profile.tsx
+import { Suspense, use } from 'react';
+
+function ProfileName({ resource }: { resource: Promise<string> }) {
+  const name = use(resource); // suspends until the promise settles
+  return <p>{name}</p>;
+}
+
+export default function Profile({ resource }: { resource: Promise<string> }) {
+  return (
+    <Suspense fallback={<p>Loading…</p>}>
+      <ProfileName resource={resource} />
+    </Suspense>
+  );
+}
+```
+
+```tsx
+// src/__tests__/profile.test.tsx
+import { act, render, screen } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import Profile from './Profile';
+
+test('shows the resolved content after the Suspense boundary settles', async () => {
+  // The promise must be created ONCE, outside render, and passed down stable —
+  // a NEW promise on every render would suspend forever (covered in the
+  // concurrent-and-suspense module's use()-and-data-fetching lesson).
+  const resource = new Promise<string>((resolve) => {
+    setTimeout(() => resolve('Ada Lovelace'), 10);
+  });
+
+  // React 19.2+ warns "A component suspended inside an act scope, but the
+  // act call was not awaited" if a plain, synchronous render() triggers a
+  // Suspense boundary — wrap it in an async act so React can flush the
+  // suspend. (This also means act resolves only once the promise settles,
+  // so there is no separate moment left to assert the fallback here.)
+  await act(async () => {
+    render(<Profile resource={resource} />);
+  });
+
+  expect(await screen.findByText('Ada Lovelace')).toBeInTheDocument();
+  expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+});
+```
+
+ข้าม `await act(async () => …)` แล้ว render แบบ synchronous ตรง ๆ แทน จะได้ warning จริงแบบนี้:
+
+```text
+A component suspended inside an `act` scope, but the `act` call was not awaited.
+When testing React components that depend on asynchronous data, you must await
+the result:
+
+await act(() => ...)
+```
+
+## mock `fetch` ด้วย `vi.fn`
+
+stub `fetch` ระดับ global แทนที่จะ mock data-fetching module ของตัวเอง — วิธีนี้ยังทดสอบ code path จริงของ component (การเรียก `fetch` จริง, การ parse `.json()` จริง):
+
+```tsx
+// src/__tests__/UserCard.tsx
+import { useEffect, useState } from 'react';
+
+export default function UserCard({ userId }: { userId: string }) {
+  const [name, setName] = useState('loading');
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/users/${userId}`)
+      .then((res) => res.json())
+      .then((data: { name: string }) => {
+        if (!cancelled) setName(data.name);
+      });
+    return () => { cancelled = true; };
+  }, [userId]);
+  return <p>{name}</p>;
+}
+```
+
+```tsx
+// src/__tests__/user-card.test.tsx
+import { render, screen } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import UserCard from './UserCard';
+
+afterEach(() => vi.unstubAllGlobals());
+
+test('mocks fetch with vi.fn so the component never touches the network', async () => {
+  const mockFetch = vi.fn().mockResolvedValue({
+    json: () => Promise.resolve({ name: 'Grace Hopper' }),
+  });
+  vi.stubGlobal('fetch', mockFetch);
+
+  render(<UserCard userId="42" />);
+
+  expect(await screen.findByText('Grace Hopper')).toBeInTheDocument();
+  expect(mockFetch).toHaveBeenCalledExactlyOnceWith('/api/users/42');
+});
+```
+
+`vi.stubGlobal` คู่กับ `afterEach(() => vi.unstubAllGlobals())` กัน stub รั่วไหลเข้าไปใน test อื่น — บั๊กจริงที่พบบ่อยใน test suite ที่ mock global โดยไม่ cleanup
+
+## snapshot test: ใช้เมื่อไร และไม่ใช้เมื่อไร
+
+snapshot test assert ว่า output ที่ render ตรงกับค่าที่เก็บไว้ โดยไม่ต้องเขียน expectation ทีละอันเอง `toMatchInlineSnapshot` ของ Vitest พร้อม **literal argument ชัดเจน** เก็บค่าที่คาดหวังไว้ให้ review ได้ตรงใน test เลย ไม่มีไฟล์ `.snap` แยกและไม่มี step auto-write ที่ต้องเชื่อใจ:
+
+```tsx
+// src/__tests__/Badge.tsx
+export default function Badge({ label }: { label: string }) {
+  return <span className="badge">{label}</span>;
+}
+```
+
+```tsx
+// src/__tests__/badge.test.tsx
+import { render } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import Badge from './Badge';
+
+test('a small, stable snapshot is reviewable in a diff', () => {
+  const { container } = render(<Badge label="beta" />);
+  // An explicit inline snapshot: the expected markup lives right here, so a
+  // reviewer reads the assertion without opening a separate .snap file.
+  expect(container.innerHTML).toMatchInlineSnapshot(
+    `"<span class="badge">beta</span>"`,
+  );
+});
+```
+
+หยิบ snapshot มาใช้เมื่อประเด็นทั้งหมดคือ "markup เล็ก ๆ ที่เสถียรตรงนี้เป๊ะ" — component บรรทัดเดียว, string ที่ format แล้ว, config object **หลีกเลี่ยง** มันสำหรับอะไรก็ตามที่เปลี่ยนบ่อยหรือใหญ่: snapshot ของ DOM ทั้งหน้าทำให้ทุกการเปลี่ยนที่ไม่เกี่ยวข้องกลายเป็น diff ที่ไม่มีใครอ่านจริงจัง แล้ว "update snapshot" ก็กลายเป็น reflex แทนที่จะเป็น review จริง ถ้าเขียน assertion เป็น `getByRole`/`toHaveTextContent` เจาะจงได้ assertion นั้นบันทึกว่า *อะไรสำคัญ* — snapshot ยักษ์บันทึก *ทุกอย่าง* ซึ่งเท่ากับไม่ได้บันทึกอะไรเลย
+
+## component test เทียบ hook test: `renderHook`
+
+test ส่วนใหญ่ของคุณ render component เมื่อ logic ที่ test คือ **hook เอง** — โดยไม่มี host component ที่มีความหมายรอบ ๆ มัน `renderHook` ข้ามการเขียน component นั้นไปเลย:
+
+```ts
+// src/__tests__/useCounter.ts
+import { useCallback, useState } from 'react';
+
+export function useCounter(initial = 0) {
+  const [count, setCount] = useState(initial);
+  const increment = useCallback(() => setCount((c) => c + 1), []);
+  return { count, increment };
+}
+```
+
+```tsx
+// src/__tests__/use-counter.test.tsx
+import { act, renderHook } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import { useCounter } from './useCounter';
+
+test('renderHook tests a hook directly, with no host component to render', () => {
+  const { result } = renderHook(() => useCounter(5));
+
+  expect(result.current.count).toBe(5);
+
+  act(() => {
+    result.current.increment();
+  });
+
+  // `result.current` is re-read after the act() flush — it is NOT the same
+  // object reference as before the update, by design.
+  expect(result.current.count).toBe(6);
+});
+```
+
+หยิบ `renderHook` มาใช้เมื่อ hook มี logic ของตัวเองมากพอที่สมควรมี test แยก (custom hook แบบ reducer, hook ดึงข้อมูล) — และหยิบ component render เต็มรูปแบบมาใช้เมื่อ behavior ที่คุณสนใจจริง ๆ คือสิ่งที่ **user** เห็น ซึ่งเป็นกรณีส่วนใหญ่ hook test บอกไม่ได้ว่า button render label ถูกไหม; component test แยก branch ของ hook logic ภายในที่ซับซ้อนได้ไม่ถูกเท่า
 
 ## testing pyramid ฉบับ React
 
@@ -64,8 +370,55 @@ export const pyramidDiagram = `flowchart TB
 
 แรงส่วนใหญ่ของคุณอยู่ตรงกลาง — RTL component test — เพราะที่นั่นคือที่ที่ logic ของ React อยู่จริง test end-to-end ไม่กี่ตัวครอบ happy path สำคัญข้าม app จริง
 
+## harness ของคอร์สนี้เอง: "compile ทุก snippet" เป็น testing pattern
+
+ทุก fence `tsx`/`ts` ในคอร์สนี้ที่บรรทัดแรกเป็น path comment (แบบที่เห็นในบทนี้) ถูกเขียนลง project Vite + React + TypeScript จริง — `tools/probe/` — แล้วก็ type-check ด้วย `tsc --noEmit` หรือถ้า path ลงท้าย `.test.ts`/`.test.tsx` ก็รันจริงด้วย `vitest run` นั่นคือไอเดียเดียวกับที่บทนี้สอนมาตลอด แค่ยกระดับขึ้นหนึ่งชั้น: อย่าเชื่อเฉย ๆ ว่าโค้ดตัวอย่าง compile ได้หรือทำงานตามที่อ้าง — พิสูจน์มัน ทุกครั้งที่ source เปลี่ยน
+
+```bash
+npm run verify                                        # type-check every fence
+npm run verify -- --test tooling-and-production/testing  # run this lesson's test fences
+```
+
+ถ้าคุณ generate โค้ดตัวอย่างสำหรับเอกสาร, blog post หรือคอร์สของตัวเอง หลักการเดียวกันนี้ใช้ได้: code block ที่ไม่ได้ test คือ claim ไม่ใช่ fact และ claim เรื่อง behavior (ไม่ใช่แค่ syntax) ต้องมีอะไรบางอย่างที่รันโค้ดจริง — `tsc` เพียวพิสูจน์ได้แค่ว่า compile ผ่าน ไม่ใช่ว่ามันทำตามที่ prose บอก
+
+## Mental Model
+
+query กับ `userEvent` ของ RTL มีไว้เพื่อให้ test ของคุณเห็นหน้าเว็บแบบที่ browser จริงและ assistive technology ของ user จะเห็น — นั่นคือเหตุผลทั้งหมดที่ `getByRole` เหนือกว่า `querySelector` `act()` (และทุกอย่างที่สร้างบนมัน — `waitFor`, `findBy*`, `userEvent`) มีไว้ด้วยเหตุผลที่แคบกว่าและต่างออกไป: มันคือสัญญาณของ React เองที่บอกตัวเองว่า "ทุกอย่างที่เกิดจาก interaction นี้เสร็จแล้ว" ทำให้ assertion บรรทัดถัดไปของคุณเห็น DOM ที่ settle แล้ว ไม่ใช่ที่ update ไปครึ่งเดียว warning "not wrapped in act" ไม่ใช่ RTL บ่นเรื่อง internal — มันคือสัญญาณตรง ๆ ว่า timing ของ assertion คุณยังไม่แน่นอน
+
+## ข้อแลกเปลี่ยน
+
+| ตัวเลือก | ได้อะไร | ต้นทุน |
+| --- | --- | --- |
+| `userEvent` แทน `fireEvent` | ใกล้เคียงพฤติกรรม user จริงกว่า; ห่อ act ให้อัตโนมัติ | ช้ากว่าเล็กน้อยต่อ interaction; บาง event แปลก ๆ ต้อง setup เพิ่ม |
+| `findBy*` แทน `getBy*` สำหรับ update แบบ async | รอถูกต้อง ไม่ต้องเขียน waitFor เอง | เลือกผิดถ้า content ควรอยู่ตรงนั้นทันที — มันซ่อนบั๊ก synchronous จริงไว้หลัง retry window |
+| `renderHook` แทน render component เต็มรูปแบบ | isolate hook logic ได้ถูก ไม่ต้องออกแบบ host component | ไม่บอกอะไรเลยว่า hook result ถูก render/ใช้จริงยังไง |
+| inline snapshot ที่ชัดเจน (literal argument) | review ได้ตรงใน diff ไม่มี auto-write step ที่ต้องเชื่อใจ | พิมพ์เยอะกว่า `toMatchSnapshot()` เปล่า ๆ — คุ้มค่าตรงนั้นแหละ |
+| stub `fetch` ระดับ global เทียบ mock data module | ทดสอบ fetch call และ parsing จริงของ component | ไม่ได้ test fetch wrapper/client จริงของคุณถ้ามี — mock ชั้นนั้นแทนถ้ามีอยู่ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"act warning แปลว่า test ของฉันพัง"** มันแปลว่า state update เกิดนอก scope ที่ React ติดตามได้ — test อาจยังผ่านแบบโชคดีในรอบนี้แล้วพังไม่แน่นอนทีหลัง ให้มองว่า "timing ของ assertion นี้ยังไม่ได้พิสูจน์" ไม่ใช่ของประดับที่ต้องปิด
+- **"`getByRole` กับ `findByRole` ใช้แทนกันได้"** `getBy*` throw ทันทีถ้ายังไม่มีอะไร match; `findBy*` retry ได้นานถึงหนึ่งวินาที การใช้ `getBy*` กับ content ที่ปรากฏหลัง promise resolve คือบั๊กจริงที่ผูกกับ timing — ปกติ "ผ่าน" ตอน local แล้ว flaky ใน CI
+- **"snapshot test แย่กว่า explicit assertion เสมอ"** ไม่จริงเมื่อ snapshot เล็ก ชัดเจน (literal แบบ inline) และประเด็นคือ "output ที่เสถียรตรงนี้เป๊ะ" จริง ๆ — failure mode คือ snapshot ที่ *ใหญ่* ทึบและ regenerate บ่อย ไม่ใช่ snapshot ในฐานะประเภทหนึ่ง
+- **"ต้องมี component ที่ run อยู่เสมอถึงจะ test hook ได้"** `renderHook` มีไว้เพราะ hook ที่มี logic ของตัวเองมีความหมาย (reducer, subscription) มักถูกกว่าและชัดกว่าที่จะ test ตรง ๆ แทนที่จะผ่าน host component ใด ๆ ที่สุ่มมา
+
+## อ่านโค้ดที่ AI เขียน
+
+- assertion แบบ async ใช้ `getBy*` ทันทีหลัง click/submit ที่ trigger `fetch`, transition หรือ `use()` ไหม? นั่นคือ race ไม่ใช่บั๊กที่จะเห็นเสมอ — เช็คหา `findBy*`/`waitFor` ตรงจุดที่ update ไม่ใช่ synchronous
+- ใช้ `fireEvent` ตรงที่ interaction มีผลแบบ async (effect, promise, transition) ไหม? `userEvent` คือ default ที่ปลอดภัยกว่า — มันห่อ act flush ของตัวเอง; `fireEvent` ไม่รอสิ่งใดหลัง dispatch event
+- `fetch`/global ที่ mock ไว้ถูก cleanup ใน `afterEach` ไหม (`vi.unstubAllGlobals()`, `vi.restoreAllMocks()`)? stub ที่ค้างไว้จะรั่วเข้า test file ถัดไปตามลำดับการรัน แล้วทำให้เกิด failure ที่ดูไม่เกี่ยวกับบั๊กจริง
+- มี `toMatchSnapshot()` ก้อนใหญ่ที่ไม่มีใคร review (ไม่มี literal แบบ inline) ครอบทั้งหน้าหรือ object ซับซ้อนไหม? เช็คว่าไฟล์ snapshot เคยถูกคนอ่านจริงไหม หรือแค่ regenerate ทุกครั้งที่ fail
+- สำหรับ test ที่มีแค่ hook `act()` ถูกใช้รอบทุก call ที่เปลี่ยน state บน `result.current` ไหม? ขาด `act()` ตรงนี้จะให้ warning "not wrapped in act" แบบเดียวกับที่บทนี้อธิบาย แค่มาจาก hook test แทนที่จะเป็น component test
+
+<SpotTheBug code={`test('shows the user name after fetching', async () => {
+  render(<UserCard userId="42" />);
+  expect(screen.getByText('Grace Hopper')).toBeInTheDocument();
+});`}>
+`UserCard` fetch แบบ async และเริ่มต้นด้วยการ render `"loading"` — ชื่อจะปรากฏก็ต่อเมื่อ promise ของ `fetch` resolve แล้ว `.then` chain ของ effect รัน re-render `getByText` throw **ทันที** ถ้าไม่มีอะไร match *ตอนนี้เดี๋ยวนี้* — มันไม่รอเลย พิสูจน์ใน test ของบทนี้เอง: เวอร์ชันที่ทำงานถูกใช้ `expect(await screen.findByText('Grace Hopper')).toBeInTheDocument()` — `findByText` poll (จนถึง timeout default) แทนที่จะเช็คแค่ครั้งเดียว การสลับแบบนี้ (`getBy*` เป็น `findBy*`) คือหนึ่งในความผิดพลาดที่พบบ่อยที่สุดใน RTL test ที่ generate มาสำหรับอะไรก็ตามที่เกี่ยวกับ `fetch`, transition หรือ `use()` — และมันมัก "ผ่าน" กับ mock local ที่เร็ว แล้ว fail เฉพาะกับ network จริงที่ช้ากว่าหรือ CI runner ซึ่งนั่นแหละคือเหตุผลที่มันอันตรายมากกว่าแค่ผิด
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-test React ด้วย **React Testing Library บน Vitest** และ test **behavior ไม่ใช่ implementation**: render component, โต้ตอบด้วย `userEvent` และ query ด้วย **role/label/text** — อย่า assert internal state หรือการเรียก hook วิธีนี้ทำให้ refactor ที่ไม่เปลี่ยน behavior ไม่ทำให้ test พัง ลงแรงส่วนใหญ่กับ component test พร้อม Playwright end-to-end ไม่กี่ตัวสำหรับ flow สำคัญ
+test React ด้วย **React Testing Library บน Vitest** และ test **behavior ไม่ใช่ implementation**: render component, โต้ตอบด้วย `userEvent` และ query ด้วย **role/label/text** ใช้ **`findBy*`/`waitFor`** (ไม่ใช่ `getBy*`) สำหรับอะไรก็ตามที่ update หลัง async transition, Suspense boundary หรือ promise — และเข้าใจ warning **"not wrapped in act"** ว่าคือสัญญาณจริงว่า timing ของ assertion ยังไม่ได้พิสูจน์ ไม่ใช่ noise ที่ต้องปิด mock `fetch` ที่ boundary ด้วย `vi.fn`, หยิบ **`renderHook`** มาใช้เมื่อ logic ที่ test คือ hook เอง และเก็บ snapshot ให้เล็กและชัดเจน harness ของคอร์สนี้เอง — compile และรันทุก code fence จริง — คือวินัยเดียวกันที่ใช้กับเอกสาร
 </Callout>
 
 export const quizTesting = [
@@ -78,36 +431,62 @@ export const quizTesting = [
       'mock ทุกอย่างรวมถึง DOM',
     ],
     answer: 1,
+    explain: 'ปรัชญาของ RTL เอง: test ที่คล้ายการใช้งานจริงให้ความมั่นใจมากกว่า และรอด refactor ที่ไม่เปลี่ยน behavior',
   },
   {
-    q: 'query แบบไหนที่แนะนำให้ใช้หา element ใน RTL?',
+    q: 'ข้อความ warning จริงของ React บอกว่าทางแก้ของ "not wrapped in act(...)" คืออะไร?',
     options: [
-      'getByTestId เสมอ',
-      'getByRole (สะท้อนวิธีที่ user และ assistive tech หา element)',
-      'querySelector บน class name',
-      'เข้าถึง DOM ด้วย index',
+      'เพิ่ม setTimeout ก่อน assertion',
+      'ห่อ code ที่ทำให้เกิด state update ด้วย act(...) — "This ensures that you\'re testing the behavior the user would see in the browser"',
+      'ปิด warning ใน vitest config',
+      'เปลี่ยนจาก Vitest ไปใช้ Jest',
     ],
     answer: 1,
+    explain: 'จับข้อความจริงจาก warning ที่ trigger แล้วเป๊ะ ๆ: "When testing, code that causes React state updates should be wrapped into act(...)... This ensures that you\'re testing the behavior the user would see in the browser."',
   },
   {
-    q: 'ทำไม test ที่อิง behavior ดีกว่าอิง implementation?',
+    q: '```tsx\ntest(\'shows the user name after fetching\', async () => {\n  render(<UserCard userId="42" />);\n  expect(screen.getByText(\'Grace Hopper\')).toBeInTheDocument();\n});\n```\nโค้ดนี้ผิดตรงไหน ในเมื่อ `UserCard` fetch ชื่อแบบ async?',
     options: [
-      'รันเร็วกว่า',
-      'refactor internal (เช่น useState → useReducer) ไม่ทำให้ test พัง เพราะ behavior ไม่เปลี่ยน',
-      'ไม่ต้อง assert',
-      'test compiler',
+      'ไม่ผิดเลย — getByText รอ async update ให้เสมอ',
+      '`getByText` throw ทันทีถ้ายังไม่มี text นั้น; fetch ยังไม่ resolve — ต้องใช้ `findByText` (หรือ `waitFor` ที่ await)',
+      'ควร await render() แทน',
+      'UserCard ต้องมี key prop',
     ],
     answer: 1,
+    explain: 'ยืนยันแล้ว: test ที่ทำงานได้ใช้ `await screen.findByText(...)` ซึ่ง poll จนกว่า re-render จาก fetch จะเกิด getByText/queryByText ไม่รอเลย — เช็คแค่ครั้งเดียว',
   },
   {
-    q: 'test React ส่วนใหญ่อยู่ตรงไหนใน pyramid?',
+    q: 'การ render component ที่ suspend ผ่าน `use()` แบบ synchronous ด้วย `render()` เปล่า ๆ ใน React 19.2+ ได้ผลอะไร?',
     options: [
-      'end-to-end test',
-      'component test (RTL + Vitest) เพราะที่นั่นคือที่ที่ logic ของ React อยู่',
-      'manual testing',
-      'snapshot test อย่างเดียว',
+      'ไม่มีอะไรแปลก — ทำงานได้เสมอ',
+      'warning จริง: "A component suspended inside an act scope, but the act call was not awaited" — แก้ด้วย `await act(async () => render(...))`',
+      'TypeScript compile error',
+      'infinite loop ทุกครั้ง',
     ],
     answer: 1,
+    explain: 'reproduce ตรง ๆ: render() เปล่า ๆ บน tree ที่ suspend ด้วย use() จะ log warning นี้เป๊ะ ๆ แล้ว findBy* assertion ที่ตามมา fail; ห่อ render ด้วย `await act(async () => ...)` แก้ทั้งสองอย่าง',
+  },
+  {
+    q: '`renderHook` เป็นเครื่องมือที่ถูกต้องแทนการ render component เต็มรูปแบบเมื่อไร?',
+    options: [
+      'เสมอ — ไม่ต้อง render component เลย',
+      'เมื่อ logic ที่ test คือตัว hook เอง (hook แบบ reducer, subscription) ที่ไม่มี host component ที่มีความหมายให้ออกแบบรอบ ๆ',
+      'เฉพาะ hook ที่ return JSX',
+      'renderHook แทนที่ความจำเป็นของ act() ได้ทั้งหมด',
+    ],
+    answer: 1,
+    explain: 'renderHook ให้ assert ผลลัพธ์/พฤติกรรมของ hook ตรง ๆ ได้ — มีประโยชน์เมื่อ hook มี logic ของตัวเองจริง แต่ไม่บอกอะไรว่า component render ค่านั้นจริง ๆ ยังไง',
+  },
+  {
+    q: 'ทำไมควรใช้ `toMatchInlineSnapshot(\`"<the expected markup>"\`)` แบบชัดเจน แทน `toMatchSnapshot()` เปล่า ๆ สำหรับ component เล็กที่เสถียร?',
+    options: [
+      'พฤติกรรมเหมือนกันทุกทาง',
+      'literal แบบชัดเจน review ได้ตรงใน test/diff เลย ไม่มีไฟล์ .snap แยกและไม่มี auto-write step ที่ reviewer ต้องเชื่อใจ',
+      'toMatchSnapshot() ใช้ไม่ได้ใน Vitest',
+      'inline snapshot รันเร็วกว่า',
+    ],
+    answer: 1,
+    explain: '`toMatchSnapshot()` เปล่า ๆ เขียนลงไฟล์แยกที่ถูก regenerate เงียบ ๆ ตอน fail ถ้า reviewer ไม่ระวัง; literal แบบ inline ทำให้ output ที่คาดหวังเป็นส่วนหนึ่งของ diff ที่ review ได้เลย',
   },
 ];
 

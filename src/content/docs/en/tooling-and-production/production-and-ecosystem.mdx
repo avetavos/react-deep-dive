@@ -1,6 +1,6 @@
 ---
 title: 'Production & Ecosystem'
-description: 'Shipping React — production builds, code-splitting with lazy, Strict Mode vs production, and the well-established libraries you reach for: routing, data, forms, and state.'
+description: 'Shipping React for real — react-dom/static prerender output, renderToPipeableStream + hydrateRoot + onRecoverableError, reading a real hydration mismatch message, dev vs. production build proof, and the converged ecosystem libraries.'
 sidebar:
   order: 5
 ---
@@ -9,18 +9,240 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## Dev build vs production build
+## Dev build vs. production build, proven
 
-React ships two builds. The **development** build is bigger and slower on purpose — it includes helpful warnings, prop-type checks, and the Strict Mode double-invoke. The **production** build strips all of that for speed and size. Your build tool (Vite / the framework) switches automatically when you run the production build:
+React ships two builds. The **development** build is bigger and slower on purpose — it includes helpful warnings, extra checks, and the Strict Mode double-invoke. The **production** build strips all of that. This isn't a claim to take on faith — it's how `react-dom`'s own entry point is written:
+
+```js
+// react-dom's actual cjs/client.js entry point
+if (process.env.NODE_ENV === 'production') {
+  checkDCE();
+  module.exports = require('./cjs/react-dom-client.production.js');
+} else {
+  module.exports = require('./cjs/react-dom-client.development.js');
+}
+```
+
+One environment variable, one `if`, two completely different files. The size and content difference is real and large:
+
+```text
+$ ls -la node_modules/react-dom/cjs/react-dom-client.*.js
+1182785  react-dom-client.development.js
+ 625168  react-dom-client.production.js
+
+$ grep -c "console.error" node_modules/react-dom/cjs/react-dom-client.development.js
+261
+$ grep -c "console.error" node_modules/react-dom/cjs/react-dom-client.production.js
+2
+```
+
+261 call sites capable of logging a `console.error` in development, 2 in production — including this exact, familiar one, present only in the development file:
+
+```text
+$ grep -o "Each child in a list should have a unique[^\"]*" \
+    node_modules/react-dom/cjs/react-dom-client.development.js
+Each child in a list should have a unique
+```
+
+Your build tool (Vite / the framework) sets `NODE_ENV` for you when you run the production build command:
 
 ```bash
 npm run build   # produces the optimized production bundle
 ```
 
-Never ship the development build — it's meaningfully slower and larger. And remember `<StrictMode>` only double-invokes in development; in production it does nothing, so it costs you nothing to leave it on.
+Never ship the development build — it's meaningfully slower and larger, for no benefit to a real user. And `<StrictMode>` only double-invokes in development; in production it does nothing, so it costs you nothing to leave it on.
 
-## Code-splitting with lazy
+## `react-dom/static`: `prerender` for static HTML
+
+For static-site generation (SSG) — HTML you generate once, ahead of time, not per-request — `react-dom/static` renders a full tree to HTML and waits for all data to load first (unlike a streaming SSR API). Run for real, in plain Node, against this course's probe:
+
+```js
+// run-prerender.mjs
+import { createElement } from 'react';
+import { prerenderToNodeStream } from 'react-dom/static';
+
+function App() {
+  return createElement('html', null,
+    createElement('head', null, createElement('title', null, 'Static demo')),
+    createElement('body', null,
+      createElement('div', { id: 'root' },
+        createElement('h1', null, 'Hello from prerenderToNodeStream'))));
+}
+
+const { prelude } = await prerenderToNodeStream(createElement(App), {
+  bootstrapScripts: ['/main.js'],
+});
+
+let html = '';
+for await (const chunk of prelude) html += chunk;
+console.log(html);
+```
+
+Real output from `node run-prerender.mjs`, byte-for-byte:
+
+```text
+<!DOCTYPE html><html><head><link rel="preload" as="script" fetchPriority="low" href="/main.js"/><title>Static demo</title></head><body><div id="root"><h1>Hello from prerenderToNodeStream</h1></div><script src="/main.js" id="_R_" async=""></script></body></html>
+```
+
+Notice what React added on its own: a `<!DOCTYPE html>`, a `<link rel="preload">` resource hint for the bootstrap script, and the `<script>` tag itself with an internally-generated `id`. `prerenderToNodeStream` is Node-specific; environments with Web Streams (Deno, edge runtimes) use the sibling `prerender` API instead. Both can be aborted and resumed later with `resumeToPipeableStream`/`resume` for partial prerendering.
+
+## `react-dom/server`: `renderToPipeableStream` for real SSR
+
+For actual per-request server rendering (not pre-generated), `react-dom/server`'s `renderToPipeableStream` streams HTML to a Node `Writable` as soon as the shell is ready, rather than waiting for everything:
+
+```js
+// run-pipeable.mjs
+import { createElement } from 'react';
+import { renderToPipeableStream } from 'react-dom/server';
+import { PassThrough } from 'node:stream';
+
+function App() {
+  return createElement('html', null,
+    createElement('body', null,
+      createElement('div', { id: 'root' }, createElement('p', null, 'streamed'))));
+}
+
+const passthrough = new PassThrough();
+let out = '';
+passthrough.on('data', (chunk) => { out += chunk; });
+
+const { pipe } = renderToPipeableStream(createElement(App), {
+  bootstrapScripts: ['/main.js'],
+  onShellReady() {
+    pipe(passthrough); // pipe as soon as the shell is ready, not before
+  },
+  onError(error) {
+    console.error('onError:', error);
+  },
+});
+
+await new Promise((r) => setTimeout(r, 20));
+console.log(out);
+```
+
+Real output:
+
+```text
+<!DOCTYPE html><html><head><link rel="preload" as="script" fetchPriority="low" href="/main.js"/></head><body><div id="root"><p>streamed</p></div><script src="/main.js" id="_R_" async=""></script></body></html>
+```
+
+The key API contract: only start piping inside `onShellReady` — not before, and not by ignoring the callback entirely — so a slow subtree behind `<Suspense>` doesn't block the initial response. `onShellError` (not shown) is your signal to fall back to a static error page instead, if even the shell failed.
+
+## `hydrateRoot` and reading a real hydration mismatch
+
+On the client, `hydrateRoot` attaches React to server-rendered HTML instead of re-creating it. `onRecoverableError` is your hook for exactly the failure mode this section is about — a mismatch React can patch up automatically, but still wants you to know happened. Set up jsdom with server HTML that deliberately doesn't match what the client renders:
+
+```js
+// run-hydrate.mjs
+import { JSDOM } from 'jsdom';
+
+const dom = new JSDOM(
+  '<!DOCTYPE html><html><body><div id="root">Server content before hydration.</div></body></html>',
+  { url: 'http://localhost/' },
+);
+globalThis.window = dom.window;
+globalThis.document = dom.window.document;
+Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
+
+const { createElement } = await import('react');
+const { hydrateRoot } = await import('react-dom/client');
+
+function App() {
+  // Deliberately different from the server-rendered content above, to
+  // trigger a real hydration mismatch.
+  return createElement('div', { id: 'root' }, 'Client content after hydration.');
+}
+
+const root = hydrateRoot(document.getElementById('root'), createElement(App), {
+  onRecoverableError(error, errorInfo) {
+    console.log('onRecoverableError message:', error.message);
+    console.log('componentStack present:', typeof errorInfo.componentStack === 'string');
+  },
+});
+```
+
+The real, complete message React 19 logs — this is exactly what you'll see in your own console when this happens, worth reading once carefully instead of skimming past it every time:
+
+```text
+onRecoverableError message: Hydration failed because the server rendered HTML didn't match the client. As a result this tree will be regenerated on the client. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  <App>
++   <div id="root">
+-   Server content before hydration.
+
+componentStack present: true
+```
+
+Read that bulleted list as a literal checklist the next time you see this warning — React is telling you the five most common causes directly, in order. The `+`/`-` diff at the end shows exactly what the client rendered (`+`) versus what the server sent (`-`). React recovers by **discarding the server HTML for that subtree and re-rendering it on the client** — the page still works, but you lose the point of SSR for that subtree (no flash-free first paint) and paid for HTML the browser just threw away.
+
+For the deeper "why does a mismatch happen at the fiber/reconciliation level" mechanics, see the upcoming React Internals module; for how an *uncaught* render error (not a recoverable hydration patch) surfaces to your UI, see [error boundaries](/react/en/concurrent-and-suspense/error-boundaries/) in the concurrent module — `onCaughtError`/`onUncaughtError` are `onRecoverableError`'s siblings on both `hydrateRoot` and `createRoot`, for those two different failure modes.
+
+<Mermaid title="Static, SSR, and hydration are three different jobs" code={renderModesDiagram} />
+
+export const renderModesDiagram = `flowchart TB
+  ssg["react-dom/static\nprerender / prerenderToNodeStream\n(SSG — wait for everything, once)"]
+  ssr["react-dom/server\nrenderToPipeableStream\n(per-request SSR — stream as ready)"]
+  hydrate["react-dom/client\nhydrateRoot\n(attach to existing HTML,\nonRecoverableError on mismatch)"]
+  ssg --> hydrate
+  ssr --> hydrate`;
+
+## Production build flags and error reporting
+
+Two currency-checked, real CLI facts worth knowing by name:
+
+- **`vite build --profile [name]`** — a real, current flag: "start built-in Node.js inspector," for profiling a slow production build itself (not your app's runtime performance). Confirmed straight from `vite build --help` on this course's probe (Vite 8.3.1).
+- Vite 8's default minifier for `vite build` is **`oxc`**, not `esbuild` — another detail that goes stale fast if you're reading an older tutorial; `--minify esbuild`/`terser` are still available if you need them.
+
+For error reporting in production, wire all three `hydrateRoot`/`createRoot` error callbacks together — they cover three genuinely different situations, and react.dev's own example makes the split explicit:
+
+```js
+function reportError({ type, error, errorInfo }) {
+  console.error(type, error, 'Component Stack:', errorInfo.componentStack);
+}
+
+hydrateRoot(container, <App />, {
+  onCaughtError(error, errorInfo) {       // an Error Boundary caught it
+    reportError({ type: 'Caught', error, errorInfo });
+  },
+  onUncaughtError(error, errorInfo) {     // nothing caught it — the tree crashed
+    reportError({ type: 'Uncaught', error, errorInfo });
+  },
+  onRecoverableError(error, errorInfo) {  // React patched a hydration mismatch
+    reportError({ type: 'Recoverable', error, errorInfo });
+  },
+});
+```
+
+Pair this with **Sentry** (or an equivalent), and remove these custom handlers in development so you keep React's own console overlay instead of double-reporting.
+
+## The ecosystem: what to reach for
+
+React is deliberately minimal, so real apps assemble a few well-established libraries. The converged, current choices:
+
+| Need | Reach for |
+|------|-----------|
+| **Routing** (SPA) | React Router — or a framework's built-in router (Next.js) |
+| **Server state / data fetching** | TanStack Query (React Query), or RTK Query |
+| **Forms** | React Hook Form (+ a schema validator like Zod) |
+| **Client state** | Zustand or Redux Toolkit (or Jotai) — beyond what Context comfortably handles |
+| **Styling** | CSS Modules, Tailwind, or a CSS-in-JS library |
+| **Error monitoring** | Sentry (with the error-callback wiring above at the root) |
+
+A key distinction that saves a lot of pain: **server state** (data from an API — TanStack Query) and **client state** (local UI state — useState/Context/Zustand) are different problems. Trying to hold server data in a client store (manual loading flags, cache invalidation, refetching) is the classic reinvention that a data library solves for you.
+
+## Code-splitting with `lazy`
 
 A single big bundle means users download code for pages they may never visit. **`React.lazy`** + **`<Suspense>`** split a component into its own chunk that loads on demand:
 
@@ -40,62 +262,110 @@ function App() {
 
 Split at route boundaries first (each page becomes a chunk) — that's the highest-value split, and frameworks often do it for you.
 
-## The ecosystem: what to reach for
-
-React is deliberately minimal, so real apps assemble a few well-established libraries. The converged, current choices:
-
-| Need | Reach for |
-|------|-----------|
-| **Routing** (SPA) | React Router — or a framework's built-in router (Next.js) |
-| **Server state / data fetching** | TanStack Query (React Query), or RTK Query |
-| **Forms** | React Hook Form (+ a schema validator like Zod) |
-| **Client state** | Zustand or Redux Toolkit (or Jotai) — beyond what Context comfortably handles |
-| **Styling** | CSS Modules, Tailwind, or a CSS-in-JS library |
-| **Error monitoring** | Sentry (with an error boundary at the app root) |
-
-<Mermaid title="React plus the pieces a real app assembles" code={ecoDiagram} />
-
-export const ecoDiagram = `flowchart TB
-  react["React (view layer)"]
-  react --> route["Routing:\nReact Router / framework"]
-  react --> data["Server state:\nTanStack Query"]
-  react --> forms["Forms:\nReact Hook Form"]
-  react --> state["Client state:\nZustand / Redux Toolkit"]`;
-
-A key distinction that saves a lot of pain: **server state** (data from an API — TanStack Query) and **client state** (local UI state — useState/Context/Zustand) are different problems. Trying to hold server data in a client store (manual loading flags, cache invalidation, refetching) is the classic reinvention that a data library solves for you.
-
 ## A production checklist
 
-- Build with the **production** bundle; verify it's not the dev build.
+- Build with the **production** bundle; the 261-vs-2 `console.error` gap above is what you're actually buying.
 - **Code-split** at routes with `lazy` + `Suspense`.
-- Put an **error boundary** at the app root (and around risky subtrees) and wire it to monitoring.
-- Keep **`<StrictMode>`** on — it's a dev-only guard with zero production cost.
+- Choose the right render API for the job: `react-dom/static` for pre-generated pages, `react-dom/server`'s `renderToPipeableStream` for per-request SSR, `hydrateRoot` on the client with all three error callbacks wired.
+- Treat `onRecoverableError` output as a real bug report, not noise — the five-cause checklist above is where to start reading it.
 - Separate **server state** (a data library) from **client state** (local/store).
 
+## Mental Model
+
+These three render entry points aren't interchangeable variations — they answer three different questions. `react-dom/static`: "give me HTML once, I'll serve it forever" (no request-time data). `react-dom/server`: "give me HTML for *this* request, stream it as it's ready." `hydrateRoot`: "attach to HTML that already exists, and tell me the moment reality (client) and assumption (server) disagree." A hydration mismatch isn't React being fragile — it's React actively checking a promise your server and client code both made, and telling you exactly where they broke it.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `react-dom/static` `prerender`/`prerenderToNodeStream` | Simple, cacheable, no server needed per-request | Waits for everything — no streaming, not for per-user/per-request content |
+| `react-dom/server` `renderToPipeableStream` | Streams as soon as the shell is ready; per-request data works | Needs a running Node server process (or a framework managing one) |
+| Wiring `onCaughtError`/`onUncaughtError`/`onRecoverableError` in production | Complete error visibility, no error type falls through unreported | Must be removed/conditioned out in development or you lose React's own dev overlay |
+| Production build (`NODE_ENV=production`) | Smaller, faster, 259 fewer `console.error` call sites doing nothing for users | None for a real deployment — never a reason to ship dev |
+
+## Common Misconceptions
+
+- **"A hydration mismatch means the page is broken."** React recovers by discarding and re-rendering the mismatched subtree on the client — the page still works. What you lose is the *point* of SSR for that subtree (a flash-free first paint), and you paid the server-render cost for nothing there.
+- **"`prerenderToNodeStream` and `renderToPipeableStream` are the same thing with different names."** `prerenderToNodeStream` waits for the whole tree (including Suspense-gated data) before resolving — right for build-time SSG. `renderToPipeableStream` streams the shell immediately and lets slower parts arrive later — right for per-request SSR.
+- **"The dev/production build difference is mostly about minification."** Minification matters, but the bigger difference is checks and `console.error` call sites: 261 in the development `react-dom-client` file, 2 in production — an order of magnitude, not a rounding error.
+- **"`onRecoverableError` and error boundaries do the same job."** `onRecoverableError` fires when *React itself* patches a hydration disagreement automatically. Error boundaries (`onCaughtError`) catch errors your *own* component tree throws during render. They're two different failure categories with two different callbacks for a reason.
+
+## Reading AI-generated code
+
+- Does a `hydrateRoot`/`createRoot` call wire *none* of `onCaughtError`/`onUncaughtError`/`onRecoverableError`? Generated production setup code very often skips all three, silently falling back to React's console-only default — fine in development, a real gap in production error monitoring.
+- Is `renderToPipeableStream`'s `pipe(...)` called immediately, outside `onShellReady`? That risks piping before the shell is actually ready, defeating the entire purpose of the callback.
+- Does the code branch on `typeof window !== 'undefined'` inside a component that's also server-rendered? That's the literal first bullet point in React's own hydration-mismatch message — a real, common, self-inflicted cause.
+- Is there a `Date.now()`/`Math.random()`/locale-dependent date format inside a component's render body that also runs on the server? Same message, second and third bullet points.
+- Does generated "production setup" code skip setting `NODE_ENV=production` (or rely on a bundler default that doesn't actually set it) before measuring bundle size or performance? The 2x-ish size and `console.error`-count difference shown in this lesson is real — comparing a dev bundle against a "production" claim is a common, easy-to-miss mistake.
+
+<SpotTheBug code={`function UserGreeting() {
+  if (typeof window !== 'undefined') {
+    return <p>Welcome back, {window.localStorage.getItem('name')}!</p>;
+  }
+  return <p>Welcome!</p>;
+}`}>
+This is the literal first bullet point in React 19's actual hydration-mismatch message, reproduced in this lesson: "A server/client branch `if (typeof window !== 'undefined')`." On the server, `window` is undefined, so `UserGreeting` renders `"Welcome!"`. On the client, `window` exists, so the same component renders the personalized greeting instead — a guaranteed mismatch on first hydration, every time a name is actually stored. React recovers (discarding and re-rendering that subtree client-side), so the page doesn't crash, but you've paid for a server render whose HTML gets thrown away, and a real `onRecoverableError` fires with exactly the message shown earlier in this lesson. The fix is to make the two environments agree: read `localStorage` in an effect (after mount, client-only) and render the generic greeting first, or pass the personalization down as data the server actually has (a cookie, a session) instead of branching on `window`.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-Ship the **production build** (never the dev build), **code-split** at routes with `lazy` + `Suspense`, and put an **error boundary** at the root wired to monitoring. React is a view layer — assemble the converged ecosystem for the rest: **React Router** (routing), **TanStack Query** (server state), **React Hook Form** (forms), **Zustand/Redux Toolkit** (client state) — and keep server state and client state as separate concerns.
+Ship the **production build** — proven here as a real `NODE_ENV` branch selecting between two files 261 vs. 2 `console.error` sites apart, not a vague performance claim. Pick the right render API for the job: **`react-dom/static`**'s `prerender`/`prerenderToNodeStream` for pre-generated HTML, **`react-dom/server`**'s `renderToPipeableStream` for streamed per-request SSR, and **`hydrateRoot`** with all three error callbacks (`onCaughtError`/`onUncaughtError`/`onRecoverableError`) wired for complete production error visibility. Read a hydration-mismatch message as the five-cause checklist React actually gives you, not generic noise — and keep **server state** (TanStack Query) separate from **client state** (Zustand/Redux Toolkit) in the ecosystem you assemble around all of it.
 </Callout>
 
 export const quizProd = [
   {
-    q: 'What is the difference between React’s development and production builds?',
+    q: 'How does react-dom itself decide which build to load — development or production — verified from its own source?',
     options: [
-      'They are identical',
-      'Dev is bigger/slower with warnings and the Strict Mode double-invoke; production strips those for speed and size',
-      'Production has more warnings',
-      'Dev cannot render components',
+      'It always loads development and minifies at the end',
+      '`if (process.env.NODE_ENV === \'production\') { require(production file) } else { require(development file) }` — a real branch in react-dom\'s own cjs entry point',
+      'It reads a config file you must create manually',
+      'There is only one build; "production mode" just removes source maps',
     ],
     answer: 1,
+    explain: 'Read directly from react-dom\'s own cjs/client.js: the NODE_ENV check selects between react-dom-client.production.js and react-dom-client.development.js, two genuinely different files (1.18MB vs. 625KB, 261 vs. 2 console.error call sites).',
   },
   {
-    q: 'How do you code-split a component so it loads on demand?',
+    q: 'When should you reach for `react-dom/static`\'s `prerenderToNodeStream` instead of `react-dom/server`\'s `renderToPipeableStream`?',
     options: [
-      'Put it in a separate file only',
-      '`React.lazy(() => import(...))` rendered inside a `<Suspense>` boundary',
-      'Wrap it in useMemo',
-      'Use a bigger bundle',
+      'Never — they are interchangeable',
+      'For static-site generation, where you want to wait for all data (including Suspense-gated data) before producing HTML once, ahead of time',
+      'Only when using TypeScript',
+      'Only for React Native apps',
     ],
     answer: 1,
+    explain: 'prerenderToNodeStream waits for the whole tree to settle before resolving — the right tool for build-time SSG. renderToPipeableStream streams the shell as soon as it\'s ready — the right tool for per-request SSR where you don\'t want to block on slow data.',
+  },
+  {
+    q: 'What does `onRecoverableError` on `hydrateRoot` actually report, verified with a real deliberately-mismatched render?',
+    options: [
+      'Any error thrown anywhere in the app',
+      'The exact hydration-mismatch message, including the 5-cause checklist ("typeof window", Date.now()/Math.random(), locale-dependent dates, external changing data, invalid HTML nesting) and a +/- diff of server vs. client output',
+      'Only network errors',
+      'Nothing — onRecoverableError was removed in React 19',
+    ],
+    answer: 1,
+    explain: 'Captured verbatim from a real hydrateRoot() call against deliberately mismatched server/client HTML in this course\'s probe — the message is not paraphrased.',
+  },
+  {
+    q: '```jsx\nfunction UserGreeting() {\n  if (typeof window !== \'undefined\') {\n    return <p>Welcome back, {window.localStorage.getItem(\'name\')}!</p>;\n  }\n  return <p>Welcome!</p>;\n}\n```\nWhy does this cause a real hydration mismatch when server-rendered?',
+    options: [
+      'It does not — this is a safe, common pattern',
+      'The server (no window) renders "Welcome!" while the client (window exists) renders the personalized greeting — a guaranteed mismatch on first hydration, matching React\'s own documented first cause',
+      'localStorage is not allowed in React components at all',
+      'This only fails in Next.js, not plain React',
+    ],
+    answer: 1,
+    explain: 'This is the literal first bullet in React\'s real hydration-mismatch message: "A server/client branch `if (typeof window !== \'undefined\')`." The fix is reading localStorage in an effect (client-only, after mount) instead of branching render output on it directly.',
+  },
+  {
+    q: 'What does the real `vite build --help` output confirm about the `--profile` flag on this course\'s Vite 8 probe?',
+    options: [
+      'It does not exist — this is a React-only concept',
+      '`--profile [name]`: "start built-in Node.js inspector" — a real, current Vite CLI flag for profiling a slow build itself',
+      'It profiles your deployed app\'s runtime performance',
+      'It only works with webpack, not Vite',
+    ],
+    answer: 1,
+    explain: 'Confirmed directly from `vite build --help` on Vite 8.3.1: `--profile [name] [boolean | string] start built-in Node.js inspector` — for diagnosing a slow build process, not runtime app performance.',
   },
   {
     q: 'Why keep server state and client state separate?',
@@ -106,16 +376,7 @@ export const quizProd = [
       'To reduce the bundle size only',
     ],
     answer: 1,
-  },
-  {
-    q: 'What is the cost of leaving `<StrictMode>` on in production?',
-    options: [
-      'It doubles render time for users',
-      'None — StrictMode only double-invokes in development; in production it does nothing',
-      'It disables hooks',
-      'It ships extra warnings to users',
-    ],
-    answer: 1,
+    explain: 'Server state has a different lifecycle (staleness, refetch-on-focus, cache invalidation across components) than local UI state — a dedicated data library solves this once; a client store re-solves it, usually worse, per app.',
   },
 ];
 

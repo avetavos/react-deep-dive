@@ -1,6 +1,6 @@
 ---
 title: 'Project & Tooling'
-description: 'เริ่มโปรเจกต์ React วันนี้ — Vite สำหรับ SPA, framework สำหรับ routing และ SSR, ทำไม Create React App หายไป และ dev tool ที่ทำให้ React ใช้งานสนุก'
+description: 'เริ่มโปรเจกต์ React วันนี้ — Vite 8 สำหรับ SPA, framework สำหรับ routing และ SSR, ติดตั้ง React Compiler กับ eslint-plugin-react-hooks v7 ของจริง และทำไม Create React App หายไป'
 sidebar:
   order: 2
 ---
@@ -9,16 +9,32 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Create React App ถูก deprecated แล้ว
 
-หลายปีที่ผ่านมา คำตอบมาตรฐานของ "เริ่ม React app ยังไง?" คือ Create React App (CRA) ยุคนั้นจบแล้ว: ทีม React **deprecated CRA อย่างเป็นทางการในปี 2025** ตอนนี้ติดตั้ง CRA จะขึ้น warning ชี้ไปยังตัวเลือกปัจจุบัน อย่าเริ่มโปรเจกต์ใหม่ด้วย CRA และควรพิจารณาย้ายโปรเจกต์เดิมออก
+หลายปีที่ผ่านมา คำตอบมาตรฐานของ "เริ่ม React app ยังไง?" คือ Create React App (CRA) ยุคนั้นจบแล้ว react.dev พูดตรง ๆ เลยว่า:
+
+> No. Create React App has been deprecated. For more information, see [Sunsetting Create React App](https://react.dev/blog/2025/02/14/sunsetting-create-react-app).
+> — [react.dev/learn/installation](https://react.dev/learn/installation)
+
+และ blog post เองก็บอกชัดว่าต้องทำอะไรแทน:
+
+> Today, we're deprecating Create React App for new apps, and encouraging existing apps to migrate to a framework, or to migrate to a build tool like Vite, Parcel, or RSBuild.
+> — [react.dev/blog](https://react.dev/blog)
+
+ตอนนี้ติดตั้ง CRA จะขึ้น warning ชี้ไปยังตัวเลือกปัจจุบัน อย่าเริ่มโปรเจกต์ใหม่ด้วย CRA และควรพิจารณาย้ายโปรเจกต์เดิมออก
 
 ตัวแทนคือทางแยก: **build tool** สำหรับ client-side SPA หรือ **framework** สำหรับอะไรก็ตามที่ต้องการ routing, server rendering หรือ Server Components
 
 ## Vite สำหรับ single-page app
 
-สำหรับ SPA แบบ client-rendered **Vite** คือมาตรฐาน: dev server ที่เร็วทันใจ, Fast Refresh และ production build ที่เร็ว
+สำหรับ SPA แบบ client-rendered **Vite** คือมาตรฐาน เช็ค currency ก่อนเสมอ — รันเองก่อน copy ตัวเลขจาก tutorial ไหนก็ตาม เพราะ command นี้แหละที่ทำให้บทนี้มีวันที่กำกับ:
+
+```bash
+npm view vite version              # 8.3.1 at the time of writing
+npm view @vitejs/plugin-react version   # 6.1.1
+```
 
 ```bash
 npm create vite@latest my-app -- --template react-ts
@@ -27,7 +43,163 @@ npm install
 npm run dev
 ```
 
-template `react-ts` ให้ React + TypeScript ตั้งค่ามาพร้อม นั่นคือ setup ทั้งหมด — ไม่ต้องเขียน config เอง
+output จริงจาก command นั้นเป๊ะ ๆ ตอนนี้:
+
+```text
+> npx
+> 'create-vite' my-app --template react-ts
+
+◇  Scaffolding project in .../my-app...
+└  Done. Now run:
+
+  cd my-app
+  npm install
+  npm run dev
+```
+
+และ `package.json` ที่มันเขียนออกมา:
+
+```json
+{
+  "scripts": { "dev": "vite", "build": "tsc -b && vite build", "lint": "oxlint", "preview": "vite preview" },
+  "dependencies": { "react": "^19.2.8", "react-dom": "^19.2.8" },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "oxlint": "^1.81.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  }
+}
+```
+
+จุด currency สองจุดที่ทำให้คนที่ copy tutorial เก่ามาสะดุด:
+
+- **template ไม่มี ESLint ให้แล้ว** มันให้ **oxlint** แทน — linter ที่เขียนด้วย Rust, config ผ่าน `.oxlintrc.json`, เปิด `react/rules-of-hooks` มาให้เลย ถ้าอยากได้ compiler-aware rule ของ `eslint-plugin-react-hooks` (ด้านล่าง) ต้องเพิ่ม ESLint เอง ไม่ได้มาให้ default อีกต่อไป
+- **`@vitejs/plugin-react` v6 เปลี่ยน transform** doc install ของ react.dev เองบอกชัด:
+
+  > `@vitejs/plugin-react` uses [Oxc](https://oxc.rs). In `@vitejs/plugin-react@6.0.0`, the inline Babel option was removed.
+  > — Vite's `create-vite` React template README
+
+  ก่อน v6 plugin ใช้ **Babel** สำหรับ Fast Refresh และ JSX ตั้งแต่ v6 เป็นต้นไป มันใช้ **Oxc** เป็น transform default — ติดตั้งเล็กลง ไม่ต้องพึ่ง Babel สำหรับกรณีทั่วไป **`@vitejs/plugin-react-swc`** ยังเป็นอีกตัวเลือกแยกต่างหาก: สลับไปใช้ SWC โดยเฉพาะเพื่อเร่ง cold start และ HMR บนโปรเจกต์ใหญ่มาก เลือก Oxc (default) ไว้ก่อน เว้นแต่มีเหตุผลเฉพาะที่ต้องใช้ SWC — `react()` เปล่า ๆ ไม่มี Babel plugin ตอนนี้คือทางที่เร็วแล้ว ไม่ใช่ทางช้าเหมือนก่อน
+
+  guide `build-a-react-app-from-scratch` ของ react.dev เองก็พูดถึง **RSbuild** (ขับเคลื่อนด้วย Rspack) เป็นทางเลือกอีกอันคู่กับ Vite — ควรรู้จักชื่อไว้ แม้คอร์สนี้จะยึด Vite เป็นมาตรฐาน
+
+## React Compiler ของจริง
+
+บทเรียน [`the-react-compiler`](/react/en/react-19/the-react-compiler/) ในโมดูล React 19 โชว์ Babel transform output จริงไปแล้ว — อ่านอันนั้นก่อนถ้ายังไม่ได้อ่าน ส่วนนี้พิสูจน์ **การเดินสาย install** ให้ทำงานจริง ซึ่งบทนั้นไม่ได้ครอบคลุม
+
+เพราะ `@vitejs/plugin-react@6.0.0+` เอา option `babel: {...}` แบบ inline ออกไปแล้ว การเดินสาย compiler เลยต้องมี plugin ตัวที่สอง `@rolldown/plugin-babel` บวก helper `reactCompilerPreset` ที่ `@vitejs/plugin-react` v6 export มาให้เพื่อการนี้โดยเฉพาะ:
+
+```bash
+npm install -D babel-plugin-react-compiler @rolldown/plugin-babel
+```
+
+```ts
+// vite.config.ts — illustrative; not type-checked here (needs @rolldown/plugin-babel + babel-plugin-react-compiler, which the shared course probe doesn't install — the real, separate build proof is in the terminal output right below)
+import { defineConfig } from 'vite'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset()] }),
+  ],
+})
+```
+
+นี่ไม่ใช่ config ที่แค่ parse ผ่าน — มันถูกรันเต็มรูปแบบใน probe ของคอร์สนี้กับ Vite scaffold ค่า default `npm run build` (`tsc -b && vite build`):
+
+```text
+vite v8.3.1 building client environment for production...
+✓ 22 modules transformed.
+dist/assets/index-C9S9Cn0y.js   223.97 kB │ gzip: 69.84 kB
+✓ built in 252ms
+```
+
+exit `0` และเมื่อตั้ง `build.minify: false` เพื่ออ่าน bundle ได้ ตัว output มี compiler runtime import อยู่จริง:
+
+```text
+$ grep -c "compiler-runtime" dist/assets/index-*.js
+2
+```
+
+สองจุดอ้างอิง — หนึ่งคือ import เอง อีกหนึ่งคือ entry ที่ `reactCompilerPreset` เติมให้ `optimizeDeps.include` อัตโนมัติ (`react/compiler-runtime`) นั่นคือ install ทั้งหมด: dev dependency สองตัว, plugin entry เพิ่มมาหนึ่งอัน แล้ว compiler ก็รันบน build จริงของคุณ — ไม่ต้องมี step แยก ไม่มี surprise ใน watch mode
+
+## `eslint-plugin-react-hooks` v7: flat config, error จริง
+
+เพราะ Vite template ไม่มี ESLint มาให้แล้ว เพิ่มเอง — แล้วเพิ่ม plugin ที่ให้ทั้ง Hooks rule คลาสสิกและ diagnostic ของ compiler เองมาเป็น lint error:
+
+```bash
+npm install -D eslint @typescript-eslint/parser eslint-plugin-react-hooks
+```
+
+```js
+// eslint.config.mjs
+import reactHooks from 'eslint-plugin-react-hooks';
+import tsParser from '@typescript-eslint/parser';
+import { defineConfig } from 'eslint/config';
+
+export default defineConfig([
+  { files: ['**/*.{ts,tsx}'], languageOptions: { parser: tsParser } },
+  reactHooks.configs.flat['recommended-latest'],
+]);
+```
+
+`recommended-latest` (`eslint-plugin-react-hooks@7.1.1` เวอร์ชันที่ probe ของคอร์สนี้ติดตั้งไว้) เปิดทั้ง rule-of-hooks *และ* rule เฉพาะของ compiler ในชุด preset เดียว — ไม่ต้องเพิ่ม package แยกสำหรับ compiler เลย นี่คือการ violate จริงสองแบบ รันผ่าน config ด้านบนเป๊ะ ๆ:
+
+```tsx
+// Bad.tsx
+import { useState } from 'react';
+
+export function Toggle({ show }: { show: boolean }) {
+  if (show) {
+    const [on, setOn] = useState(false); // hook called conditionally
+    return <button onClick={() => setOn(!on)}>{String(on)}</button>;
+  }
+  return null;
+}
+```
+
+```text
+Bad.tsx
+  5:25  error  React Hook "useState" is called conditionally. React Hooks must be called
+  in the exact same order in every component render. Did you accidentally call a React
+  Hook after an early return?  react-hooks/rules-of-hooks
+```
+
+```tsx
+// Counter.tsx
+import { useEffect, useState } from 'react';
+
+export function Counter({ step }: { step: number }) {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setCount((c) => c + step), 1000);
+    return () => clearInterval(id);
+  }, []); // missing dependency: step
+  return <output>{count}</output>;
+}
+```
+
+```text
+Counter.tsx
+  8:6  warning  React Hook useEffect has a missing dependency: 'step'. Either include
+  it or remove the dependency array. If 'setCount' needs the current value of 'step',
+  you can also switch to useReducer instead of useState and read 'step' in the
+  reducer  react-hooks/exhaustive-deps
+```
+
+ทั้งสองอันจริง ทั้งสองอันมาจาก config ข้างบนตรง ๆ — ไม่ได้เขียน error text เอง
+
+## TypeScript strict ตั้งแต่ต้น
+
+probe ของคอร์สนี้เอง (และทุก scaffold ข้างบน) เปิด `strict` บวกอีกสอง setting ที่ควรรู้จักชื่อไว้ เพราะมันเปลี่ยนความหมายของ "TypeScript ที่ valid" ใน setup นี้โดยเฉพาะ:
+
+- **`erasableSyntaxOnly`** — ปฏิเสธ construct ที่มีแค่ใน TS runtime (`enum`, constructor parameter property) ที่ erase ไปเป็นค่าว่างในระดับ type ไม่ได้ Node สมัยใหม่รัน `.ts` ตรง ๆ ได้ด้วยการ strip type ออก flag นี้ทำให้ code ของคุณเข้ากันได้กับแบบนั้นโดยโครงสร้าง
+- **`noUnusedLocals` / `noUnusedParameters`** — import หรือ prop ที่ destructure มาแล้วไม่ใช้คือ compile error ไม่ใช่แค่ lint warning code ที่ generate มาแล้วมี import เหลือค้างจะ build พังตรงนี้ ไม่ใช่แค่ `eslint` บ่น
+
+บทเรียน [TypeScript with React](/react/en/tooling-and-production/typescript-with-react/) ลงลึกเรื่อง type component, hooks และ event ภายใต้ strict config ชุดเดียวกันนี้
 
 ## framework สำหรับ routing, SSR และ RSC
 
@@ -42,9 +214,9 @@ npx create-react-router@latest    # React Router (framework mode) — routing + 
 
 export const chooseDiagram = `flowchart TB
   q{"ต้องการ routing / SSR /\nServer Components?"}
-  q -->|no, client SPA| vite["Vite\n(build tool)"]
+  q -->|no, client SPA| vite["Vite\n(build tool, Oxc transform)"]
   q -->|yes| fw["Framework:\nNext.js or React Router"]
-  cra["Create React App"] -->|deprecated| x["do not use"]`;
+  cra["Create React App"] -->|deprecated 2025| x["do not use"]`;
 
 framework ดูแลเรื่องที่ build tool ทิ้งให้คุณจัดการ: nested route, data fetching บน server, streaming และ RSC boundary (อยู่ในโมดูล React 19) สำหรับ SPA แบบ dashboard หลัง login Vite เพียงพอ; สำหรับ content site หรืออะไรที่เน้น SEO หรือ server-data ก็คุ้มที่จะใช้ framework
 
@@ -57,50 +229,113 @@ framework ดูแลเรื่องที่ build tool ทิ้งให�
 - **JSX transform สมัยใหม่** — ไม่ต้อง `import React from 'react'` ที่หัวทุกไฟล์แค่เพื่อใช้ JSX อีกต่อไป; compiler inject runtime import ให้ (ยังต้อง import hooks และ API ที่ใช้)
 - **Strict Mode** — ครอบ app ด้วย `<StrictMode>` ใน development เพื่อจับ render ที่ไม่ pure และบั๊ก effect (การ double-invoke ที่คุณเจอใน Foundations)
 
+## Mental Model
+
+tooling พวกนี้ไม่ใช่ React เลย React ship แค่ rendering library เท่านั้นโดยตั้งใจ — ทุกตัวเลือกในบทนี้ (Oxc เทียบ SWC transform, ESLint เทียบ oxlint, Vite เทียบ framework) คือคำตอบที่ community เห็นตรงกันว่า "จะใส่อะไรรอบ ๆ React" ไม่ใช่ API ของ React เอง อ่าน currency claim ในบทนี้แบบเดียวกัน: เป็น "สิ่งที่ลงตัวกัน ณ เลขเวอร์ชันที่โชว์ไว้" เช็คซ้ำได้ด้วย command `npm view` / scaffold เป๊ะ ๆ ที่ให้ไว้ ไม่ใช่สิ่งที่ต้องจำ
+
+## ข้อแลกเปลี่ยน
+
+| ตัวเลือก | ได้อะไร | ต้นทุน |
+| --- | --- | --- |
+| Vite + `@vitejs/plugin-react` (Oxc, default) | ติดตั้งเล็กลง ไม่ต้องพึ่ง Babel ทางที่เร็วที่สุดสำหรับกรณีทั่วไป | ไม่มี Babel plugin แบบ inline — compiler ต้องเดินสายแยกผ่าน `@rolldown/plugin-babel` ตามที่โชว์ข้างบน |
+| `@vitejs/plugin-react-swc` | cold start/HMR เร็วกว่าบน codebase ใหญ่มาก | ต้องรู้จัก transform ตัวที่สองเพิ่ม ไม่จำเป็นถ้า Oxc ยังไม่ใช่คอขวดจริง |
+| framework (Next.js / React Router) แทน Vite | routing, SSR, RSC จัดการให้ | ต้องเรียนรู้เพิ่ม โครงสร้างมี opinion มากกว่า บ่อยครั้งเกินความจำเป็นสำหรับ SPA เล็ก ๆ |
+| oxlint (default ของ scaffold) เทียบเพิ่ม ESLint + `eslint-plugin-react-hooks` | oxlint เร็วทันที ไม่ต้อง config มี `react/rules-of-hooks` มาให้ | เฉพาะ ESLint `recommended-latest` เท่านั้นที่ให้ diagnostic ของ React Compiler เองเป็น lint error |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"CRA เก่าแต่ยังใช้ได้กับโปรเจกต์เล็ก ๆ"** guide install ของ react.dev เองตอบตรง ๆ: "No. Create React App has been deprecated." ไม่ใช่แค่เรื่องรสนิยมอีกต่อไป — doc พาคุณออกห่างจากมันจริง ๆ
+- **"เพิ่ม `@vitejs/plugin-react` แล้วได้ Babel มาด้วย"** ไม่ใช่ตั้งแต่ v6 — ทางเดิน default คือ Oxc ไม่มี Babel dependency เลย คุณเพิ่ม Babel กลับมาเอง (ผ่าน `@rolldown/plugin-babel`) ก็ต่อเมื่อต้องการ plugin ที่เป็น Babel-only อย่าง React Compiler
+- **"Vite React template มี ESLint มาให้"** มันมี **oxlint** ให้ ถ้าโปรเจกต์ที่ generate มามี `eslint.config.js` ที่คุณไม่ได้เพิ่มเอง เช็คว่ามันรันจริงไหม — config ที่ว่างเปล่าหรือค้างเก่าแย่กว่าไม่มี config เพราะดูเหมือนกำลัง lint อยู่ทั้งที่ไม่ได้ทำอะไร
+
+## อ่านโค้ดที่ AI เขียน
+
+- โปรเจกต์ยังมีไฟล์ `.eslintrc.*` แบบเก่าอยู่คู่กับ ESLint เวอร์ชันปัจจุบันไหม? ESLint 9+ เป็น flat-config-only โดย default และปฏิเสธที่จะรันเลยถ้าเจอ `.eslintrc.*` โดยไม่มี `eslint.config.*` — นี่ไม่ใช่เรื่อง style แต่คือ fail แบบเต็ม ๆ
+- ถ้า `vite.config.ts` ส่ง `react({ babel: { plugins: [...] } })` เช็คเวอร์ชัน `@vitejs/plugin-react` ที่ติดตั้งอยู่ — option นั้นไม่มีตั้งแต่ v6.0.0 เป็นต้นไป และขึ้นอยู่กับ type ที่ใช้ การส่ง option นี้อาจเป็น silent no-op แทนที่จะ error ตอน build
+- hook ถูกเรียกหลัง `return` แบบ early หรือในนั้น `if` ไหม? `react-hooks/rules-of-hooks` จะจับได้ก็ต่อเมื่อ config ถูกตั้งและรันจริง — เช็คว่า lint command ถูกเดินสายเข้า CI แล้ว ไม่ใช่แค่มีอยู่ใน `package.json`
+- `eslint-plugin-react-hooks` ตั้งเป็น `recommended` (แค่ rules-of-hooks + exhaustive-deps) ทั้งที่โปรเจกต์อยากได้ diagnostic ของ React Compiler ด้วย (`immutability`, `purity`, `set-state-in-render`, …) ไหม? อันหลังมาจาก `recommended-latest` เท่านั้น
+
+<SpotTheBug code={`// eslint.config.js
+import react from '@vitejs/plugin-react'
+
+export default {
+  plugins: [
+    react({ babel: { plugins: ['babel-plugin-react-compiler'] } }),
+  ],
+}`}>
+นี่คือวิธีเดินสาย React Compiler เข้า `@vitejs/plugin-react` แบบก่อน v6.0.0 ที่ถูก copy มาใช้ในโปรเจกต์ที่รัน plugin เวอร์ชันปัจจุบัน เช็คตรง ๆ กับ type definition ของ `@vitejs/plugin-react@6.1.1` เอง: `Options` ไม่มี field `babel` อีกต่อไป — การส่ง option นี้เข้าไปจะ type-check ไม่ผ่านภายใต้ strict TypeScript หรือไม่ก็ถูกเมินเฉยตอน runtime แล้วแต่ config เขียนแบบไหน ไม่ว่าทางไหน compiler ก็ไม่เคยรัน โดยไม่มี error บอกเลย การเดินสายปัจจุบันต้องมี plugin ตัวที่สองแยกต่างหาก: `@rolldown/plugin-babel` โดยส่ง compiler เข้าไปเป็น *preset* ผ่าน `reactCompilerPreset()` — พิสูจน์ด้วย `vite build` จริงก่อนหน้านี้ในบทเรียน (`grep -c "compiler-runtime" dist/assets/index-*.js` → `2` ยืนยันว่า transform รันจริง) เช็ค `npm ls @vitejs/plugin-react` ก่อน copy install snippet เสมอ — นี่คือรายละเอียดที่ล้าสมัยเร็วมากระหว่าง major version ของ plugin
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-**Create React App ถูก deprecated แล้ว** — เริ่มโปรเจกต์ใหม่ด้วย **Vite** (`npm create vite@latest -- --template react-ts`) สำหรับ client SPA หรือ **framework** (Next.js / React Router) เมื่อต้องการ routing, SSR หรือ Server Components พึ่ง **React DevTools**, **Fast Refresh**, JSX transform อัตโนมัติ และ **Strict Mode** เพื่อ dev loop ที่เร็วและปลอดภัย
+**Create React App ถูก deprecated แล้ว** — react.dev บอกตรง ๆ เริ่มโปรเจกต์ใหม่ด้วย **Vite** (`@vitejs/plugin-react` v6+, Oxc transform เป็น default) สำหรับ client SPA หรือ **framework** (Next.js / React Router) สำหรับ routing, SSR หรือ Server Components เดินสาย **React Compiler** ด้วย `@rolldown/plugin-babel` + `reactCompilerPreset()` (option Babel แบบ inline หายไปตั้งแต่ v6) และเพิ่ม **`eslint-plugin-react-hooks@7`'s `recommended-latest`** flat config เพื่อได้ทั้ง Hooks rule คลาสสิกและ diagnostic ของ compiler เอง — oxlint ที่มากับ scaffold default ไม่ให้สิ่งนั้น
 </Callout>
 
 export const quizProject = [
   {
-    q: 'ทีม React แนะนำอะไรสำหรับ client-side SPA ใหม่?',
+    q: 'สถานะปัจจุบันของ Create React App ตามที่ react.dev บอกเองคืออะไร?',
     options: [
-      'Create React App',
-      'Vite (เช่น `npm create vite@latest -- --template react-ts`)',
-      'Webpack config ดิบ ๆ',
-      'แก้ script tag บน CDN',
+      'ยังแนะนำให้ใช้กับ prototype เร็ว ๆ',
+      '"No. Create React App has been deprecated." — guide install ของ react.dev บอกตรง ๆ แบบนี้',
+      'ถูก merge เข้า Vite แล้ว',
+      'จำเป็นสำหรับ TypeScript support',
     ],
     answer: 1,
+    explain: 'react.dev/learn/installation ตอบคำถาม "Should I use Create React App?" ด้วย "No. Create React App has been deprecated." พร้อมลิงก์ไปประกาศ sunsetting ปี 2025',
   },
   {
-    q: 'ควรเลือก framework (Next.js / React Router) แทน Vite เมื่อไร?',
+    q: 'ตั้งแต่ `@vitejs/plugin-react` v6 plugin ใช้อะไรเป็น transform default?',
     options: [
-      'ไม่มีวัน — Vite ครอบคลุมทุกอย่าง',
-      'เมื่อต้องการ routing, server-side rendering หรือ Server Components',
-      'เฉพาะ app เล็ก ๆ',
-      'เฉพาะเมื่อใช้ JavaScript ไม่ใช่ TypeScript',
+      'Babel เหมือนเดิม',
+      'Oxc — Babel ไม่ใช่ dependency สำหรับทางเดิน default อีกต่อไป',
+      'SWC แทนที่ Babel ทั้งหมด',
+      'compiler API ของ TypeScript เอง',
     ],
     answer: 1,
+    explain: 'ประกาศ v8 ของ Vite เอง: "@vitejs/plugin-react v6... uses Oxc for React Refresh transform. Babel is no longer a dependency." @vitejs/plugin-react-swc ยังเป็นตัวเลือกแยกที่ใช้ SWC สำหรับความเร็ว cold-start/HMR บนโปรเจกต์ใหญ่',
   },
   {
-    q: 'Fast Refresh ทำอะไร?',
+    q: '```ts\n// vite.config.ts, @vitejs/plugin-react@6.1.1\nimport react from \'@vitejs/plugin-react\'\nexport default { plugins: [react({ babel: { plugins: [\'babel-plugin-react-compiler\'] } })] }\n```\nทำไม config นี้ถึงไม่เปิด React Compiler บนเวอร์ชันนี้?',
     options: [
-      'reload ทั้งหน้าและ reset state',
-      'apply การแก้ component ทันทีโดยเก็บ state ของ component ไว้',
-      'เร่ง production build อย่างเดียว',
-      'รัน test ให้',
+      'babel-plugin-react-compiler ไม่มีอยู่จริง',
+      'option `babel` แบบ inline ถูกเอาออกใน @vitejs/plugin-react@6.0.0 — ต้องเดินสายแยกผ่าน @rolldown/plugin-babel + reactCompilerPreset() แทน',
+      'Vite ไม่รองรับ Babel เลยแล้ว',
+      'compiler ทำงานกับ webpack เท่านั้น',
     ],
     answer: 1,
+    explain: 'พิสูจน์ด้วย vite build จริง: การเดินสาย reactCompilerPreset() + @rolldown/plugin-babel ให้ bundle ที่มี "compiler-runtime" อยู่จริง (grep count 2); option babel แบบก่อน v6 ไม่มี field เทียบเท่าใน Options type ปัจจุบัน',
   },
   {
-    q: 'ทำไมปกติไม่ต้องเขียน `import React from "react"` ที่หัวทุกไฟล์อีกแล้ว?',
+    q: 'Vite template `react-ts` มี linter อะไรมาให้ default ตอนนี้?',
     options: [
-      'React ถูกลบออก',
-      'JSX transform สมัยใหม่ inject runtime import ให้อัตโนมัติ',
-      'JSX ไม่ต้องใช้ React อีกต่อไป',
-      'import แบบ global ผ่าน script tag',
+      'ESLint พร้อม eslint-plugin-react-hooks ตั้งไว้แล้ว',
+      'oxlint (linter ที่เขียนด้วย Rust) ไม่ใช่ ESLint — react/rules-of-hooks เปิดมาให้ default',
+      'ไม่มี linter เลย',
+      'TSLint',
     ],
     answer: 1,
+    explain: '`npm create vite@latest -- --template react-ts` ใหม่ ๆ เขียน `.oxlintrc.json` และ script `"lint": "oxlint"` ให้ — ไม่มี ESLint dependency เพิ่ม ESLint เองถ้าต้องการ compiler-aware rule ของ eslint-plugin-react-hooks',
+  },
+  {
+    q: '```tsx\nexport function Toggle({ show }: { show: boolean }) {\n  if (show) {\n    const [on, setOn] = useState(false);\n    return <button onClick={() => setOn(!on)}>{String(on)}</button>;\n  }\n  return null;\n}\n```\n`recommended-latest` ของ `eslint-plugin-react-hooks` รายงานอะไรสำหรับโค้ดนี้ ยืนยันด้วยการรันจริง?',
+    options: [
+      'ไม่มีอะไร — นี่คือ React ที่ valid',
+      'error react-hooks/rules-of-hooks: "React Hook \'useState\' is called conditionally... Did you accidentally call a React Hook after an early return?"',
+      'TypeScript compile error เท่านั้น',
+      'warning เรื่อง key prop หายไป',
+    ],
+    answer: 1,
+    explain: 'รันจริงกับ flat config recommended-latest ของ eslint-plugin-react-hooks@7.1.1: เป็น error ของ ESLint ไม่ใช่ warning ที่บรรทัดเรียก useState ใน `if`',
+  },
+  {
+    q: 'react.dev quote อะไรเป็นทางเลือกแทน Create React App นอกจาก Vite?',
+    options: [
+      'ไม่พูดถึงอะไรเพิ่ม',
+      'framework หรือ build tool ตัวอื่นอย่าง Parcel หรือ RSBuild',
+      'Next.js เท่านั้น',
+      'กลับไปใช้ script tag ธรรมดา',
+    ],
+    answer: 1,
+    explain: 'blog sunsetting: "we\'re... encouraging existing apps to migrate to a framework, or to migrate to a build tool like Vite, Parcel, or RSBuild." คอร์สนี้ยึด Vite เป็นมาตรฐาน แต่ชื่ออื่นก็เป็นตัวเลือกจริงและปัจจุบัน',
   },
 ];
 

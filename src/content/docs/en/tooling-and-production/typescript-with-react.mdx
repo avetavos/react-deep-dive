@@ -1,13 +1,15 @@
 ---
 title: 'TypeScript with React'
-description: 'Typing components, props, children, hooks, and events — plus the React 19 change that ref is now a normal prop, so forwardRef generics are gone.'
+description: 'Typing components, props, children, hooks, and events — ComponentProps vs ComponentPropsWithoutRef, ReactNode vs ReactElement vs JSX.Element, generic components, satisfies, discriminated unions, and the React 19 ref changes — every claim tsc-checked.'
 sidebar:
   order: 4
 ---
 
+import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Typing a component and its props
 
@@ -27,6 +29,39 @@ function Button({ label, onClick, variant = 'primary' }: ButtonProps) {
 
 Prefer typing the props object directly (as above) over the older `React.FC` — `React.FC` has fallen out of favor (it complicates generics and children typing). Just annotate the destructured props parameter.
 
+## Stealing a host element's props: `ComponentProps` vs `ComponentPropsWithoutRef`
+
+A wrapper component often needs to accept *every* prop the host element it renders accepts — instead of re-declaring `onClick`, `disabled`, `aria-*`, and so on by hand, "steal" them:
+
+```tsx
+// src/proofs/ts/ComponentPropsGood.tsx
+import type { ComponentProps, ComponentPropsWithoutRef } from 'react';
+
+// ComponentProps<'button'> "steals" every prop the host <button> element
+// accepts, including `ref` (a plain prop for host elements) and all the
+// standard HTML attributes — so a wrapper takes exactly what a real
+// <button> takes, with no manual re-declaration.
+type IconButtonProps = ComponentProps<'button'> & { icon: React.ReactNode };
+
+function IconButton({ icon, children, ...rest }: IconButtonProps) {
+  return <button {...rest}>{icon}{children}</button>;
+}
+
+// Type-level proof, checked by tsc: does 'ref' appear in each type's keys?
+type HasRefKey<T> = 'ref' extends keyof T ? true : false;
+
+// ComponentProps<'button'> DOES include 'ref' (host elements accept it directly).
+const includesRef: HasRefKey<ComponentProps<'button'>> = true;
+// ComponentPropsWithoutRef<'button'> strips it — for when you attach your own ref.
+const excludesRef: HasRefKey<ComponentPropsWithoutRef<'button'>> = false;
+
+void includesRef;
+void excludesRef;
+void IconButton;
+```
+
+That last pair of lines is a real, tsc-checked assertion, not a comment claiming it — flip either literal (`true`/`false`) and `tsc` fails with `Type 'true' is not assignable to type 'false'`. Reach for `ComponentPropsWithoutRef<'button'>` specifically when your wrapper attaches its *own* `ref` to a different inner element than the one it forwards `...rest` to — `ComponentProps` would otherwise let two different `ref` props collide.
+
 ## Children and common React types
 
 When a component wraps other content, type `children` as `React.ReactNode` — the broadest "anything renderable" type:
@@ -42,7 +77,251 @@ function Card({ title, children }: CardProps) {
 }
 ```
 
-Other types you'll reach for: `React.ReactNode` (renderable content), `React.ComponentProps<'button'>` (steal a host element's props), and `React.CSSProperties` (a `style` object).
+Other types you'll reach for: `React.ComponentProps<'button'>` (above), `React.CSSProperties` (a `style` object), and — the one people mix up most — `ReactNode` vs `ReactElement` vs `JSX.Element`, next.
+
+## `ReactNode` vs `ReactElement` vs `JSX.Element`
+
+These three look interchangeable and are not. `ReactNode` is a big union — anything renderable, including `null`:
+
+```tsx
+// src/proofs/ts/NodeVsElement.tsx
+// ReactNode is the broadest "anything renderable" type: elements, strings,
+// numbers, booleans, null, undefined, arrays/iterables of the same.
+function Maybe({ show }: { show: boolean }): React.ReactNode {
+  if (!show) return null;      // ReactNode includes null — fine
+  return 'hello';              // ReactNode includes plain strings — fine
+}
+
+void Maybe;
+```
+
+`ReactElement` is narrower — only an actual element, no `null`, no plain strings:
+
+```tsx
+// @expect-error ReactElement (and JSX.Element) reject null — only ReactNode includes it
+import type { ReactElement } from 'react';
+
+// ReactElement does NOT include null/undefined/string/number/boolean —
+// only an actual element.
+function Bad({ show }: { show: boolean }): ReactElement {
+  if (!show) return null; // must error: null is not assignable to ReactElement
+  return <p>hi</p>;
+}
+```
+
+```text
+BadElement.tsx(6,14): error TS2322: Type 'null' is not assignable to type
+'ReactElement<unknown, string | JSXElementConstructor<any>>'.
+```
+
+And `JSX.Element`? It behaves *identically* to `ReactElement<any, any>` — `@types/react` literally declares it that way:
+
+```ts
+// from @types/react's global JSX namespace
+interface Element extends React.ReactElement<any, any> {}
+```
+
+So `JSX.Element` also rejects `null`, for the same reason. There's a real, current wrinkle worth knowing, though: with `@types/react@19`, the global `JSX` namespace is no longer ambient by default — a bare `JSX.Element` return type can fail with `Cannot find namespace 'JSX'` unless you import it:
+
+```tsx
+// @expect-error even with the JSX import fixed, ReactElement/JSX.Element still reject null
+import type { JSX } from 'react';
+
+function AlsoBad({ show }: { show: boolean }): JSX.Element {
+  if (!show) return null; // must error, same as ReactElement above
+  return <p>hi</p>;
+}
+```
+
+```text
+_import-jsx.tsx(4,14): error TS2322: Type 'null' is not assignable to type 'Element'.
+```
+
+(Without the `import type { JSX } from 'react'` line, this file fails to compile at all — `TS2503: Cannot find namespace 'JSX'` — a different, earlier error than the one above. `React.JSX.Element` works with no import, if you'd rather qualify it than import the name.) The rule of thumb: return `ReactNode` (or `ReactNode | null` explicitly) when `null`/conditional-nothing is a legitimate result — which is most components — and reserve `ReactElement`/`JSX.Element` for a signature that specifically promises "always a real element, never nothing."
+
+<Mermaid title="Which return/children type actually accepts what" code={typeDiagram} />
+
+export const typeDiagram = `flowchart LR
+  node["ReactNode\n(strings, numbers, null,\nundefined, arrays, elements)"]
+  elem["ReactElement\n=== JSX.Element\n(an element only, never null)"]
+  node -->|"ReactElement is one\nkind of ReactNode"| elem`;
+
+## Generic components: the `<T,>` trailing comma
+
+A plain `function` declaration has no ambiguity with a type parameter in a `.tsx` file:
+
+```tsx
+// src/proofs/ts/GenericList.tsx
+function List<T>({ items, render }: { items: T[]; render: (item: T) => React.ReactNode }) {
+  return <ul>{items.map((item, i) => <li key={i}>{render(item)}</li>)}</ul>;
+}
+
+void List;
+```
+
+An **arrow-function** generic component needs the trailing comma, because `.tsx` parses `<T>` as the start of a JSX tag otherwise:
+
+```tsx
+const ArrowList = <T,>({ items, render }: { items: T[]; render: (item: T) => React.ReactNode }) => (
+  <ul>{items.map((item, i) => <li key={i}>{render(item)}</li>)}</ul>
+);
+```
+
+Drop the comma and watch it actually happen — real, cascading parser errors, not a style nitpick:
+
+```tsx
+// @expect-error missing trailing comma — <T> is parsed as an unclosed JSX tag in .tsx
+const ArrowList = <T>({ items }: { items: T[] }) => <ul>{items.length}</ul>;
+```
+
+```text
+BadArrowGeneric.tsx(1,20): error TS17008: JSX element 'T' has no corresponding closing tag.
+BadArrowGeneric.tsx(1,41): error TS1005: '}' expected.
+BadArrowGeneric.tsx(1,47): error TS1381: Unexpected token. Did you mean `{'}'}` or `&rbrace;`?
+BadArrowGeneric.tsx(1,51): error TS1382: Unexpected token. Did you mean `{'>'}` or `&gt;`?
+BadArrowGeneric.tsx(3,1): error TS1005: '</' expected.
+```
+
+`<T,>` (or `<T extends unknown>`, which also disambiguates) fixes it. Plain `function` declarations don't need either trick.
+
+## `satisfies`: validate without widening
+
+`satisfies` checks an object literal against a shape *without* changing the literal's inferred type to that shape. The difference shows up the moment you access a property whose value is more specific than the checked type allows:
+
+```tsx
+// src/proofs/ts/Satisfies.tsx
+type Status = 'idle' | 'loading' | 'error';
+
+// `satisfies` checks the object against a shape WITHOUT widening the
+// variable's type TO that shape — each property keeps its own more-specific
+// inferred type instead of the annotated union.
+const retryDelayMs = {
+  idle: 0,
+  loading: 250,
+  error: [500, 1000, 2000], // per-attempt backoff, not a single number
+} satisfies Record<Status, number | number[]>;
+
+// Proof: retryDelayMs.error is still typed as `number[]` specifically (not
+// widened to `number | number[]`), so array methods work with no narrowing.
+retryDelayMs.error.push(4000);
+
+// With a plain annotation instead, every value is widened to the union —
+// `.push` is not available on `number | number[]` without narrowing first.
+const retryDelayMs2: Record<Status, number | number[]> = {
+  idle: 0,
+  loading: 250,
+  error: [500, 1000, 2000],
+};
+// @ts-expect-error — retryDelayMs2.error's type is `number | number[]`
+// (widened by the annotation), and `.push` doesn't exist on `number`.
+retryDelayMs2.error.push(4000);
+```
+
+Both `satisfies` and a plain annotation still catch a typo'd key or a value of the wrong overall type at the object literal — `satisfies` just doesn't also throw away precision you already had.
+
+## Discriminated union props
+
+When a prop type has genuinely different shapes depending on a "kind" field, model it as a union and let TypeScript narrow per branch — instead of one shape with a pile of optional fields:
+
+```tsx
+// src/proofs/ts/DiscriminatedUnion.tsx
+// A discriminated union props type: exactly one shape per `status`, and TS
+// narrows which OTHER fields exist based on which literal `status` is.
+type FetchState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'success'; data: string[] };
+
+function Result({ state }: { state: FetchState }) {
+  switch (state.status) {
+    case 'idle':
+      return null;
+    case 'loading':
+      return <p>Loading…</p>;
+    case 'error':
+      // Narrowed: only this branch has `message` — no optional-chaining needed.
+      return <p role="alert">{state.message}</p>;
+    case 'success':
+      // Narrowed: only this branch has `data`.
+      return <ul>{state.data.map((d) => <li key={d}>{d}</li>)}</ul>;
+    default: {
+      // Exhaustiveness check: if a FetchState variant is ever added without a
+      // matching case above, `state` here is NOT `never` and this line fails
+      // to compile — catching the missing branch at build time.
+      const exhaustive: never = state;
+      return exhaustive;
+    }
+  }
+}
+
+void Result;
+```
+
+The `never`-assignment in `default` isn't decoration — add a fifth `{ status: 'cancelled' }` variant to the union without adding its `case`, and `tsc` fails right there:
+
+```text
+error TS2322: Type '{ status: "cancelled"; }' is not assignable to type 'never'.
+```
+
+That's a compile-time guarantee every branch of a discriminated union prop is handled, checked on every build — not something you have to remember to test.
+
+## `as const` for tuples returned from a custom hook
+
+A custom hook that returns `[value, setter]` (mirroring `useState`'s own shape) needs `as const`, or the return type collapses into an array of the *union* of both element types:
+
+```tsx
+// @expect-error no as const — return type widens to an array of the union, losing per-position typing
+import { useState } from 'react';
+
+// No explicit return type, no `as const`: TS infers the return as an ARRAY
+// type (the union of all element types), not a fixed-length tuple.
+function useToggle(initial: boolean) {
+  const [value, setValue] = useState(initial);
+  function toggle() {
+    setValue((v) => !v);
+  }
+  return [value, toggle]; // inferred: (boolean | (() => void))[]
+}
+
+function Widget() {
+  const [on, toggleOn] = useToggle(false);
+  on(); // must error — `on` is typed boolean | (() => void), not narrowed by position
+  void toggleOn;
+  return null;
+}
+```
+
+```text
+BadUseToggle.tsx(18,3): error TS2349: This expression is not callable.
+  Not all constituents of type 'boolean | (() => void)' are callable.
+    Type 'false' has no call signatures.
+```
+
+```tsx
+// src/proofs/ts/UseToggle.tsx
+import { useState } from 'react';
+
+// `as const` on the returned array fixes both length and per-position type:
+// TS infers `readonly [boolean, () => void]` instead of `(boolean | (() => void))[]`.
+function useToggle(initial: boolean) {
+  const [value, setValue] = useState(initial);
+  function toggle() {
+    setValue((v) => !v);
+  }
+  return [value, toggle] as const;
+}
+
+function Widget() {
+  const [on, toggle] = useToggle(false);
+  // `on` is `boolean`, `toggle` is `() => void` — exactly like useState's own
+  // return type, and for the same reason (useState itself returns a tuple
+  // via an explicit overload, not `as const` — but the effect is identical).
+  return <button onClick={toggle}>{on ? 'on' : 'off'}</button>;
+}
+
+void Widget;
+```
 
 ## Typing hooks
 
@@ -51,9 +330,6 @@ Inference handles most hooks, but supply a type argument when the initial value 
 ```tsx
 const [count, setCount] = useState(0);               // inferred: number
 const [user, setUser] = useState<User | null>(null); // needs the annotation
-
-const inputRef = useRef<HTMLInputElement>(null);     // ref to a DOM node
-const timer = useRef<number | undefined>(undefined); // ref to a mutable value
 ```
 
 ## Typing events
@@ -67,7 +343,7 @@ function onChange(e: React.ChangeEvent<HTMLInputElement>) {
 <button onClick={(e) => e.preventDefault()}>Go</button>  // e inferred as React.MouseEvent
 ```
 
-## React 19: ref is a normal prop
+## React 19: `ref` is a normal prop, and `useRef` needs an argument
 
 A concrete currency win: in **React 19, `ref` is a regular prop** for function components, so you no longer need `forwardRef` and its awkward generics. You type `ref` right alongside the other props:
 
@@ -85,50 +361,153 @@ function TextInput({ placeholder, ref }: InputProps) {
 
 `forwardRef` still works and older code using `React.forwardRef<HTMLInputElement, Props>` is fine, but for new components in React 19 you skip it entirely — one fewer wrapper and no generic gymnastics.
 
+The companion change is in `useRef` itself: `@types/react@19` has exactly three overloads, and none of them takes zero arguments —
+
+```ts
+// from @types/react's actual declarations
+function useRef<T>(initialValue: T): RefObject<T>;
+function useRef<T>(initialValue: T | null): RefObject<T | null>;
+function useRef<T>(initialValue: T | undefined): RefObject<T | undefined>;
+```
+
+— so the old `useRef<HTMLDivElement>()` habit (no argument, relying on an implicit-`undefined` overload from older type definitions) now fails to match any of them:
+
+```tsx
+// @expect-error React 19 types: useRef has no zero-argument overload
+import { useRef } from 'react';
+function Box() {
+  const ref = useRef<HTMLDivElement>(); // React 19 types: no zero-arg overload
+  return <div ref={ref} />;
+}
+```
+
+```text
+BadUseRefNoArg.tsx(3,15): error TS2554: Expected 1 arguments, but got 0.
+```
+
+The fix is exactly the fix you'd guess — pass the initial value explicitly, `null` for a DOM ref you'll attach later:
+
+```tsx
+// src/proofs/ts/UseRefFix.tsx
+import { useRef } from 'react';
+
+function Box() {
+  // React 19 requires an explicit initial value — pass null for a DOM ref.
+  const ref = useRef<HTMLDivElement>(null);
+  return <div ref={ref} />;
+}
+
+void Box;
+```
+
+## Mental Model
+
+TypeScript's job here isn't to describe what React *does* at runtime — it's to describe the *shape* of what you're allowed to pass, return, and read. `ReactElement`/`JSX.Element` vs. `ReactNode`, `ComponentProps` vs. `ComponentPropsWithoutRef`, and the tuple-vs-array distinction from `as const` are all the same idea repeated: the runtime value is often identical either way, but the *type* narrows or widens what the compiler will let the rest of your code do with it. Read every type in this lesson as "what does this let a caller get away with," not "what does this look like."
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `ComponentProps<'button'>` | Every host prop, zero re-declaration | Includes `ref` — use `ComponentPropsWithoutRef` if your wrapper needs its own |
+| `ReactNode` as a return/children type | Accepts `null`, strings, arrays — matches what most components actually return | Too broad when a signature should promise "always a real element" |
+| `satisfies` over a plain type annotation | Keeps per-property literal/narrow types while still validating the shape | One more piece of syntax to know; easy to reach for a plain annotation out of habit |
+| Discriminated union props + exhaustive `switch` | Compiler-enforced handling of every variant | More type declarations up front than one shape with optional fields |
+| `ref` as a plain prop (React 19) vs. `forwardRef` | No generic wrapper, one less layer | Older code and libraries you depend on may still use `forwardRef` — both coexist |
+
+## Common Misconceptions
+
+- **"`ReactElement` and `JSX.Element` are different types."** They're not — `@types/react` defines `JSX.Element` as `interface Element extends ReactElement<any, any> {}`. Whichever you pick, both reject `null`/`undefined`/plain strings the same way.
+- **"`useRef<T>()` with no argument still works, it just infers `undefined`."** Not in `@types/react@19` — there is no zero-argument overload anymore. `tsc` fails immediately with `Expected 1 arguments, but got 0`, not a silent wrong inference.
+- **"`<T>` always works for a generic component in `.tsx`."** Only in a plain `function` declaration. An arrow function needs `<T,>` (or `<T extends unknown>`) — otherwise the parser reads it as an unclosed JSX tag, with a cascade of unrelated-looking errors as the tell.
+- **"`satisfies` is just a fancier type annotation."** It changes *nothing* about which errors get caught at the object literal — it only changes what type the checked expression keeps afterward. Skipping it doesn't make your code less safe; it just widens types you might have wanted to stay specific.
+
+## Reading AI-generated code
+
+- Does a prop typed `any` show up anywhere it could instead be a real shape, `unknown`, or a generic? `any` silently disables every check this lesson relies on — it isn't a neutral placeholder.
+- Is a component's return type annotated `JSX.Element` (or `ReactElement`) in a place that also needs to return `null` (an early "nothing to render" branch)? That combination fails to compile — check whether the annotation should be `ReactNode` instead, or whether the `null` branch is a real bug.
+- Does `useRef<HTMLElement>()` appear with **no** argument? Under `@types/react@19` that's a hard compile error, not a style issue — confirm the code was actually type-checked, not just visually reviewed.
+- Does a wrapper component spread `ComponentProps<'button'>` and *also* declare its own `ref` prop separately? Check whether `ComponentPropsWithoutRef` was the type that was actually needed, to avoid two conflicting `ref` sources.
+- For a hook returning a tuple, is the return statement missing `as const` (or an explicit tuple return-type annotation)? If callers destructure it and one position doesn't behave like a function/value where expected, this is very likely why.
+
+<SpotTheBug code={`function StatusIcon({ visible }: { visible: boolean }): JSX.Element {
+  if (!visible) {
+    return null;
+  }
+  return <span className="icon" />;
+}`}>
+`JSX.Element` (declared in `@types/react` as `interface Element extends ReactElement<any, any> {}`) does not include `null` — only `ReactNode` does. Compiling this exact shape (return type `JSX.Element`, one branch returning `null`) fails with `Type 'null' is not assignable to type 'Element'`, verified directly in this course's probe. The fix is either widening the return type to `React.ReactNode` (correct here — nothing-to-render is a real, expected outcome) or, if the component genuinely must always return an element, restructuring the caller so it never needs the `null` branch. A generated component that "returns nothing" from a branch typed `JSX.Element`/`ReactElement` is one of the most common places AI-written TypeScript quietly fails to compile — always run `tsc --noEmit`, don't just read the JSX.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-Type a component by typing its **props object** (skip `React.FC`); type `children` as `React.ReactNode`; give hooks a type argument when the initial value is ambiguous (`useState<User | null>(null)`, `useRef<HTMLInputElement>(null)`); and type events with `React.ChangeEvent`/`MouseEvent`. In **React 19, `ref` is a normal prop** — type it as `React.Ref<T>` in your props and drop `forwardRef` for new code.
+Type props as a plain object (skip `React.FC`), steal host props with **`ComponentProps`**/**`ComponentPropsWithoutRef`**, and pick **`ReactNode`** for anything that might legitimately be `null` — **`ReactElement`**/**`JSX.Element`** (the same type, checked against `@types/react`'s own declaration) reject it. Use **`<T,>`** for generic arrow components, **`satisfies`** to validate a shape without widening it, discriminated unions with an exhaustive `switch` for real per-variant props, and **`as const`** for hook-returned tuples. In **React 19**, `ref` is a plain prop (type it `React.Ref<T>`) and `useRef<T>()` requires an explicit argument — both are real breaking changes from older type definitions, not conventions.
 </Callout>
 
 export const quizTs = [
   {
-    q: 'How should you type a component’s props in modern React + TypeScript?',
+    q: '```ts\ntype ButtonProps = ComponentProps<\'button\'> & { icon: React.ReactNode };\ntype ButtonPropsNoRef = ComponentPropsWithoutRef<\'button\'>;\n```\nDoes `ComponentProps<\'button\'>` include a `ref` key, verified with a type-level tsc check?',
     options: [
-      'Always use React.FC<Props>',
-      'Define a type/interface for the props and annotate the destructured parameter',
-      'Use `any`',
-      'Type only the return value',
+      'No — ComponentProps never includes ref',
+      'Yes — ComponentProps<\'button\'> includes ref (host elements accept it directly); ComponentPropsWithoutRef strips it',
+      'Only in React 18, not React 19',
+      'Only if you add it manually',
     ],
     answer: 1,
+    explain: 'A type-level check (`\'ref\' extends keyof ComponentProps<\'button\'>`) resolves to `true`; the same check on `ComponentPropsWithoutRef<\'button\'>` resolves to `false` — both verified by assigning the literal to a typed const and letting tsc catch a mismatch.',
   },
   {
-    q: 'What type do you use for a component’s `children`?',
+    q: 'A function is typed to return `JSX.Element`. One branch needs to return `null`. What happens?',
     options: [
-      'string',
-      'React.ReactNode',
-      'JSX.Element only',
-      'object',
+      'It compiles fine — JSX.Element includes null',
+      'tsc error: `Type \'null\' is not assignable to type \'Element\'` — JSX.Element is declared as `extends ReactElement<any, any>`, which excludes null',
+      'It only fails at runtime, not compile time',
+      'JSX.Element and ReactNode are aliases of each other',
     ],
     answer: 1,
+    explain: 'Verified directly: @types/react declares `interface Element extends React.ReactElement<any, any> {}`. Neither JSX.Element nor ReactElement includes null — use ReactNode for a return type that may legitimately be nothing.',
   },
   {
-    q: 'When must you pass a type argument to useState?',
+    q: '```tsx\nconst ArrowList = <T>({ items }: { items: T[] }) => <ul>{items.length}</ul>;\n```\nWhy does this fail to parse in a `.tsx` file?',
     options: [
-      'Always',
-      'When the initial value doesn’t pin down the type — e.g. `useState<User | null>(null)`',
-      'Never',
-      'Only for numbers',
+      'Arrow functions cannot be generic, ever',
+      '`<T>` is read as the start of a JSX tag in .tsx — needs a trailing comma (`<T,>`) or `<T extends unknown>` to disambiguate',
+      'T is a reserved type parameter name',
+      'Arrow components cannot accept props',
     ],
     answer: 1,
+    explain: 'Verified: this produces a cascade of real parser errors (TS17008 "JSX element \'T\' has no corresponding closing tag", TS1005, TS1381, TS1382) — not one clean message. `<T,>` fixes it; a plain `function` declaration never has this ambiguity.',
   },
   {
-    q: 'How do you handle a ref on a function component in React 19?',
+    q: 'What is the React 19 change to `useRef`\'s type signature, verified against @types/react\'s actual declarations?',
     options: [
-      'Wrap it in forwardRef with generics',
-      '`ref` is a normal prop — type it as `React.Ref<T>` in the props, no forwardRef needed',
-      'Refs cannot be typed',
-      'Use a global variable',
+      'Nothing changed — it still has a zero-argument overload',
+      'The zero-argument overload is gone — only three overloads remain, all requiring an explicit initial value (a real value, `T | null`, or `T | undefined`)',
+      '`useRef` was removed in favor of `useState`',
+      'useRef now requires a generic type argument, but still no value',
     ],
     answer: 1,
+    explain: 'Confirmed by reading @types/react\'s declarations directly: `useRef<HTMLDivElement>()` (no argument) fails with `TS2554: Expected 1 arguments, but got 0` — the fix is `useRef<HTMLDivElement>(null)`.',
+  },
+  {
+    q: 'Why does a custom hook returning `[value, setter]` need `as const`?',
+    options: [
+      'It doesn\'t — plain arrays and tuples are identical in TypeScript',
+      'Without it, TS infers an array of the UNION of both element types, so destructured callers lose per-position typing (calling the value as if it were the function fails)',
+      '`as const` is only for string literals',
+      'It is required by the useState hook itself',
+    ],
+    answer: 1,
+    explain: 'Verified: without `as const`, `return [value, toggle];` infers as `(boolean | (() => void))[]`, and calling the destructured first element as a function produces a real tsc error ("Not all constituents... are callable"). `as const` fixes it to `readonly [boolean, () => void]`.',
+  },
+  {
+    q: '```ts\nconst config = { a: 1, b: [1,2,3] } satisfies Record<string, number | number[]>;\nconfig.b.push(4);\n```\nWhy does `.push` type-check here but would NOT on the equivalent `: Record<string, number | number[]>` annotation?',
+    options: [
+      '`satisfies` and a plain annotation behave identically — this is a trick question',
+      '`satisfies` validates the shape without widening the checked expression\'s own type, so `config.b` keeps its specific inferred type `number[]`; a plain annotation widens it to the full union `number | number[]`, which has no `.push`',
+      'Arrays always have `.push` regardless of type',
+      '`satisfies` requires `as const` to work at all',
+    ],
+    answer: 1,
+    explain: 'Verified with tsc: the satisfies version compiles clean; the plain-annotation equivalent needs a `@ts-expect-error` on the same `.push` call because the property is widened to `number | number[]`.',
   },
 ];
 

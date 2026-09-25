@@ -1,6 +1,6 @@
 ---
 title: 'Project & Tooling'
-description: 'Starting a React project today — Vite for SPAs, a framework for routing and SSR, why Create React App is gone, and the dev tools that make React pleasant.'
+description: 'Starting a React project today — Vite 8 for SPAs, a framework for routing and SSR, installing the React Compiler and eslint-plugin-react-hooks v7 for real, and why Create React App is gone.'
 sidebar:
   order: 2
 ---
@@ -9,16 +9,32 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Create React App is deprecated
 
-For years the default answer to "how do I start a React app?" was Create React App (CRA). That era is over: the React team **officially deprecated CRA in 2025**. Installing it now prints a warning pointing you to current options. Do not start new projects with it, and consider migrating existing ones.
+For years the default answer to "how do I start a React app?" was Create React App (CRA). That era is over. react.dev is direct about it:
+
+> No. Create React App has been deprecated. For more information, see [Sunsetting Create React App](https://react.dev/blog/2025/02/14/sunsetting-create-react-app).
+> — [react.dev/learn/installation](https://react.dev/learn/installation)
+
+And the blog post itself names what to do instead:
+
+> Today, we're deprecating Create React App for new apps, and encouraging existing apps to migrate to a framework, or to migrate to a build tool like Vite, Parcel, or RSBuild.
+> — [react.dev/blog](https://react.dev/blog)
+
+Installing CRA now prints a warning pointing you to current options. Do not start new projects with it, and consider migrating existing ones.
 
 The replacement is a fork in the road: a **build tool** for a client-side SPA, or a **framework** for anything that needs routing, server rendering, or Server Components.
 
 ## Vite for a single-page app
 
-For a client-rendered SPA, **Vite** is the standard: instant dev server, Fast Refresh, and a fast production build.
+For a client-rendered SPA, **Vite** is the standard. Currency check first — always run this yourself before copying a tutorial's numbers, because this exact command is what dated this lesson:
+
+```bash
+npm view vite version              # 8.3.1 at the time of writing
+npm view @vitejs/plugin-react version   # 6.1.1
+```
 
 ```bash
 npm create vite@latest my-app -- --template react-ts
@@ -27,7 +43,163 @@ npm install
 npm run dev
 ```
 
-The `react-ts` template gives you React + TypeScript preconfigured. That's the whole setup — no config to write.
+Real scaffold output from that exact command, right now:
+
+```text
+> npx
+> 'create-vite' my-app --template react-ts
+
+◇  Scaffolding project in .../my-app...
+└  Done. Now run:
+
+  cd my-app
+  npm install
+  npm run dev
+```
+
+And the `package.json` it writes:
+
+```json
+{
+  "scripts": { "dev": "vite", "build": "tsc -b && vite build", "lint": "oxlint", "preview": "vite preview" },
+  "dependencies": { "react": "^19.2.8", "react-dom": "^19.2.8" },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "oxlint": "^1.81.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  }
+}
+```
+
+Two currency points that trip up anyone copying an older tutorial:
+
+- **The template no longer ships ESLint.** It ships **oxlint** instead — a Rust-based linter, configured in `.oxlintrc.json`, with `react/rules-of-hooks` on by default. If you want `eslint-plugin-react-hooks`'s compiler-aware rules (below), you add ESLint yourself; it isn't there out of the box anymore.
+- **`@vitejs/plugin-react` v6 changed its transform.** react.dev's own installation docs are explicit:
+
+  > `@vitejs/plugin-react` uses [Oxc](https://oxc.rs). In `@vitejs/plugin-react@6.0.0`, the inline Babel option was removed.
+  > — Vite's `create-vite` React template README
+
+  Before v6, the plugin used **Babel** for Fast Refresh and JSX. From v6 on, it uses **Oxc** for the default transform — smaller install, no Babel dependency for the common case. **`@vitejs/plugin-react-swc`** remains a separate, third option: it swaps in SWC specifically to speed up cold start and HMR on very large projects. Pick Oxc (the default) unless you have a specific reason to reach for SWC — plain `react()` with no Babel plugins is now the fast path, not the slow one.
+
+  react.dev's `build-a-react-app-from-scratch` guide also mentions **RSbuild** (Rspack-powered) as an alternative scaffold alongside Vite — worth knowing the name exists, even though this course standardizes on Vite.
+
+## The React Compiler, for real
+
+The React 19 module's [`the-react-compiler`](/react/en/react-19/the-react-compiler/) lesson shows the actual Babel transform output — read that first if you haven't. This section proves the **install wiring** works, which that lesson doesn't cover.
+
+Because `@vitejs/plugin-react@6.0.0+` removed the inline `babel: {...}` option, wiring the compiler needs a second plugin, `@rolldown/plugin-babel`, plus the `reactCompilerPreset` helper `@vitejs/plugin-react` v6 exports for exactly this:
+
+```bash
+npm install -D babel-plugin-react-compiler @rolldown/plugin-babel
+```
+
+```ts
+// vite.config.ts — illustrative; not type-checked here (needs @rolldown/plugin-babel + babel-plugin-react-compiler, which the shared course probe doesn't install — the real, separate build proof is in the terminal output right below)
+import { defineConfig } from 'vite'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset()] }),
+  ],
+})
+```
+
+This is not a config that merely parses — it was run end to end in this course's probe against the default Vite scaffold, `npm run build` (`tsc -b && vite build`):
+
+```text
+vite v8.3.1 building client environment for production...
+✓ 22 modules transformed.
+dist/assets/index-C9S9Cn0y.js   223.97 kB │ gzip: 69.84 kB
+✓ built in 252ms
+```
+
+Exit `0`. With `build.minify: false` for a readable bundle, the output literally contains the compiler's runtime import:
+
+```text
+$ grep -c "compiler-runtime" dist/assets/index-*.js
+2
+```
+
+Two references — one for the import, one for the `optimizeDeps.include` entry `reactCompilerPreset` adds automatically (`react/compiler-runtime`). That's the whole install: two dev dependencies, one extra plugin entry, and the compiler runs on your real build — no separate step, no watch mode surprises.
+
+## `eslint-plugin-react-hooks` v7: flat config, real errors
+
+Since the Vite template no longer ships ESLint, add it — and add the plugin that gives you both the classic Hooks rules and the compiler's own diagnostics as lint errors:
+
+```bash
+npm install -D eslint @typescript-eslint/parser eslint-plugin-react-hooks
+```
+
+```js
+// eslint.config.mjs
+import reactHooks from 'eslint-plugin-react-hooks';
+import tsParser from '@typescript-eslint/parser';
+import { defineConfig } from 'eslint/config';
+
+export default defineConfig([
+  { files: ['**/*.{ts,tsx}'], languageOptions: { parser: tsParser } },
+  reactHooks.configs.flat['recommended-latest'],
+]);
+```
+
+`recommended-latest` (`eslint-plugin-react-hooks@7.1.1`, the version this course's probe has installed) turns on rule-of-hooks *and* the newer compiler-specific rules in one preset — no separate compiler-eslint package to add. Two real violations, run through that exact config:
+
+```tsx
+// Bad.tsx
+import { useState } from 'react';
+
+export function Toggle({ show }: { show: boolean }) {
+  if (show) {
+    const [on, setOn] = useState(false); // hook called conditionally
+    return <button onClick={() => setOn(!on)}>{String(on)}</button>;
+  }
+  return null;
+}
+```
+
+```text
+Bad.tsx
+  5:25  error  React Hook "useState" is called conditionally. React Hooks must be called
+  in the exact same order in every component render. Did you accidentally call a React
+  Hook after an early return?  react-hooks/rules-of-hooks
+```
+
+```tsx
+// Counter.tsx
+import { useEffect, useState } from 'react';
+
+export function Counter({ step }: { step: number }) {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setCount((c) => c + step), 1000);
+    return () => clearInterval(id);
+  }, []); // missing dependency: step
+  return <output>{count}</output>;
+}
+```
+
+```text
+Counter.tsx
+  8:6  warning  React Hook useEffect has a missing dependency: 'step'. Either include
+  it or remove the dependency array. If 'setCount' needs the current value of 'step',
+  you can also switch to useReducer instead of useState and read 'step' in the
+  reducer  react-hooks/exhaustive-deps
+```
+
+Both real, both from the exact config above — no hand-written error text.
+
+## TypeScript strict, from the start
+
+This course's own probe (and every scaffold above) turns on `strict` plus two settings worth knowing by name, because they change what "valid TypeScript" means in this specific setup:
+
+- **`erasableSyntaxOnly`** — rejects TS-only runtime constructs (`enum`, constructor parameter properties) that don't erase to nothing at the type level. Modern Node can run `.ts` files directly by stripping types; this flag keeps your code compatible with that by construction.
+- **`noUnusedLocals` / `noUnusedParameters`** — an unused import or destructured prop is a compile error, not a lint warning. Generated code with a leftover unused import fails the build here, not just `eslint`.
+
+The [TypeScript with React](/react/en/tooling-and-production/typescript-with-react/) lesson goes deep on typing components, hooks, and events under this same strict config.
 
 ## A framework for routing, SSR, and RSC
 
@@ -42,9 +214,9 @@ npx create-react-router@latest    # React Router (framework mode) — routing + 
 
 export const chooseDiagram = `flowchart TB
   q{"Need routing / SSR /\nServer Components?"}
-  q -->|no, client SPA| vite["Vite\n(build tool)"]
+  q -->|no, client SPA| vite["Vite\n(build tool, Oxc transform)"]
   q -->|yes| fw["Framework:\nNext.js or React Router"]
-  cra["Create React App"] -->|deprecated| x["do not use"]`;
+  cra["Create React App"] -->|deprecated 2025| x["do not use"]`;
 
 The framework owns concerns a build tool leaves to you: nested routes, data fetching on the server, streaming, and the RSC boundary (covered in the React 19 module). For a dashboard-style SPA behind a login, Vite is plenty; for a content site or anything SEO- or server-data-heavy, a framework earns its weight.
 
@@ -57,50 +229,113 @@ Whatever you choose, these make React development pleasant:
 - **The modern JSX transform** — you no longer need `import React from 'react'` at the top of every file just to use JSX; the compiler injects the runtime import. (You still import hooks and APIs you use.)
 - **Strict Mode** — wrap your app in `<StrictMode>` in development to surface impure renders and effect bugs (the double-invoke you met in Foundations).
 
+## Mental Model
+
+None of this tooling is React. React ships a rendering library and nothing else, on purpose — every choice here (Oxc vs. SWC transform, ESLint vs. oxlint, Vite vs. a framework) is a converged community answer to "what do you put around it," not a React API. Read a currency claim in this lesson the same way: as "what's converged as of the version numbers shown," re-checkable with the exact `npm view` / scaffold commands given, not as something to memorize.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Vite + `@vitejs/plugin-react` (Oxc, default) | Smaller install, no Babel dependency, fastest common path | No inline Babel plugins — the compiler needs the separate `@rolldown/plugin-babel` wiring shown above |
+| `@vitejs/plugin-react-swc` | Faster cold start/HMR on very large codebases | A second transform to know about; not needed unless Oxc is actually the bottleneck |
+| A framework (Next.js / React Router) over Vite | Routing, SSR, RSC handled for you | More to learn, more opinionated structure, often overkill for a small SPA |
+| oxlint (scaffold default) vs. adding ESLint + `eslint-plugin-react-hooks` | oxlint is instant, zero-config, `react/rules-of-hooks` included | Only ESLint's `recommended-latest` gives you the React Compiler's own diagnostics as lint errors |
+
+## Common Misconceptions
+
+- **"CRA is old but still fine for a quick project."** react.dev's own installation guide answers this directly: "No. Create React App has been deprecated." It isn't a style preference anymore — the docs actively steer you away from it.
+- **"Adding `@vitejs/plugin-react` gives you Babel."** Not since v6 — the default path is Oxc, with no Babel dependency at all. You only add Babel back (via `@rolldown/plugin-babel`) if you need a Babel-only plugin, like the React Compiler.
+- **"The Vite React template ships ESLint."** It ships **oxlint**. If a generated project has an `eslint.config.js` you didn't add, check whether it actually runs — an empty or stale config is worse than none, because it looks like linting is happening.
+
+## Reading AI-generated code
+
+- Does the project still have a legacy `.eslintrc.*` file alongside a current ESLint install? ESLint 9+ is flat-config-only by default and refuses to run at all against a `.eslintrc.*` with no `eslint.config.*` present — this isn't a style issue, it's a hard failure.
+- If `vite.config.ts` passes `react({ babel: { plugins: [...] } })`, check the installed `@vitejs/plugin-react` version — that option doesn't exist from v6.0.0 on, and depending on the exact types, passing it can be a silent no-op rather than a build error.
+- Does a hook get called after an early `return`, or inside an `if`? `react-hooks/rules-of-hooks` catches this only if it's actually configured and running — confirm the lint command is wired into CI, not just present in `package.json`.
+- Is `eslint-plugin-react-hooks` on `recommended` (rules-of-hooks + exhaustive-deps only) when the project also wants React Compiler diagnostics (`immutability`, `purity`, `set-state-in-render`, …)? Those only come from `recommended-latest`.
+
+<SpotTheBug code={`// eslint.config.js
+import react from '@vitejs/plugin-react'
+
+export default {
+  plugins: [
+    react({ babel: { plugins: ['babel-plugin-react-compiler'] } }),
+  ],
+}`}>
+This is the pre-6.0.0 way to wire the React Compiler into `@vitejs/plugin-react`, copied into a project running a current version of the plugin. Checked directly against `@vitejs/plugin-react@6.1.1`'s own type definitions: `Options` has no `babel` field anymore — passing it either fails to type-check under strict TypeScript, or is silently ignored at runtime, depending on how the config is written. Either way the compiler never runs, with no error telling you so. The current wiring needs a second, separate plugin: `@rolldown/plugin-babel`, with the compiler passed as a *preset* via `reactCompilerPreset()` — proven with a real `vite build` earlier in this lesson (`grep -c "compiler-runtime" dist/assets/index-*.js` → `2`, confirming the transform actually ran). Always check `npm ls @vitejs/plugin-react` before copying an install snippet — this is exactly the kind of detail that goes stale between the plugin's major versions.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-**Create React App is deprecated** — start new projects with **Vite** (`npm create vite@latest -- --template react-ts`) for a client SPA, or a **framework** (Next.js / React Router) when you need routing, SSR, or Server Components. Lean on **React DevTools**, **Fast Refresh**, the automatic JSX transform, and **Strict Mode** for a fast, safe dev loop.
+**Create React App is deprecated** — react.dev says so outright. Start new projects with **Vite** (`@vitejs/plugin-react` v6+, Oxc transform by default) for a client SPA, or a **framework** (Next.js / React Router) for routing, SSR, or Server Components. Wire the **React Compiler** with `@rolldown/plugin-babel` + `reactCompilerPreset()` (the inline Babel option is gone since v6), and add **`eslint-plugin-react-hooks@7`'s `recommended-latest`** flat config for both classic Hooks rules and the compiler's own diagnostics — the scaffold's default oxlint doesn't give you those.
 </Callout>
 
 export const quizProject = [
   {
-    q: 'What does the React team recommend for a new client-side SPA?',
+    q: 'What is the current status of Create React App, per react.dev itself?',
     options: [
-      'Create React App',
-      'Vite (e.g. `npm create vite@latest -- --template react-ts`)',
-      'A raw Webpack config',
-      'Editing a CDN script tag',
+      'It is still recommended for quick prototypes',
+      '"No. Create React App has been deprecated." — react.dev\'s installation guide says so directly',
+      'It was merged into Vite',
+      'It is required for TypeScript support',
     ],
     answer: 1,
+    explain: 'react.dev/learn/installation answers "Should I use Create React App?" with "No. Create React App has been deprecated," linking to the 2025 sunsetting announcement.',
   },
   {
-    q: 'When should you choose a framework (Next.js / React Router) over Vite?',
+    q: 'Since `@vitejs/plugin-react` v6, what does the plugin use for its default transform?',
     options: [
-      'Never — Vite covers everything',
-      'When you need routing, server-side rendering, or Server Components',
-      'Only for small apps',
-      'Only when using JavaScript, not TypeScript',
+      'Babel, same as before',
+      'Oxc — Babel is no longer a dependency for the default path',
+      'SWC, replacing Babel entirely',
+      'TypeScript\'s own compiler API',
     ],
     answer: 1,
+    explain: 'Vite\'s own v8 announcement: "@vitejs/plugin-react v6... uses Oxc for React Refresh transform. Babel is no longer a dependency." @vitejs/plugin-react-swc remains a separate, SWC-based option for large-project cold-start/HMR speed.',
   },
   {
-    q: 'What does Fast Refresh do?',
+    q: '```ts\n// vite.config.ts, @vitejs/plugin-react@6.1.1\nimport react from \'@vitejs/plugin-react\'\nexport default { plugins: [react({ babel: { plugins: [\'babel-plugin-react-compiler\'] } })] }\n```\nWhy does this NOT enable the React Compiler on this version?',
     options: [
-      'Reloads the whole page and resets state',
-      'Applies component edits instantly while preserving component state',
-      'Speeds up the production build only',
-      'Runs your tests',
+      'babel-plugin-react-compiler does not exist',
+      'The inline `babel` option was removed in @vitejs/plugin-react@6.0.0 — this needs the separate @rolldown/plugin-babel + reactCompilerPreset() wiring instead',
+      'Vite does not support Babel at all anymore',
+      'The compiler only works with webpack',
     ],
     answer: 1,
+    explain: 'Proven with a real vite build: the reactCompilerPreset() + @rolldown/plugin-babel wiring produces a bundle containing "compiler-runtime" (grep count 2); the inline babel option from before v6 has no equivalent field in the current Options type.',
   },
   {
-    q: 'Why don’t you usually write `import React from "react"` at the top of every file anymore?',
+    q: 'What does the Vite `react-ts` template ship for linting by default, as of the current scaffold?',
     options: [
-      'React was removed',
-      'The modern JSX transform injects the runtime import automatically',
-      'JSX no longer needs React',
-      'It is imported globally via a script tag',
+      'ESLint with eslint-plugin-react-hooks preconfigured',
+      'oxlint (a Rust-based linter), not ESLint — react/rules-of-hooks is on by default',
+      'No linter at all',
+      'TSLint',
     ],
     answer: 1,
+    explain: 'A fresh `npm create vite@latest -- --template react-ts` writes an `.oxlintrc.json` and a `"lint": "oxlint"` script — no ESLint dependency. Add ESLint yourself for eslint-plugin-react-hooks\'s compiler-aware rules.',
+  },
+  {
+    q: '```tsx\nexport function Toggle({ show }: { show: boolean }) {\n  if (show) {\n    const [on, setOn] = useState(false);\n    return <button onClick={() => setOn(!on)}>{String(on)}</button>;\n  }\n  return null;\n}\n```\nWhat does `eslint-plugin-react-hooks`\'s `recommended-latest` config report for this, verified for real?',
+    options: [
+      'Nothing — this is valid React',
+      'error react-hooks/rules-of-hooks: "React Hook \'useState\' is called conditionally... Did you accidentally call a React Hook after an early return?"',
+      'A TypeScript compile error only',
+      'A warning about missing key props',
+    ],
+    answer: 1,
+    explain: 'Run for real against eslint-plugin-react-hooks@7.1.1\'s recommended-latest flat config: an ESLint error, not a warning, on the line calling useState inside the `if`.',
+  },
+  {
+    q: 'What does react.dev quote as the alternative to Create React App, besides Vite?',
+    options: [
+      'Nothing else is mentioned',
+      'A framework, or another build tool like Parcel or RSBuild',
+      'Only Next.js',
+      'Returning to plain script tags',
+    ],
+    answer: 1,
+    explain: 'The sunsetting blog post: "we\'re... encouraging existing apps to migrate to a framework, or to migrate to a build tool like Vite, Parcel, or RSBuild." This course standardizes on Vite, but the other names are real, current options.',
   },
 ];
 

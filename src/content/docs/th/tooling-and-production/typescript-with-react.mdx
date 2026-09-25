@@ -1,13 +1,15 @@
 ---
 title: 'TypeScript with React'
-description: 'type component, props, children, hooks และ event — พร้อมการเปลี่ยนแปลงใน React 19 ที่ ref เป็น prop ธรรมดา ทำให้ forwardRef generics หายไป'
+description: 'type component, props, children, hooks และ event — ComponentProps เทียบ ComponentPropsWithoutRef, ReactNode เทียบ ReactElement เทียบ JSX.Element, generic component, satisfies, discriminated union และการเปลี่ยนแปลง ref ใน React 19 — ทุก claim ผ่าน tsc จริง'
 sidebar:
   order: 4
 ---
 
+import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## type component และ props ของตัวเอง
 
@@ -27,6 +29,39 @@ function Button({ label, onClick, variant = 'primary' }: ButtonProps) {
 
 ให้ type props object ตรง ๆ (แบบข้างบน) แทน `React.FC` แบบเก่า — `React.FC` เลิกนิยมแล้ว (ทำให้ generics และการ type children ยุ่งยาก) แค่ annotate พารามิเตอร์ props ที่ destructure ก็พอ
 
+## "ขโมย" props ของ host element: `ComponentProps` เทียบ `ComponentPropsWithoutRef`
+
+component ที่เป็น wrapper บ่อยครั้งต้องรับ *ทุก* prop ที่ host element ที่มัน render รับได้ — แทนที่จะประกาศ `onClick`, `disabled`, `aria-*` ฯลฯ เองใหม่ ให้ "ขโมย" มาเลย:
+
+```tsx
+// src/proofs/ts/ComponentPropsGood.tsx
+import type { ComponentProps, ComponentPropsWithoutRef } from 'react';
+
+// ComponentProps<'button'> "steals" every prop the host <button> element
+// accepts, including `ref` (a plain prop for host elements) and all the
+// standard HTML attributes — so a wrapper takes exactly what a real
+// <button> takes, with no manual re-declaration.
+type IconButtonProps = ComponentProps<'button'> & { icon: React.ReactNode };
+
+function IconButton({ icon, children, ...rest }: IconButtonProps) {
+  return <button {...rest}>{icon}{children}</button>;
+}
+
+// Type-level proof, checked by tsc: does 'ref' appear in each type's keys?
+type HasRefKey<T> = 'ref' extends keyof T ? true : false;
+
+// ComponentProps<'button'> DOES include 'ref' (host elements accept it directly).
+const includesRef: HasRefKey<ComponentProps<'button'>> = true;
+// ComponentPropsWithoutRef<'button'> strips it — for when you attach your own ref.
+const excludesRef: HasRefKey<ComponentPropsWithoutRef<'button'>> = false;
+
+void includesRef;
+void excludesRef;
+void IconButton;
+```
+
+สองบรรทัดสุดท้ายนั้นคือ assertion ที่ผ่าน tsc จริง ไม่ใช่ comment ที่แค่อ้างเฉย ๆ — สลับ literal (`true`/`false`) อันไหนก็ได้ `tsc` จะ error ด้วย `Type 'true' is not assignable to type 'false'` ทันที หยิบ `ComponentPropsWithoutRef<'button'>` มาใช้เฉพาะตอนที่ wrapper ของคุณแปะ `ref` *ของตัวเอง* ไปที่ inner element คนละตัวกับตัวที่ forward `...rest` ไป — ไม่งั้น `ComponentProps` จะปล่อยให้ `ref` สองอันชนกัน
+
 ## children และ React type ที่พบบ่อย
 
 เมื่อ component ครอบ content อื่น ให้ type `children` เป็น `React.ReactNode` — type "อะไรก็ตามที่ render ได้" ที่กว้างที่สุด:
@@ -42,7 +77,251 @@ function Card({ title, children }: CardProps) {
 }
 ```
 
-type อื่นที่จะใช้: `React.ReactNode` (content ที่ render ได้), `React.ComponentProps<'button'>` (ขโมย props ของ host element), และ `React.CSSProperties` (object `style`)
+type อื่นที่จะใช้: `React.ComponentProps<'button'>` (ข้างบน), `React.CSSProperties` (object `style`) และตัวที่คนสับสนกันมากที่สุด — `ReactNode` เทียบ `ReactElement` เทียบ `JSX.Element` ต่อไปนี้
+
+## `ReactNode` เทียบ `ReactElement` เทียบ `JSX.Element`
+
+สามตัวนี้หน้าตาเหมือนใช้แทนกันได้ แต่ไม่ใช่ `ReactNode` คือ union ก้อนใหญ่ — อะไรก็ตามที่ render ได้ รวมถึง `null`:
+
+```tsx
+// src/proofs/ts/NodeVsElement.tsx
+// ReactNode is the broadest "anything renderable" type: elements, strings,
+// numbers, booleans, null, undefined, arrays/iterables of the same.
+function Maybe({ show }: { show: boolean }): React.ReactNode {
+  if (!show) return null;      // ReactNode includes null — fine
+  return 'hello';              // ReactNode includes plain strings — fine
+}
+
+void Maybe;
+```
+
+`ReactElement` แคบกว่า — เป็นแค่ element จริง ๆ ไม่มี `null`, ไม่มี string ธรรมดา:
+
+```tsx
+// @expect-error ReactElement (and JSX.Element) reject null — only ReactNode includes it
+import type { ReactElement } from 'react';
+
+// ReactElement does NOT include null/undefined/string/number/boolean —
+// only an actual element.
+function Bad({ show }: { show: boolean }): ReactElement {
+  if (!show) return null; // must error: null is not assignable to ReactElement
+  return <p>hi</p>;
+}
+```
+
+```text
+BadElement.tsx(6,14): error TS2322: Type 'null' is not assignable to type
+'ReactElement<unknown, string | JSXElementConstructor<any>>'.
+```
+
+แล้ว `JSX.Element` ล่ะ? มันทำงาน *เหมือนกันเป๊ะ* กับ `ReactElement<any, any>` — `@types/react` ประกาศไว้แบบนั้นตรง ๆ:
+
+```ts
+// from @types/react's global JSX namespace
+interface Element extends React.ReactElement<any, any> {}
+```
+
+`JSX.Element` เลยปฏิเสธ `null` ด้วยเหตุผลเดียวกัน แต่มีจุดที่ควรรู้ไว้และเป็นเรื่องปัจจุบันจริง ๆ: ใน `@types/react@19` global namespace `JSX` ไม่ได้เป็น ambient มาให้ default อีกแล้ว — `JSX.Element` เปล่า ๆ เป็น return type อาจ error `Cannot find namespace 'JSX'` ถ้าไม่ `import` มันมาก่อน:
+
+```tsx
+// @expect-error even with the JSX import fixed, ReactElement/JSX.Element still reject null
+import type { JSX } from 'react';
+
+function AlsoBad({ show }: { show: boolean }): JSX.Element {
+  if (!show) return null; // must error, same as ReactElement above
+  return <p>hi</p>;
+}
+```
+
+```text
+_import-jsx.tsx(4,14): error TS2322: Type 'null' is not assignable to type 'Element'.
+```
+
+(ถ้าไม่มีบรรทัด `import type { JSX } from 'react'` ไฟล์นี้จะ compile ไม่ผ่านเลย — `TS2503: Cannot find namespace 'JSX'` — คนละ error กับด้านบนและเกิดก่อนด้วย `React.JSX.Element` ใช้ได้โดยไม่ต้อง import ถ้าอยากเขียนแบบ qualify แทน import ชื่อมา) กฎง่าย ๆ: return `ReactNode` (หรือ `ReactNode | null` แบบชัดเจน) เมื่อ `null`/ไม่มีอะไร render เป็นผลลัพธ์ที่ถูกต้องจริง — ซึ่งเป็น component ส่วนใหญ่ — แล้วเก็บ `ReactElement`/`JSX.Element` ไว้สำหรับ signature ที่สัญญาเฉพาะว่า "เป็น element จริงเสมอ ไม่มีทางเป็นความว่างเปล่า"
+
+<Mermaid title="return/children type ไหนรับอะไรได้บ้าง" code={typeDiagram} />
+
+export const typeDiagram = `flowchart LR
+  node["ReactNode\n(string, number, null,\nundefined, array, element)"]
+  elem["ReactElement\n=== JSX.Element\n(element เท่านั้น ไม่มี null)"]
+  node -->|"ReactElement คือ ReactNode\nแบบหนึ่งเท่านั้น"| elem`;
+
+## generic component: comma ต่อท้าย `<T,>`
+
+`function` declaration ธรรมดาไม่มีความกำกวมกับ type parameter ในไฟล์ `.tsx` เลย:
+
+```tsx
+// src/proofs/ts/GenericList.tsx
+function List<T>({ items, render }: { items: T[]; render: (item: T) => React.ReactNode }) {
+  return <ul>{items.map((item, i) => <li key={i}>{render(item)}</li>)}</ul>;
+}
+
+void List;
+```
+
+generic component ที่เป็น **arrow function** ต้องมี comma ต่อท้าย เพราะ `.tsx` parse `<T>` เป็นจุดเริ่มของ JSX tag แทน:
+
+```tsx
+const ArrowList = <T,>({ items, render }: { items: T[]; render: (item: T) => React.ReactNode }) => (
+  <ul>{items.map((item, i) => <li key={i}>{render(item)}</li>)}</ul>
+);
+```
+
+ลอง drop comma ดูแล้วดูว่าเกิดอะไรขึ้นจริง ๆ — parser error จริงที่ cascade ต่อกันเป็นทอด ไม่ใช่แค่เรื่อง style:
+
+```tsx
+// @expect-error missing trailing comma — <T> is parsed as an unclosed JSX tag in .tsx
+const ArrowList = <T>({ items }: { items: T[] }) => <ul>{items.length}</ul>;
+```
+
+```text
+BadArrowGeneric.tsx(1,20): error TS17008: JSX element 'T' has no corresponding closing tag.
+BadArrowGeneric.tsx(1,41): error TS1005: '}' expected.
+BadArrowGeneric.tsx(1,47): error TS1381: Unexpected token. Did you mean `{'}'}` or `&rbrace;`?
+BadArrowGeneric.tsx(1,51): error TS1382: Unexpected token. Did you mean `{'>'}` or `&gt;`?
+BadArrowGeneric.tsx(3,1): error TS1005: '</' expected.
+```
+
+`<T,>` (หรือ `<T extends unknown>` ซึ่งช่วยแก้ความกำกวมได้เหมือนกัน) แก้ปัญหา `function` declaration ธรรมดาไม่ต้องใช้ทริคไหนเลย
+
+## `satisfies`: validate โดยไม่ widen
+
+`satisfies` เช็ค object literal กับ shape ที่กำหนด *โดยไม่* เปลี่ยน type ที่ infer มาของตัว literal เองให้กลายเป็น shape นั้น ความต่างจะเห็นทันทีตอนเข้าถึง property ที่ value เจาะจงกว่าที่ type ที่เช็คอนุญาต:
+
+```tsx
+// src/proofs/ts/Satisfies.tsx
+type Status = 'idle' | 'loading' | 'error';
+
+// `satisfies` checks the object against a shape WITHOUT widening the
+// variable's type TO that shape — each property keeps its own more-specific
+// inferred type instead of the annotated union.
+const retryDelayMs = {
+  idle: 0,
+  loading: 250,
+  error: [500, 1000, 2000], // per-attempt backoff, not a single number
+} satisfies Record<Status, number | number[]>;
+
+// Proof: retryDelayMs.error is still typed as `number[]` specifically (not
+// widened to `number | number[]`), so array methods work with no narrowing.
+retryDelayMs.error.push(4000);
+
+// With a plain annotation instead, every value is widened to the union —
+// `.push` is not available on `number | number[]` without narrowing first.
+const retryDelayMs2: Record<Status, number | number[]> = {
+  idle: 0,
+  loading: 250,
+  error: [500, 1000, 2000],
+};
+// @ts-expect-error — retryDelayMs2.error's type is `number | number[]`
+// (widened by the annotation), and `.push` doesn't exist on `number`.
+retryDelayMs2.error.push(4000);
+```
+
+ทั้ง `satisfies` และ annotation ธรรมดายังจับ key พิมพ์ผิดหรือ value ที่ type โดยรวมผิดที่ตัว object literal ได้เหมือนกัน — `satisfies` แค่ไม่ทิ้งความละเอียดที่คุณมีอยู่แล้วไปเฉย ๆ
+
+## discriminated union props
+
+เมื่อ prop type มีหน้าตาต่างกันจริง ๆ ตาม field "kind" ให้ model เป็น union แล้วปล่อยให้ TypeScript narrow ทีละ branch — แทนที่จะเป็น shape เดียวที่มี field optional เต็มไปหมด:
+
+```tsx
+// src/proofs/ts/DiscriminatedUnion.tsx
+// A discriminated union props type: exactly one shape per `status`, and TS
+// narrows which OTHER fields exist based on which literal `status` is.
+type FetchState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'success'; data: string[] };
+
+function Result({ state }: { state: FetchState }) {
+  switch (state.status) {
+    case 'idle':
+      return null;
+    case 'loading':
+      return <p>Loading…</p>;
+    case 'error':
+      // Narrowed: only this branch has `message` — no optional-chaining needed.
+      return <p role="alert">{state.message}</p>;
+    case 'success':
+      // Narrowed: only this branch has `data`.
+      return <ul>{state.data.map((d) => <li key={d}>{d}</li>)}</ul>;
+    default: {
+      // Exhaustiveness check: if a FetchState variant is ever added without a
+      // matching case above, `state` here is NOT `never` and this line fails
+      // to compile — catching the missing branch at build time.
+      const exhaustive: never = state;
+      return exhaustive;
+    }
+  }
+}
+
+void Result;
+```
+
+`never`-assignment ใน `default` ไม่ใช่ของประดับ — เพิ่ม variant ที่ห้าเข้า union `{ status: 'cancelled' }` โดยไม่เพิ่ม `case` ของมัน แล้ว `tsc` จะ fail ตรงนั้นเลย:
+
+```text
+error TS2322: Type '{ status: "cancelled"; }' is not assignable to type 'never'.
+```
+
+นั่นคือการรับประกันระดับ compile-time ว่าทุก branch ของ discriminated union prop ถูกจัดการครบ เช็คทุกครั้งที่ build — ไม่ใช่สิ่งที่ต้องจำไปเทสต์เอง
+
+## `as const` สำหรับ tuple ที่ return จาก custom hook
+
+custom hook ที่ return `[value, setter]` (เลียนแบบ shape ของ `useState` เอง) ต้องใช้ `as const` ไม่งั้น return type จะยุบรวมเป็น array ของ *union* ของทั้งสอง element type:
+
+```tsx
+// @expect-error no as const — return type widens to an array of the union, losing per-position typing
+import { useState } from 'react';
+
+// No explicit return type, no `as const`: TS infers the return as an ARRAY
+// type (the union of all element types), not a fixed-length tuple.
+function useToggle(initial: boolean) {
+  const [value, setValue] = useState(initial);
+  function toggle() {
+    setValue((v) => !v);
+  }
+  return [value, toggle]; // inferred: (boolean | (() => void))[]
+}
+
+function Widget() {
+  const [on, toggleOn] = useToggle(false);
+  on(); // must error — `on` is typed boolean | (() => void), not narrowed by position
+  void toggleOn;
+  return null;
+}
+```
+
+```text
+BadUseToggle.tsx(18,3): error TS2349: This expression is not callable.
+  Not all constituents of type 'boolean | (() => void)' are callable.
+    Type 'false' has no call signatures.
+```
+
+```tsx
+// src/proofs/ts/UseToggle.tsx
+import { useState } from 'react';
+
+// `as const` on the returned array fixes both length and per-position type:
+// TS infers `readonly [boolean, () => void]` instead of `(boolean | (() => void))[]`.
+function useToggle(initial: boolean) {
+  const [value, setValue] = useState(initial);
+  function toggle() {
+    setValue((v) => !v);
+  }
+  return [value, toggle] as const;
+}
+
+function Widget() {
+  const [on, toggle] = useToggle(false);
+  // `on` is `boolean`, `toggle` is `() => void` — exactly like useState's own
+  // return type, and for the same reason (useState itself returns a tuple
+  // via an explicit overload, not `as const` — but the effect is identical).
+  return <button onClick={toggle}>{on ? 'on' : 'off'}</button>;
+}
+
+void Widget;
+```
 
 ## type hooks
 
@@ -51,9 +330,6 @@ inference จัดการ hooks ส่วนใหญ่ให้ แต่�
 ```tsx
 const [count, setCount] = useState(0);               // inferred: number
 const [user, setUser] = useState<User | null>(null); // needs the annotation
-
-const inputRef = useRef<HTMLInputElement>(null);     // ref to a DOM node
-const timer = useRef<number | undefined>(undefined); // ref to a mutable value
 ```
 
 ## type event
@@ -67,7 +343,7 @@ function onChange(e: React.ChangeEvent<HTMLInputElement>) {
 <button onClick={(e) => e.preventDefault()}>Go</button>  // e inferred as React.MouseEvent
 ```
 
-## React 19: ref เป็น prop ธรรมดา
+## React 19: `ref` เป็น prop ธรรมดา และ `useRef` ต้องมี argument
 
 จุด currency ที่ชัดเจน: ใน **React 19 `ref` เป็น prop ธรรมดา** สำหรับ function component คุณจึงไม่ต้องใช้ `forwardRef` และ generics ที่เก้ ๆ กัง ๆ ของตัวเองอีก type `ref` ไว้ข้าง ๆ props ตัวอื่นได้เลย:
 
@@ -85,50 +361,153 @@ function TextInput({ placeholder, ref }: InputProps) {
 
 `forwardRef` ยังทำงานได้ และ code เก่าที่ใช้ `React.forwardRef<HTMLInputElement, Props>` ก็ไม่มีปัญหา แต่สำหรับ component ใหม่ใน React 19 ข้าม `forwardRef` ไปได้เลย — wrapper น้อยลงหนึ่งชั้นและไม่ต้องเล่นกล generic
 
+การเปลี่ยนแปลงที่มาคู่กันอยู่ใน `useRef` เอง: `@types/react@19` มี overload พอดีสามแบบ และไม่มีอันไหนรับ argument ศูนย์ตัวเลย —
+
+```ts
+// from @types/react's actual declarations
+function useRef<T>(initialValue: T): RefObject<T>;
+function useRef<T>(initialValue: T | null): RefObject<T | null>;
+function useRef<T>(initialValue: T | undefined): RefObject<T | undefined>;
+```
+
+— นิสัยเก่า `useRef<HTMLDivElement>()` (ไม่มี argument พึ่ง overload ที่ implicit-`undefined` จาก type definition เก่า) เลยไม่ match กับอันไหนเลย:
+
+```tsx
+// @expect-error React 19 types: useRef has no zero-argument overload
+import { useRef } from 'react';
+function Box() {
+  const ref = useRef<HTMLDivElement>(); // React 19 types: no zero-arg overload
+  return <div ref={ref} />;
+}
+```
+
+```text
+BadUseRefNoArg.tsx(3,15): error TS2554: Expected 1 arguments, but got 0.
+```
+
+ทางแก้คือสิ่งที่เดาได้เป๊ะ — ส่งค่าเริ่มต้นมาชัดเจน `null` สำหรับ DOM ref ที่จะแปะทีหลัง:
+
+```tsx
+// src/proofs/ts/UseRefFix.tsx
+import { useRef } from 'react';
+
+function Box() {
+  // React 19 requires an explicit initial value — pass null for a DOM ref.
+  const ref = useRef<HTMLDivElement>(null);
+  return <div ref={ref} />;
+}
+
+void Box;
+```
+
+## Mental Model
+
+งานของ TypeScript ตรงนี้ไม่ใช่การอธิบายว่า React *ทำ* อะไรตอน runtime — แต่คือการอธิบาย *รูปร่าง* ของสิ่งที่คุณส่ง, return และอ่านได้ `ReactElement`/`JSX.Element` เทียบ `ReactNode`, `ComponentProps` เทียบ `ComponentPropsWithoutRef` และความต่างของ tuple กับ array จาก `as const` ล้วนเป็นไอเดียเดียวกันที่พูดซ้ำ: runtime value มักจะเหมือนกันไม่ว่าจะเลือกแบบไหน แต่ *type* ต่างหากที่ทำให้ compiler ยอมหรือไม่ยอมให้ code ส่วนที่เหลือทำอะไรกับมันได้บ้าง อ่านทุก type ในบทนี้แบบ "สิ่งนี้ปล่อยให้ผู้เรียกใช้ทำอะไรได้บ้าง" ไม่ใช่ "หน้าตาเป็นยังไง"
+
+## ข้อแลกเปลี่ยน
+
+| ตัวเลือก | ได้อะไร | ต้นทุน |
+| --- | --- | --- |
+| `ComponentProps<'button'>` | host prop ทุกตัว ไม่ต้องประกาศเองซ้ำ | รวม `ref` มาด้วย — ใช้ `ComponentPropsWithoutRef` ถ้า wrapper ต้องการ `ref` ของตัวเอง |
+| `ReactNode` เป็น return/children type | รับ `null`, string, array ได้ — ตรงกับสิ่งที่ component ส่วนใหญ่ return จริง | กว้างเกินไปเมื่อ signature ควรสัญญาว่า "เป็น element จริงเสมอ" |
+| `satisfies` แทน annotation ธรรมดา | เก็บ type เจาะจง/literal ต่อ property ไว้ พร้อม validate shape | syntax อีกอันที่ต้องรู้จัก; ติดนิสัยหยิบ annotation ธรรมดาได้ง่าย |
+| discriminated union props + `switch` แบบ exhaustive | compiler บังคับให้จัดการทุก variant | ต้องประกาศ type เยอะกว่า shape เดียวที่มี field optional |
+| `ref` เป็น prop ธรรมดา (React 19) เทียบ `forwardRef` | ไม่มี wrapper generic ชั้นน้อยลงหนึ่งชั้น | code เก่าและ library ที่พึ่งพาอาจยังใช้ `forwardRef` อยู่ — อยู่ร่วมกันได้ทั้งคู่ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"`ReactElement` กับ `JSX.Element` เป็นคนละ type"** ไม่ใช่ — `@types/react` ประกาศ `JSX.Element` เป็น `interface Element extends ReactElement<any, any> {}` เลือกอันไหนก็ปฏิเสธ `null`/`undefined`/string ธรรมดาเหมือนกัน
+- **"`useRef<T>()` ไม่มี argument ยังใช้ได้ แค่ infer เป็น `undefined`"** ไม่ใช่ใน `@types/react@19` — ไม่มี overload ศูนย์ argument อีกแล้ว `tsc` fail ทันทีด้วย `Expected 1 arguments, but got 0` ไม่ใช่การ infer ผิดแบบเงียบ ๆ
+- **"`<T>` ใช้ได้เสมอกับ generic component ใน `.tsx`"** ใช้ได้เฉพาะ `function` declaration ธรรมดา arrow function ต้องใช้ `<T,>` (หรือ `<T extends unknown>`) — ไม่งั้น parser จะอ่านเป็น JSX tag ที่ไม่ปิด แล้ว error ที่ดูไม่เกี่ยวกันเลยจะตามมาเป็นพวง
+- **"`satisfies` แค่เป็น annotation ที่หรูขึ้น"** มันไม่เปลี่ยน error ที่จับได้ที่ object literal เลย — เปลี่ยนแค่ type ที่ expression ที่เช็คแล้วเก็บไว้หลังจากนั้น ข้ามมันไปไม่ได้ทำให้ code แย่ลง แค่ทำให้ type ที่อยากให้เจาะจงกว้างขึ้น
+
+## อ่านโค้ดที่ AI เขียน
+
+- prop ที่ type เป็น `any` โผล่มาตรงไหนที่ควรเป็น shape จริง, `unknown` หรือ generic ไหม? `any` ปิดทุก check ที่บทนี้พูดถึงแบบเงียบ ๆ — ไม่ใช่ placeholder ที่ neutral
+- return type ของ component ถูก annotate เป็น `JSX.Element` (หรือ `ReactElement`) ตรงจุดที่ต้อง return `null` ด้วยไหม (branch แบบ "ไม่มีอะไรจะ render")? รูปแบบนี้ compile ไม่ผ่าน — เช็คว่า annotation ควรเป็น `ReactNode` แทนไหม หรือ branch `null` นั้นคือบั๊กจริง
+- `useRef<HTMLElement>()` โผล่มาโดย **ไม่มี** argument ไหม? ใน `@types/react@19` นั่นคือ compile error แข็ง ๆ ไม่ใช่แค่เรื่อง style — เช็คว่า code ถูก type-check จริง ไม่ใช่แค่ตรวจด้วยตาเฉย ๆ
+- component ที่เป็น wrapper spread `ComponentProps<'button'>` แล้ว *ยัง* ประกาศ `ref` prop ของตัวเองแยกไหม? เช็คว่า `ComponentPropsWithoutRef` คือ type ที่ควรใช้จริง เพื่อกัน `ref` สองแหล่งชนกัน
+- hook ที่ return tuple ขาด `as const` (หรือ return-type annotation แบบ tuple ชัดเจน) ไหม? ถ้าฝั่งเรียกใช้ destructure แล้วตำแหน่งใดตำแหน่งหนึ่งไม่ทำตัวเหมือน function/value ที่ควรจะเป็น นี่แหละสาเหตุที่เป็นไปได้มากที่สุด
+
+<SpotTheBug code={`function StatusIcon({ visible }: { visible: boolean }): JSX.Element {
+  if (!visible) {
+    return null;
+  }
+  return <span className="icon" />;
+}`}>
+`JSX.Element` (ประกาศใน `@types/react` เป็น `interface Element extends ReactElement<any, any> {}`) ไม่รวม `null` — มีแค่ `ReactNode` เท่านั้นที่รวม compile shape นี้ตรง ๆ (return type `JSX.Element`, branch หนึ่ง return `null`) fail ด้วย `Type 'null' is not assignable to type 'Element'` ยืนยันตรงในนี้ใน probe ของคอร์สนี้ ทางแก้คือขยาย return type เป็น `React.ReactNode` (ถูกต้องในกรณีนี้ — ไม่มีอะไรจะ render คือผลลัพธ์จริงที่คาดหวังได้) หรือถ้า component นี้ต้อง return element เสมอจริง ๆ ก็ต้อง restructure ฝั่งที่เรียกใช้ให้ไม่ต้องมี branch `null` เลย component ที่ generate มาแล้ว "ไม่ return อะไร" จาก branch ที่ type เป็น `JSX.Element`/`ReactElement` คือหนึ่งในจุดที่ TypeScript ที่ AI เขียนมักจะ compile ไม่ผ่านแบบเงียบ ๆ บ่อยที่สุด — รัน `tsc --noEmit` เสมอ อย่าแค่อ่าน JSX ด้วยตา
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-type component ด้วยการ type **props object** (ข้าม `React.FC`); type `children` เป็น `React.ReactNode`; ให้ type argument กับ hook เมื่อค่าเริ่มต้นกำกวม (`useState<User | null>(null)`, `useRef<HTMLInputElement>(null)`); และ type event ด้วย `React.ChangeEvent`/`MouseEvent` ใน **React 19 `ref` เป็น prop ธรรมดา** — type เป็น `React.Ref<T>` ใน props และเลิกใช้ `forwardRef` สำหรับ code ใหม่
+type props เป็น object ธรรมดา (ข้าม `React.FC`) ขโมย host prop ด้วย **`ComponentProps`**/**`ComponentPropsWithoutRef`** และเลือก **`ReactNode`** สำหรับอะไรก็ตามที่อาจเป็น `null` ได้จริง — **`ReactElement`**/**`JSX.Element`** (type เดียวกัน เช็คตรงกับ declaration จริงของ `@types/react`) ปฏิเสธมัน ใช้ **`<T,>`** สำหรับ generic arrow component, **`satisfies`** เพื่อ validate shape โดยไม่ widen, discriminated union พร้อม `switch` แบบ exhaustive สำหรับ props ที่ต่างกันจริงต่อ variant และ **`as const`** สำหรับ tuple ที่ hook return ใน **React 19** `ref` เป็น prop ธรรมดา (type เป็น `React.Ref<T>`) และ `useRef<T>()` ต้องมี argument ชัดเจน — ทั้งคู่คือ breaking change จริงจาก type definition เก่า ไม่ใช่แค่ convention
 </Callout>
 
 export const quizTs = [
   {
-    q: 'ควร type props ของ component อย่างไรใน React + TypeScript สมัยใหม่?',
+    q: '```ts\ntype ButtonProps = ComponentProps<\'button\'> & { icon: React.ReactNode };\ntype ButtonPropsNoRef = ComponentPropsWithoutRef<\'button\'>;\n```\n`ComponentProps<\'button\'>` มี key `ref` อยู่ไหม ยืนยันด้วย tsc check ระดับ type?',
     options: [
-      'ใช้ React.FC<Props> เสมอ',
-      'นิยาม type/interface สำหรับ props แล้ว annotate พารามิเตอร์ที่ destructure',
-      'ใช้ `any`',
-      'type แค่ค่า return',
+      'ไม่ — ComponentProps ไม่มี ref เลย',
+      'มี — ComponentProps<\'button\'> มี ref อยู่ (host element รับ ref ตรง ๆ); ComponentPropsWithoutRef เอาออก',
+      'มีเฉพาะ React 18 ไม่ใช่ React 19',
+      'มีเฉพาะถ้าเพิ่มเองด้วยมือ',
     ],
     answer: 1,
+    explain: 'type-level check (`\'ref\' extends keyof ComponentProps<\'button\'>`) ได้ผลลัพธ์ `true`; check เดียวกันบน `ComponentPropsWithoutRef<\'button\'>` ได้ `false` — ยืนยันทั้งคู่ด้วยการ assign literal ให้ const ที่ type ไว้แล้วปล่อยให้ tsc จับความไม่ตรงกัน',
   },
   {
-    q: 'ใช้ type อะไรสำหรับ `children` ของ component?',
+    q: 'function ถูก type ให้ return `JSX.Element` แต่ branch หนึ่งต้อง return `null` เกิดอะไรขึ้น?',
     options: [
-      'string',
-      'React.ReactNode',
-      'JSX.Element อย่างเดียว',
-      'object',
+      'compile ผ่านสบาย — JSX.Element รวม null ด้วย',
+      'tsc error: `Type \'null\' is not assignable to type \'Element\'` — JSX.Element ประกาศเป็น `extends ReactElement<any, any>` ซึ่งไม่รวม null',
+      'fail แค่ตอน runtime ไม่ใช่ compile time',
+      'JSX.Element กับ ReactNode คือ alias ของกันและกัน',
     ],
     answer: 1,
+    explain: 'ยืนยันตรง ๆ: @types/react ประกาศ `interface Element extends React.ReactElement<any, any> {}` ทั้ง JSX.Element และ ReactElement ไม่รวม null — ใช้ ReactNode สำหรับ return type ที่อาจไม่มีอะไรจริง ๆ',
   },
   {
-    q: 'เมื่อไรต้องส่ง type argument ให้ useState?',
+    q: '```tsx\nconst ArrowList = <T>({ items }: { items: T[] }) => <ul>{items.length}</ul>;\n```\nทำไม parse ไม่ผ่านในไฟล์ `.tsx`?',
     options: [
-      'เสมอ',
-      'เมื่อค่าเริ่มต้นไม่ pin type — เช่น `useState<User | null>(null)`',
-      'ไม่มีวัน',
-      'เฉพาะกับตัวเลข',
+      'arrow function เป็น generic ไม่ได้เลย',
+      '`<T>` ถูกอ่านเป็นจุดเริ่มของ JSX tag ใน .tsx — ต้องมี comma ต่อท้าย (`<T,>`) หรือ `<T extends unknown>` เพื่อแก้ความกำกวม',
+      'T คือชื่อ type parameter ที่สงวนไว้',
+      'arrow component รับ props ไม่ได้',
     ],
     answer: 1,
+    explain: 'ยืนยันแล้ว: อันนี้ทำให้เกิด parser error จริงต่อกันเป็นทอด (TS17008 "JSX element \'T\' has no corresponding closing tag", TS1005, TS1381, TS1382) — ไม่ใช่ error เดียวที่ชัดเจน `<T,>` แก้ได้ ส่วน `function` declaration ธรรมดาไม่มีความกำกวมนี้เลย',
   },
   {
-    q: 'จัดการ ref บน function component ใน React 19 อย่างไร?',
+    q: 'การเปลี่ยนแปลงของ React 19 ต่อ type signature ของ `useRef` คืออะไร ยืนยันกับ declaration จริงของ @types/react?',
     options: [
-      'ครอบด้วย forwardRef พร้อม generics',
-      '`ref` เป็น prop ธรรมดา — type เป็น `React.Ref<T>` ใน props ไม่ต้องใช้ forwardRef',
-      'ref type ไม่ได้',
-      'ใช้ global variable',
+      'ไม่เปลี่ยนอะไร — ยังมี overload ศูนย์ argument อยู่',
+      'overload ศูนย์ argument หายไป — เหลือแค่สามแบบที่ต้องมีค่าเริ่มต้นชัดเจนเสมอ (ค่าจริง, `T | null`, หรือ `T | undefined`)',
+      '`useRef` ถูกลบไปแล้วให้ใช้ `useState` แทน',
+      'useRef ต้องมี generic type argument แต่ยังไม่ต้องมีค่า',
     ],
     answer: 1,
+    explain: 'ยืนยันด้วยการอ่าน declaration ของ @types/react ตรง ๆ: `useRef<HTMLDivElement>()` (ไม่มี argument) fail ด้วย `TS2554: Expected 1 arguments, but got 0` — ทางแก้คือ `useRef<HTMLDivElement>(null)`',
+  },
+  {
+    q: 'ทำไม custom hook ที่ return `[value, setter]` ต้องใช้ `as const`?',
+    options: [
+      'ไม่ต้อง — array กับ tuple ใน TypeScript เหมือนกันเป๊ะ',
+      'ถ้าไม่ใช้ TS จะ infer เป็น array ของ UNION ของทั้งสอง element type ทำให้ฝั่งเรียกใช้ destructure แล้วเสีย type ต่อตำแหน่ง (เรียก value เหมือนเป็น function จะ error)',
+      '`as const` ใช้ได้แค่กับ string literal',
+      'useState hook เองบังคับให้ต้องใช้',
+    ],
+    answer: 1,
+    explain: 'ยืนยันแล้ว: ถ้าไม่ใช้ `as const`, `return [value, toggle];` infer เป็น `(boolean | (() => void))[]` แล้วเรียก element แรกที่ destructure มาเหมือนเป็น function จะได้ tsc error จริง ("Not all constituents... are callable") `as const` แก้เป็น `readonly [boolean, () => void]`',
+  },
+  {
+    q: '```ts\nconst config = { a: 1, b: [1,2,3] } satisfies Record<string, number | number[]>;\nconfig.b.push(4);\n```\nทำไม `.push` type-check ผ่านตรงนี้ แต่จะไม่ผ่านถ้าใช้ annotation แบบ `: Record<string, number | number[]>` แทน?',
+    options: [
+      '`satisfies` กับ annotation ธรรมดาพฤติกรรมเหมือนกันเป๊ะ — โจทย์หลอก',
+      '`satisfies` validate shape โดยไม่ widen type ของ expression ที่เช็คเอง `config.b` จึงยังเป็น type เจาะจง `number[]`; annotation ธรรมดา widen เป็น union เต็ม `number | number[]` ซึ่งไม่มี `.push`',
+      'array มี `.push` เสมอไม่ว่า type อะไร',
+      '`satisfies` ต้องใช้คู่กับ `as const` ถึงจะทำงานได้',
+    ],
+    answer: 1,
+    explain: 'ยืนยันด้วย tsc: เวอร์ชัน satisfies compile ผ่านสะอาด; เวอร์ชัน annotation ธรรมดาต้องมี `@ts-expect-error` บน `.push` บรรทัดเดียวกัน เพราะ property ถูก widen เป็น `number | number[]`',
   },
 ];
 

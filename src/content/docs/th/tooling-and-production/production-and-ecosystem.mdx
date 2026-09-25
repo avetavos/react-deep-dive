@@ -1,6 +1,6 @@
 ---
 title: 'Production & Ecosystem'
-description: 'ship React — production build, code-splitting ด้วย lazy, Strict Mode เทียบ production และ library ที่ยอมรับกันแล้วที่คุณจะหยิบมาใช้: routing, data, form และ state'
+description: 'ship React ของจริง — output จริงของ react-dom/static prerender, renderToPipeableStream + hydrateRoot + onRecoverableError, อ่าน hydration mismatch จริง, พิสูจน์ dev เทียบ production build และ library ecosystem ที่ลงตัวแล้ว'
 sidebar:
   order: 5
 ---
@@ -9,18 +9,240 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## dev build เทียบ production build
+## dev build เทียบ production build พิสูจน์แล้ว
 
-React มีสอง build **development** build ใหญ่และช้ากว่าโดยตั้งใจ — รวม warning ที่ช่วยได้, prop-type check และ Strict Mode double-invoke ส่วน **production** build ตัดทั้งหมดนั้นออกเพื่อความเร็วและขนาด build tool ของคุณ (Vite / framework) สลับให้อัตโนมัติเมื่อคุณรัน production build:
+React มีสอง build **development** build ใหญ่และช้ากว่าโดยตั้งใจ — รวม warning ที่ช่วยได้, check เพิ่ม และ Strict Mode double-invoke ส่วน **production** build ตัดทั้งหมดนั้นออก นี่ไม่ใช่ claim ที่ต้องเชื่อเฉย ๆ — มันคือวิธีที่ entry point ของ `react-dom` เองถูกเขียน:
+
+```js
+// react-dom's actual cjs/client.js entry point
+if (process.env.NODE_ENV === 'production') {
+  checkDCE();
+  module.exports = require('./cjs/react-dom-client.production.js');
+} else {
+  module.exports = require('./cjs/react-dom-client.development.js');
+}
+```
+
+environment variable ตัวเดียว, `if` อันเดียว, ไฟล์คนละไฟล์กันเลยสองไฟล์ ความต่างของขนาดและเนื้อหาจริงและเยอะ:
+
+```text
+$ ls -la node_modules/react-dom/cjs/react-dom-client.*.js
+1182785  react-dom-client.development.js
+ 625168  react-dom-client.production.js
+
+$ grep -c "console.error" node_modules/react-dom/cjs/react-dom-client.development.js
+261
+$ grep -c "console.error" node_modules/react-dom/cjs/react-dom-client.production.js
+2
+```
+
+261 จุดที่พร้อม log `console.error` ใน development เหลือ 2 จุดใน production — รวมถึงอันนี้ที่คุ้นเคยกันดี มีอยู่แค่ในไฟล์ development เท่านั้น:
+
+```text
+$ grep -o "Each child in a list should have a unique[^\"]*" \
+    node_modules/react-dom/cjs/react-dom-client.development.js
+Each child in a list should have a unique
+```
+
+build tool ของคุณ (Vite / framework) ตั้ง `NODE_ENV` ให้อัตโนมัติเมื่อคุณรัน production build command:
 
 ```bash
 npm run build   # produces the optimized production bundle
 ```
 
-อย่า ship development build เด็ดขาด — build นี้ช้าและใหญ่กว่าอย่างมีนัยสำคัญ และจำไว้ว่า `<StrictMode>` double-invoke เฉพาะใน development; ใน production ไม่ทำอะไรเลย ปล่อยไว้จึงไม่มีต้นทุน
+อย่า ship development build เด็ดขาด — build นี้ช้าและใหญ่กว่าอย่างมีนัยสำคัญ โดยไม่ได้ประโยชน์อะไรกับ user จริงเลย และ `<StrictMode>` double-invoke เฉพาะใน development; ใน production ไม่ทำอะไรเลย ปล่อยไว้จึงไม่มีต้นทุน
 
-## code-splitting ด้วย lazy
+## `react-dom/static`: `prerender` สำหรับ static HTML
+
+สำหรับ static-site generation (SSG) — HTML ที่ generate ครั้งเดียวล่วงหน้า ไม่ใช่ต่อ request — `react-dom/static` render tree ทั้งหมดเป็น HTML แล้วรอให้ data โหลดครบก่อน (ต่างจาก streaming SSR API) รันจริงบน Node ธรรมดา กับ probe ของคอร์สนี้:
+
+```js
+// run-prerender.mjs
+import { createElement } from 'react';
+import { prerenderToNodeStream } from 'react-dom/static';
+
+function App() {
+  return createElement('html', null,
+    createElement('head', null, createElement('title', null, 'Static demo')),
+    createElement('body', null,
+      createElement('div', { id: 'root' },
+        createElement('h1', null, 'Hello from prerenderToNodeStream'))));
+}
+
+const { prelude } = await prerenderToNodeStream(createElement(App), {
+  bootstrapScripts: ['/main.js'],
+});
+
+let html = '';
+for await (const chunk of prelude) html += chunk;
+console.log(html);
+```
+
+output จริงจาก `node run-prerender.mjs` เป๊ะทุกตัวอักษร:
+
+```text
+<!DOCTYPE html><html><head><link rel="preload" as="script" fetchPriority="low" href="/main.js"/><title>Static demo</title></head><body><div id="root"><h1>Hello from prerenderToNodeStream</h1></div><script src="/main.js" id="_R_" async=""></script></body></html>
+```
+
+สังเกตสิ่งที่ React เติมให้เอง: `<!DOCTYPE html>`, `<link rel="preload">` resource hint สำหรับ bootstrap script และ tag `<script>` เองที่มี `id` generate มาให้ `prerenderToNodeStream` เจาะจงสำหรับ Node; environment ที่มี Web Streams (Deno, edge runtime) ใช้ `prerender` ตัวพี่น้องแทน ทั้งคู่ abort แล้ว resume ทีหลังได้ด้วย `resumeToPipeableStream`/`resume` สำหรับ partial prerendering
+
+## `react-dom/server`: `renderToPipeableStream` สำหรับ SSR จริง
+
+สำหรับ server rendering ต่อ request จริง (ไม่ใช่ generate ล่วงหน้า) `renderToPipeableStream` ของ `react-dom/server` stream HTML ลง `Writable` ของ Node ทันทีที่ shell พร้อม แทนที่จะรอทุกอย่างเสร็จก่อน:
+
+```js
+// run-pipeable.mjs
+import { createElement } from 'react';
+import { renderToPipeableStream } from 'react-dom/server';
+import { PassThrough } from 'node:stream';
+
+function App() {
+  return createElement('html', null,
+    createElement('body', null,
+      createElement('div', { id: 'root' }, createElement('p', null, 'streamed'))));
+}
+
+const passthrough = new PassThrough();
+let out = '';
+passthrough.on('data', (chunk) => { out += chunk; });
+
+const { pipe } = renderToPipeableStream(createElement(App), {
+  bootstrapScripts: ['/main.js'],
+  onShellReady() {
+    pipe(passthrough); // pipe as soon as the shell is ready, not before
+  },
+  onError(error) {
+    console.error('onError:', error);
+  },
+});
+
+await new Promise((r) => setTimeout(r, 20));
+console.log(out);
+```
+
+output จริง:
+
+```text
+<!DOCTYPE html><html><head><link rel="preload" as="script" fetchPriority="low" href="/main.js"/></head><body><div id="root"><p>streamed</p></div><script src="/main.js" id="_R_" async=""></script></body></html>
+```
+
+สัญญาของ API ที่สำคัญ: pipe เฉพาะข้างใน `onShellReady` เท่านั้น — ไม่ใช่ก่อนหน้านั้น และไม่ใช่การเมิน callback นี้ไปเลย เพื่อให้ subtree ที่ช้าอยู่หลัง `<Suspense>` ไม่บล็อก response แรก `onShellError` (ไม่ได้โชว์ตรงนี้) คือสัญญาณให้ fallback ไปหน้า error แบบ static แทน ถ้าแม้แต่ shell เองก็ยัง fail
+
+## `hydrateRoot` และการอ่าน hydration mismatch จริง
+
+ฝั่ง client `hydrateRoot` แปะ React เข้ากับ HTML ที่ server render มาแล้ว แทนที่จะสร้างใหม่ `onRecoverableError` คือ hook ของคุณสำหรับ failure mode ที่ section นี้พูดถึงพอดี — mismatch ที่ React ปะแก้ให้อัตโนมัติ แต่ยังอยากให้คุณรู้ว่าเกิดขึ้น ตั้ง jsdom ด้วย server HTML ที่ตั้งใจให้ไม่ตรงกับสิ่งที่ client render:
+
+```js
+// run-hydrate.mjs
+import { JSDOM } from 'jsdom';
+
+const dom = new JSDOM(
+  '<!DOCTYPE html><html><body><div id="root">Server content before hydration.</div></body></html>',
+  { url: 'http://localhost/' },
+);
+globalThis.window = dom.window;
+globalThis.document = dom.window.document;
+Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
+
+const { createElement } = await import('react');
+const { hydrateRoot } = await import('react-dom/client');
+
+function App() {
+  // Deliberately different from the server-rendered content above, to
+  // trigger a real hydration mismatch.
+  return createElement('div', { id: 'root' }, 'Client content after hydration.');
+}
+
+const root = hydrateRoot(document.getElementById('root'), createElement(App), {
+  onRecoverableError(error, errorInfo) {
+    console.log('onRecoverableError message:', error.message);
+    console.log('componentStack present:', typeof errorInfo.componentStack === 'string');
+  },
+});
+```
+
+ข้อความเต็มจริงที่ React 19 log — นี่คือสิ่งที่คุณจะเห็นใน console ของตัวเองเป๊ะ ๆ เมื่อเรื่องนี้เกิดขึ้น คุ้มที่จะอ่านให้ละเอียดสักครั้งแทนที่จะเลื่อนผ่านทุกครั้ง:
+
+```text
+onRecoverableError message: Hydration failed because the server rendered HTML didn't match the client. As a result this tree will be regenerated on the client. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  <App>
++   <div id="root">
+-   Server content before hydration.
+
+componentStack present: true
+```
+
+อ่าน bullet list นั้นเป็น checklist ตรง ๆ ครั้งต่อไปที่เจอ warning นี้ — React บอกสาเหตุที่พบบ่อยที่สุดห้าอันตรง ๆ เรียงลำดับให้เลย diff `+`/`-` ท้ายข้อความโชว์เป๊ะว่า client render อะไร (`+`) เทียบกับที่ server ส่งมา (`-`) React กู้คืนด้วยการ **ทิ้ง HTML ของ server สำหรับ subtree นั้นแล้ว re-render บน client ใหม่** — หน้ายังทำงานได้ แต่คุณเสียประเด็นของ SSR ไปสำหรับ subtree นั้น (ไม่มี first paint แบบไม่กระพริบ) แล้วยังจ่ายค่า render บน server ไปเปล่า ๆ ด้วย
+
+สำหรับกลไกลึก ๆ ว่า "ทำไม mismatch ถึงเกิดในระดับ fiber/reconciliation" ดูโมดูล React Internals ที่กำลังจะมา; ส่วนวิธีที่ render error ที่ *ไม่ถูกจับ* (ไม่ใช่ hydration ปะแก้อัตโนมัติ) ไปโผล่ที่ UI ดู [error boundaries](/react/en/concurrent-and-suspense/error-boundaries/) ในโมดูล concurrent — `onCaughtError`/`onUncaughtError` คือพี่น้องของ `onRecoverableError` ทั้งบน `hydrateRoot` และ `createRoot` สำหรับ failure mode สองแบบที่ต่างกัน
+
+<Mermaid title="Static, SSR และ hydration คือสามงานที่ต่างกัน" code={renderModesDiagram} />
+
+export const renderModesDiagram = `flowchart TB
+  ssg["react-dom/static\nprerender / prerenderToNodeStream\n(SSG — รอทุกอย่างครบ ครั้งเดียว)"]
+  ssr["react-dom/server\nrenderToPipeableStream\n(SSR ต่อ request — stream ทันทีที่พร้อม)"]
+  hydrate["react-dom/client\nhydrateRoot\n(แปะเข้ากับ HTML ที่มีอยู่แล้ว,\nonRecoverableError เมื่อ mismatch)"]
+  ssg --> hydrate
+  ssr --> hydrate`;
+
+## production build flag และ error reporting
+
+ข้อเท็จจริง CLI จริงที่เช็ค currency แล้วสองอย่าง ควรรู้จักชื่อไว้:
+
+- **`vite build --profile [name]`** — flag จริงและปัจจุบัน: "start built-in Node.js inspector" สำหรับ profile production build ที่ช้า (ไม่ใช่ runtime performance ของ app คุณ) ยืนยันตรงจาก `vite build --help` บน probe ของคอร์สนี้ (Vite 8.3.1)
+- minifier default ของ `vite build` ใน Vite 8 คือ **`oxc`** ไม่ใช่ `esbuild` — อีกจุดที่ล้าสมัยเร็วถ้าอ่าน tutorial เก่า; `--minify esbuild`/`terser` ยังใช้ได้ถ้าต้องการ
+
+สำหรับ error reporting ใน production เดินสาย error callback ทั้งสามของ `hydrateRoot`/`createRoot` เข้าด้วยกัน — มันครอบคลุมสถานการณ์ที่ต่างกันจริง ๆ สามแบบ ตัวอย่างของ react.dev เองก็แยกให้ชัด:
+
+```js
+function reportError({ type, error, errorInfo }) {
+  console.error(type, error, 'Component Stack:', errorInfo.componentStack);
+}
+
+hydrateRoot(container, <App />, {
+  onCaughtError(error, errorInfo) {       // an Error Boundary caught it
+    reportError({ type: 'Caught', error, errorInfo });
+  },
+  onUncaughtError(error, errorInfo) {     // nothing caught it — the tree crashed
+    reportError({ type: 'Uncaught', error, errorInfo });
+  },
+  onRecoverableError(error, errorInfo) {  // React patched a hydration mismatch
+    reportError({ type: 'Recoverable', error, errorInfo });
+  },
+});
+```
+
+จับคู่กับ **Sentry** (หรือเทียบเท่า) แล้วเอา custom handler พวกนี้ออกใน development เพื่อให้ยังได้ overlay ของ React เองแทนที่จะ report ซ้ำซ้อน
+
+## ecosystem: หยิบอะไรมาใช้
+
+React ตั้งใจให้เล็ก app จริงจึงประกอบ library ที่ยอมรับกันแล้วไม่กี่ตัว ตัวเลือกปัจจุบันที่ลงตัว:
+
+| ต้องการ | หยิบ |
+|------|-----------|
+| **Routing** (SPA) | React Router — หรือ router ใน framework (Next.js) |
+| **Server state / data fetching** | TanStack Query (React Query) หรือ RTK Query |
+| **Form** | React Hook Form (+ schema validator อย่าง Zod) |
+| **Client state** | Zustand หรือ Redux Toolkit (หรือ Jotai) — เกินกว่าที่ Context จัดการได้สบาย |
+| **Styling** | CSS Modules, Tailwind หรือ CSS-in-JS library |
+| **Error monitoring** | Sentry (พร้อม error-callback ที่เดินสายไว้ข้างบนที่ root) |
+
+ความต่างสำคัญที่ช่วยประหยัดความเจ็บปวดมาก: **server state** (data จาก API — TanStack Query) และ **client state** (local UI state — useState/Context/Zustand) เป็นคนละปัญหา การพยายามเก็บ server data ใน client store (loading flag เอง, cache invalidation, refetch) คือการคิดใหม่แบบคลาสสิกที่ data library แก้ให้คุณแล้ว
+
+## code-splitting ด้วย `lazy`
 
 bundle ใหญ่ก้อนเดียวหมายถึง user download code ของหน้าที่อาจไม่เคยเข้า **`React.lazy`** + **`<Suspense>`** แยก component เป็น chunk ของตัวเองที่โหลด on demand:
 
@@ -40,62 +262,110 @@ function App() {
 
 แยกที่ route boundary ก่อน (แต่ละหน้าเป็น chunk) — นั่นคือการ split ที่คุ้มค่าที่สุด และ framework มักทำให้คุณอยู่แล้ว
 
-## ecosystem: หยิบอะไรมาใช้
-
-React ตั้งใจให้เล็ก app จริงจึงประกอบ library ที่ยอมรับกันแล้วไม่กี่ตัว ตัวเลือกปัจจุบันที่ลงตัว:
-
-| ต้องการ | หยิบ |
-|------|-----------|
-| **Routing** (SPA) | React Router — หรือ router ใน framework (Next.js) |
-| **Server state / data fetching** | TanStack Query (React Query) หรือ RTK Query |
-| **Form** | React Hook Form (+ schema validator อย่าง Zod) |
-| **Client state** | Zustand หรือ Redux Toolkit (หรือ Jotai) — เกินกว่าที่ Context จัดการได้สบาย |
-| **Styling** | CSS Modules, Tailwind หรือ CSS-in-JS library |
-| **Error monitoring** | Sentry (พร้อม error boundary ที่ root ของ app) |
-
-<Mermaid title="React บวกชิ้นส่วนที่ app จริงประกอบขึ้น" code={ecoDiagram} />
-
-export const ecoDiagram = `flowchart TB
-  react["React (view layer)"]
-  react --> route["Routing:\nReact Router / framework"]
-  react --> data["Server state:\nTanStack Query"]
-  react --> forms["Forms:\nReact Hook Form"]
-  react --> state["Client state:\nZustand / Redux Toolkit"]`;
-
-ความต่างสำคัญที่ช่วยประหยัดความเจ็บปวดมาก: **server state** (data จาก API — TanStack Query) และ **client state** (local UI state — useState/Context/Zustand) เป็นคนละปัญหา การพยายามเก็บ server data ใน client store (loading flag เอง, cache invalidation, refetch) คือการคิดใหม่แบบคลาสสิกที่ data library แก้ให้คุณแล้ว
-
 ## production checklist
 
-- build ด้วย **production** bundle; ตรวจว่าไม่ใช่ dev build
+- build ด้วย **production** bundle; ช่องว่าง `console.error` 261 เทียบ 2 ที่โชว์ข้างบนคือสิ่งที่คุณซื้อจริง ๆ
 - **code-split** ที่ route ด้วย `lazy` + `Suspense`
-- วาง **error boundary** ที่ root ของ app (และรอบ subtree ที่เสี่ยง) แล้วต่อเข้ากับ monitoring
-- เปิด **`<StrictMode>`** ไว้ — เป็น dev-only guard ที่ไม่มีต้นทุนใน production
+- เลือก render API ให้ตรงงาน: `react-dom/static` สำหรับหน้าที่ generate ล่วงหน้า, `renderToPipeableStream` ของ `react-dom/server` สำหรับ SSR ต่อ request, `hydrateRoot` ฝั่ง client พร้อม error callback ทั้งสามเดินสายไว้
+- มอง output ของ `onRecoverableError` เป็น bug report จริง ไม่ใช่ noise — checklist ห้าสาเหตุข้างบนคือจุดเริ่มอ่าน
 - แยก **server state** (data library) ออกจาก **client state** (local/store)
 
+## Mental Model
+
+render entry point ทั้งสามนี้ไม่ใช่ตัวแปรที่ใช้แทนกันได้ — แต่ละตัวตอบคำถามคนละข้อ `react-dom/static`: "ให้ HTML ฉันครั้งเดียว ฉันจะเสิร์ฟมันตลอดไป" (ไม่มี data ตอน request) `react-dom/server`: "ให้ HTML สำหรับ request *นี้* stream มาทันทีที่พร้อม" `hydrateRoot`: "แปะเข้ากับ HTML ที่มีอยู่แล้ว แล้วบอกฉันทันทีที่ความจริง (client) กับสมมติฐาน (server) ไม่ตรงกัน" hydration mismatch ไม่ใช่ React เปราะบาง — มันคือ React กำลังเช็คสัญญาที่ code ฝั่ง server และ client ของคุณให้ไว้ทั้งคู่ แล้วบอกตรง ๆ ว่าตรงไหนที่ผิดสัญญา
+
+## ข้อแลกเปลี่ยน
+
+| ตัวเลือก | ได้อะไร | ต้นทุน |
+| --- | --- | --- |
+| `react-dom/static` `prerender`/`prerenderToNodeStream` | ง่าย, cache ได้, ไม่ต้องมี server ต่อ request | รอทุกอย่างครบก่อน — ไม่ stream ไม่เหมาะกับ content ต่อ user/ต่อ request |
+| `react-dom/server` `renderToPipeableStream` | stream ทันทีที่ shell พร้อม; data ต่อ request ใช้ได้ | ต้องมี Node server process ที่รันอยู่ (หรือ framework จัดการให้) |
+| เดินสาย `onCaughtError`/`onUncaughtError`/`onRecoverableError` ใน production | มองเห็น error ครบทุกแบบ ไม่มี error type ไหนหลุดไปโดยไม่ถูก report | ต้องเอาออก/ปิดเงื่อนไขใน development ไม่งั้นเสีย dev overlay ของ React เอง |
+| production build (`NODE_ENV=production`) | เล็กลง, เร็วขึ้น, `console.error` call site น้อยลง 259 จุดที่ไม่ได้ช่วย user เลย | ไม่มีต้นทุนสำหรับ deployment จริง — ไม่มีเหตุผลที่จะ ship dev เลย |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"hydration mismatch แปลว่าหน้าพัง"** React กู้คืนด้วยการทิ้งแล้ว re-render subtree ที่ mismatch บน client — หน้ายังทำงานได้ สิ่งที่เสียคือ *ประเด็น* ของ SSR สำหรับ subtree นั้น (first paint แบบไม่กระพริบ) แล้วยังจ่ายค่า server-render ไปเปล่า ๆ ตรงนั้นด้วย
+- **"`prerenderToNodeStream` กับ `renderToPipeableStream` คือของเดียวกันแค่ชื่อต่าง"** `prerenderToNodeStream` รอทั้ง tree (รวม data ที่ gate ด้วย Suspense) ก่อน resolve — เหมาะกับ SSG ตอน build `renderToPipeableStream` stream shell ทันทีแล้วให้ส่วนที่ช้ากว่ามาทีหลัง — เหมาะกับ SSR ต่อ request
+- **"ความต่างของ dev/production build ส่วนใหญ่คือเรื่อง minify"** minify สำคัญ แต่ความต่างที่ใหญ่กว่าคือ check และจุด `console.error`: 261 จุดในไฟล์ `react-dom-client` แบบ development เหลือ 2 ใน production — ต่างกันเป็นลำดับขนาด ไม่ใช่แค่ปัดเศษ
+- **"`onRecoverableError` กับ error boundary ทำงานเดียวกัน"** `onRecoverableError` fire เมื่อ *React เอง* ปะแก้ความไม่ตรงกันของ hydration อัตโนมัติ error boundary (`onCaughtError`) จับ error ที่ component tree *ของคุณเอง* throw ตอน render ทั้งสองคือ failure category คนละแบบ มี callback คนละตัวด้วยเหตุผล
+
+## อ่านโค้ดที่ AI เขียน
+
+- call ของ `hydrateRoot`/`createRoot` ไม่ได้เดินสาย `onCaughtError`/`onUncaughtError`/`onRecoverableError` เลยสักตัวไหม? code setup production ที่ generate มามักข้ามทั้งสามอันไปเงียบ ๆ กลับไปใช้ default ที่แค่ log console ของ React — โอเคใน development แต่เป็นช่องว่างจริงของ production error monitoring
+- `pipe(...)` ของ `renderToPipeableStream` ถูกเรียกทันที นอก `onShellReady` ไหม? เสี่ยง pipe ก่อนที่ shell จะพร้อมจริง ทำลายจุดประสงค์ทั้งหมดของ callback นั้น
+- code branch บน `typeof window !== 'undefined'` ข้างใน component ที่ server-render ด้วยไหม? นั่นคือ bullet แรกตรง ๆ ในข้อความ hydration-mismatch จริงของ React — สาเหตุจริงที่พบบ่อยและเกิดจากโค้ดเราเองล้วน ๆ
+- มี `Date.now()`/`Math.random()`/date format ที่ผูกกับ locale อยู่ใน render body ของ component ที่รันบน server ด้วยไหม? ข้อความเดียวกัน bullet ที่สองและสาม
+- code "production setup" ที่ generate มาข้ามการตั้ง `NODE_ENV=production` ไหม (หรือพึ่ง default ของ bundler ที่จริง ๆ ไม่ได้ตั้งให้)? ก่อนวัดขนาด bundle หรือ performance ความต่างของขนาดประมาณ 2 เท่าและจำนวน `console.error` ที่โชว์ในบทนี้คือของจริง — เทียบ dev bundle กับ claim "production" คือความผิดพลาดจริงที่พลาดง่าย
+
+<SpotTheBug code={`function UserGreeting() {
+  if (typeof window !== 'undefined') {
+    return <p>Welcome back, {window.localStorage.getItem('name')}!</p>;
+  }
+  return <p>Welcome!</p>;
+}`}>
+นี่คือ bullet แรกตรง ๆ ในข้อความ hydration-mismatch จริงของ React 19 ที่ reproduce ในบทนี้: "A server/client branch `if (typeof window !== 'undefined')`" บน server `window` เป็น undefined `UserGreeting` เลย render `"Welcome!"` บน client `window` มีอยู่ component เดียวกันเลย render greeting ที่ personalize แทน — mismatch แน่นอนตอน hydration ครั้งแรก ทุกครั้งที่มีชื่อเก็บไว้จริง React กู้คืน (ทิ้งแล้ว re-render subtree นั้นฝั่ง client) หน้าเลยไม่พัง แต่คุณจ่ายค่า server render ที่ HTML ถูกทิ้งไปเปล่า ๆ แล้ว `onRecoverableError` จริงก็ fire ด้วยข้อความเป๊ะแบบที่โชว์ก่อนหน้านี้ในบทนี้ ทางแก้คือทำให้สอง environment เห็นตรงกัน: อ่าน `localStorage` ใน effect (หลัง mount, client เท่านั้น) แล้ว render greeting ทั่วไปก่อน หรือส่ง personalization ลงมาเป็น data ที่ server มีจริง (cookie, session) แทนที่จะ branch บน `window`
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-ship **production build** (อย่า ship dev build), **code-split** ที่ route ด้วย `lazy` + `Suspense` และวาง **error boundary** ที่ root ต่อเข้า monitoring React เป็น view layer — ประกอบ ecosystem ที่ลงตัวสำหรับส่วนที่เหลือ: **React Router** (routing), **TanStack Query** (server state), **React Hook Form** (form), **Zustand/Redux Toolkit** (client state) — และแยก server state กับ client state เป็นคนละเรื่อง
+ship **production build** — พิสูจน์ตรงนี้ว่าเป็น `NODE_ENV` branch จริงที่เลือกระหว่างสองไฟล์ ห่างกัน 261 เทียบ 2 จุด `console.error` ไม่ใช่ claim performance ลอย ๆ เลือก render API ให้ตรงงาน: **`react-dom/static`**'s `prerender`/`prerenderToNodeStream` สำหรับ HTML ที่ generate ล่วงหน้า, **`react-dom/server`**'s `renderToPipeableStream` สำหรับ SSR แบบ stream ต่อ request และ **`hydrateRoot`** พร้อม error callback ทั้งสาม (`onCaughtError`/`onUncaughtError`/`onRecoverableError`) เดินสายไว้เพื่อมองเห็น error production ครบถ้วน อ่านข้อความ hydration-mismatch เป็น checklist ห้าสาเหตุที่ React ให้จริง ไม่ใช่ noise ทั่วไป — และแยก **server state** (TanStack Query) ออกจาก **client state** (Zustand/Redux Toolkit) ใน ecosystem ที่คุณประกอบรอบ ๆ ทั้งหมดนี้
 </Callout>
 
 export const quizProd = [
   {
-    q: 'ความต่างระหว่าง development และ production build ของ React คืออะไร?',
+    q: 'react-dom เองตัดสินใจอย่างไรว่าจะโหลด build ไหน — development หรือ production — ยืนยันจาก source จริง?',
     options: [
-      'เหมือนกัน',
-      'dev ใหญ่/ช้ากว่าพร้อม warning และ Strict Mode double-invoke; production ตัดทิ้งเพื่อความเร็วและขนาด',
-      'production มี warning มากกว่า',
-      'dev render component ไม่ได้',
+      'โหลด development เสมอแล้ว minify ตอนท้าย',
+      '`if (process.env.NODE_ENV === \'production\') { require(production file) } else { require(development file) }` — branch จริงใน cjs entry point ของ react-dom เอง',
+      'อ่าน config file ที่ต้องสร้างเองด้วยมือ',
+      'มี build เดียว "production mode" แค่เอา source map ออก',
     ],
     answer: 1,
+    explain: 'อ่านตรงจาก cjs/client.js ของ react-dom เอง: check NODE_ENV เลือกระหว่าง react-dom-client.production.js กับ react-dom-client.development.js สองไฟล์ที่ต่างกันจริง (1.18MB เทียบ 625KB, 261 เทียบ 2 จุด console.error)',
   },
   {
-    q: 'code-split component ให้โหลด on demand อย่างไร?',
+    q: 'ควรหยิบ `prerenderToNodeStream` ของ `react-dom/static` แทน `renderToPipeableStream` ของ `react-dom/server` เมื่อไร?',
     options: [
-      'แค่แยกเป็นไฟล์ต่างหาก',
-      '`React.lazy(() => import(...))` render ภายใน `<Suspense>` boundary',
-      'ครอบด้วย useMemo',
-      'ใช้ bundle ที่ใหญ่ขึ้น',
+      'ไม่มีวัน — ใช้แทนกันได้เสมอ',
+      'สำหรับ static-site generation ที่อยากรอ data ทั้งหมด (รวมที่ gate ด้วย Suspense) ก่อนผลิต HTML ครั้งเดียวล่วงหน้า',
+      'เฉพาะตอนใช้ TypeScript',
+      'เฉพาะ app React Native',
     ],
     answer: 1,
+    explain: 'prerenderToNodeStream รอทั้ง tree settle ก่อน resolve — เครื่องมือที่ถูกสำหรับ SSG ตอน build renderToPipeableStream stream shell ทันทีที่พร้อม — เครื่องมือที่ถูกสำหรับ SSR ต่อ request ที่ไม่อยากบล็อกรอ data ที่ช้า',
+  },
+  {
+    q: '`onRecoverableError` บน `hydrateRoot` รายงานอะไรจริง ๆ ยืนยันด้วย render ที่จงใจ mismatch จริง?',
+    options: [
+      'error ใด ๆ ที่ throw ที่ไหนก็ได้ใน app',
+      'ข้อความ hydration-mismatch เป๊ะ ๆ รวม checklist 5 สาเหตุ ("typeof window", Date.now()/Math.random(), date ที่ผูก locale, external data ที่เปลี่ยน, HTML nesting ผิด) และ diff +/- ของ server เทียบ client output',
+      'เฉพาะ network error',
+      'ไม่มีอะไร — onRecoverableError ถูกลบใน React 19',
+    ],
+    answer: 1,
+    explain: 'จับข้อความจริงเป๊ะจากการเรียก hydrateRoot() จริงที่จงใจให้ server/client HTML ไม่ตรงกันใน probe ของคอร์สนี้ — ไม่ได้ paraphrase',
+  },
+  {
+    q: '```jsx\nfunction UserGreeting() {\n  if (typeof window !== \'undefined\') {\n    return <p>Welcome back, {window.localStorage.getItem(\'name\')}!</p>;\n  }\n  return <p>Welcome!</p>;\n}\n```\nทำไมโค้ดนี้ถึงเกิด hydration mismatch จริงเมื่อ server-render?',
+    options: [
+      'ไม่เกิด — นี่คือ pattern ที่ปลอดภัยและพบบ่อย',
+      'server (ไม่มี window) render "Welcome!" ส่วน client (มี window) render greeting ที่ personalize — mismatch แน่นอนตอน hydration ครั้งแรก ตรงกับสาเหตุแรกที่ React เขียนไว้เอง',
+      'ห้ามใช้ localStorage ใน React component เลย',
+      'อันนี้ fail แค่ใน Next.js ไม่ใช่ plain React',
+    ],
+    answer: 1,
+    explain: 'นี่คือ bullet แรกตรง ๆ ในข้อความ hydration-mismatch จริงของ React: "A server/client branch `if (typeof window !== \'undefined\')`" ทางแก้คืออ่าน localStorage ใน effect (client เท่านั้น หลัง mount) แทนที่จะ branch render output ตรง ๆ บนมัน',
+  },
+  {
+    q: 'output จริงของ `vite build --help` ยืนยันอะไรเกี่ยวกับ flag `--profile` บน probe Vite 8 ของคอร์สนี้?',
+    options: [
+      'ไม่มีอยู่จริง — เป็น concept ของ React เท่านั้น',
+      '`--profile [name]`: "start built-in Node.js inspector" — flag CLI จริงและปัจจุบันของ Vite สำหรับ profile build ที่ช้า',
+      'profile runtime performance ของ app ที่ deploy แล้ว',
+      'ใช้ได้เฉพาะกับ webpack ไม่ใช่ Vite',
+    ],
+    answer: 1,
+    explain: 'ยืนยันตรงจาก `vite build --help` บน Vite 8.3.1: `--profile [name] [boolean | string] start built-in Node.js inspector` — สำหรับ diagnose build process ที่ช้า ไม่ใช่ runtime performance ของ app',
   },
   {
     q: 'ทำไมต้องแยก server state กับ client state?',
@@ -106,16 +376,7 @@ export const quizProd = [
       'เพื่อลดขนาด bundle อย่างเดียว',
     ],
     answer: 1,
-  },
-  {
-    q: 'ปล่อย `<StrictMode>` ไว้ใน production มีต้นทุนเท่าไร?',
-    options: [
-      'ทำให้ render นานเป็นสองเท่าสำหรับ user',
-      'ไม่มี — StrictMode double-invoke เฉพาะใน development; ใน production ไม่ทำอะไรเลย',
-      'ปิด hooks',
-      'ส่ง warning เกินไปให้ user',
-    ],
-    answer: 1,
+    explain: 'server state มี lifecycle ต่างจาก local UI state (staleness, refetch-on-focus, cache invalidation ข้าม component) — data library เฉพาะทางแก้ปัญหานี้ครั้งเดียว; client store ต้องแก้ปัญหาเดิมซ้ำเอง ปกติแย่กว่า ต่อแอปหนึ่งตัว',
   },
 ];
 
