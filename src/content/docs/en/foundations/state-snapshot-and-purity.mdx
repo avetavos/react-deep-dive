@@ -1,6 +1,6 @@
 ---
 title: 'State Snapshot & Purity'
-description: 'State as a per-render snapshot, why you treat it as immutable, why render must be pure, and what StrictMode’s double-render is protecting you from.'
+description: 'State as a per-render snapshot (proven with a closure test), the Object.is bail-out that skips a render, why mutating state silently fails to re-render, purity and what the React Compiler assumes, and StrictMode’s double-render.'
 sidebar:
   order: 5
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## State is a snapshot, not a live variable
 
@@ -39,11 +40,169 @@ setCount((c) => c + 1);
 // Each receives the previous pending value: 0→1→2→3. Result: 3.
 ```
 
-The mental model: a re-render is a fresh call of your function with a new snapshot. The old render's variables are gone; the new render sees the new values.
+The mental model: a re-render is a fresh call of your function with a new snapshot. The old render's variables are gone; the new render sees the new values. That's true even for values captured inside a *closure* that outlives the render it was created in — a classic case is scheduling something asynchronously from inside an event handler:
+
+```tsx
+// src/__tests__/state-is-a-snapshot.test.tsx
+import { useState } from 'react';
+import { render, cleanup, fireEvent } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('a closure created during a render keeps reading THAT render\'s snapshot, even after state changes later', async () => {
+  const seen: number[] = [];
+  function Delayed() {
+    const [count, setCount] = useState(0);
+
+    function logLater() {
+      // Closes over `count` from THIS render — not a live reference.
+      setTimeout(() => seen.push(count), 0);
+    }
+
+    return (
+      <div>
+        <button onClick={() => setCount((c) => c + 1)}>inc</button>
+        <button onClick={logLater}>log</button>
+      </div>
+    );
+  }
+
+  const { getAllByRole } = render(<Delayed />);
+  const [inc, log] = getAllByRole('button');
+
+  fireEvent.click(log); // schedules a log of count = 0 (this render's snapshot)
+  fireEvent.click(inc); // count becomes 1 — but the ALREADY-SCHEDULED closure still has 0
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(seen).toEqual([0]);
+});
+```
+
+```text
+✓ a closure created during a render keeps reading THAT render's snapshot, even after state changes later
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## Object.is bail-out: setting the same value skips the render
+
+React decides whether a `setState` call needs a new render by comparing the new value to the current one with `Object.is` (the same-value comparison used by `===`, with the `NaN`/`-0` edge cases fixed). If they're the same, React **bails out and skips re-rendering that component entirely** — the call isn't wasted work turned into a no-op render, it's a genuinely skipped render:
+
+```tsx
+// src/__tests__/object-is-bailout.test.tsx
+import { useState } from 'react';
+import { render, cleanup, fireEvent } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('setCount(sameValue) does not cause an extra render', () => {
+  let renders = 0;
+  function Counter() {
+    const [count, setCount] = useState(5);
+    renders++;
+    return <button onClick={() => setCount(5)}>{count}</button>;
+  }
+
+  const { getByRole } = render(<Counter />);
+  const baseline = renders;
+  fireEvent.click(getByRole('button')); // setCount(5) — identical to the current 5
+  expect(renders).toBe(baseline);
+});
+
+test('setCount(differentValue) DOES cause a render, for contrast', () => {
+  let renders = 0;
+  function Counter() {
+    const [count, setCount] = useState(5);
+    renders++;
+    return <button onClick={() => setCount(6)}>{count}</button>;
+  }
+
+  const { getByRole } = render(<Counter />);
+  const baseline = renders;
+  fireEvent.click(getByRole('button'));
+  expect(renders).toBe(baseline + 1);
+});
+```
+
+```text
+✓ setCount(sameValue) does not cause an extra render
+✓ setCount(differentValue) DOES cause a render, for contrast
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+This is exactly the same comparison React uses to decide whether *mutating* state "worked" — which is why the next section's bug is so easy to write by accident.
 
 ## Treat state as immutable
 
-Because state is a snapshot React compares by identity, you must **never mutate it**. Create new objects/arrays instead:
+Because state is a snapshot React compares by identity, you must **never mutate it**. Mutating an object or array in place keeps the *same reference* — so the `Object.is` check above sees no change and bails out, even though the underlying data really did change:
+
+```tsx
+// src/__tests__/mutation-does-not-rerender.test.tsx
+import { useState } from 'react';
+import { render, cleanup, fireEvent } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('mutating state then calling the setter with the SAME reference leaves the UI stale', () => {
+  let renders = 0;
+  function TodoList() {
+    const [todos, setTodos] = useState<string[]>(['a']);
+    renders++;
+    return (
+      <div>
+        <button
+          onClick={() => {
+            todos.push('b'); // mutates the existing array in place
+            setTodos(todos); // same reference as before — React bails out
+          }}
+        >
+          mutate
+        </button>
+        <span>{todos.length}</span>
+      </div>
+    );
+  }
+
+  const { getByRole, container } = render(<TodoList />);
+  const baseline = renders;
+  fireEvent.click(getByRole('button'));
+
+  expect(renders).toBe(baseline);                          // no re-render happened
+  expect(container.querySelector('span')!.textContent).toBe('1'); // UI still says 1, even though the array is secretly length 2
+});
+
+test('spreading into a NEW array (different reference) re-renders correctly, for contrast', () => {
+  function TodoList() {
+    const [todos, setTodos] = useState<string[]>(['a']);
+    return (
+      <div>
+        <button onClick={() => setTodos([...todos, 'b'])}>add</button>
+        <span>{todos.length}</span>
+      </div>
+    );
+  }
+
+  const { getByRole, container } = render(<TodoList />);
+  fireEvent.click(getByRole('button'));
+  expect(container.querySelector('span')!.textContent).toBe('2');
+});
+```
+
+```text
+✓ mutating state then calling the setter with the SAME reference leaves the UI stale
+✓ spreading into a NEW array (different reference) re-renders correctly, for contrast
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+The mutated version doesn't just look wrong later — it silently diverges from that instant: `todos` really is length 2 in memory, but the screen (and any future render, until *something else* forces one) keeps showing 1. Always produce a new reference:
 
 ```jsx
 // ❌ Mutation — same array reference, React may not re-render, and it's a bug.
@@ -53,8 +212,6 @@ setTodos(todos);
 // ✅ New reference — React sees a change and re-renders.
 setTodos([...todos, newTodo]);
 ```
-
-Mutating state breaks React's ability to detect changes (it compares references) and corrupts the snapshot model. Always produce a new value.
 
 ## Render must be pure
 
@@ -72,14 +229,67 @@ export const pureDiagram = `flowchart LR
   render -. NOT here .-> se["side effects:\nDOM, network, timers"]
   se --> eff["→ event handlers & effects"]`;
 
-Side effects belong in **event handlers** (things that happen on interaction) and **effects** (`useEffect`, for synchronizing with external systems) — never in the render body. This purity is what lets React call your component whenever it likes.
+Side effects belong in **event handlers** (things that happen on interaction) and **effects** (`useEffect`, for synchronizing with external systems) — never in the render body. This purity requirement isn't just a style preference: the [React Compiler](/react/en/react-19/the-react-compiler/) auto-memoizes your components and hooks by *assuming* render is pure. If render secretly mutates something or reads a value that can change between calls, the compiler's memoization can serve a stale or wrong cached result, because it never re-runs code it has decided the inputs didn't change for.
 
 ## StrictMode double-renders on purpose
 
-In development, React's `<StrictMode>` deliberately **calls your component function twice** (and runs effects setup→cleanup→setup). This is not a bug — it's a detector. If your render is pure, calling it twice produces identical output and nothing breaks. If you accidentally mutate something or rely on a side effect during render, the double-invocation surfaces the bug immediately, in development, instead of as a mysterious glitch in production.
+In development, React's `<StrictMode>` deliberately **calls your component function twice** (and runs effects setup→cleanup→setup). This is not a bug — it's a detector. If your render is pure, calling it twice produces identical output and nothing breaks. If you accidentally mutate something or rely on a side effect during render, the double-invocation surfaces the bug immediately, in development, instead of as a mysterious glitch in production. (The mount/unmount and reorder side of reconciliation — including StrictMode's effect-level double-invoke — is covered in detail in the previous lesson, [Rendering & Reconciliation](/react/en/foundations/rendering-and-reconciliation/).)
+
+## Mental Model
+
+Every render gets its own frozen copy of props and state — think of it as a photograph, not a live video feed. A `setState` call doesn't retouch the photograph you're holding; it asks React to take a new one. `Object.is` is the check React uses to decide "is the new photograph actually different from the last one, or can I skip developing it?" — and that check only ever looks at *reference identity* for objects/arrays, never at their contents. Purity is what makes any of this trustworthy: if pointing the camera at the same scene could produce a different photo depending on hidden side effects, no bail-out, no memoization, and no StrictMode check would mean anything.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Updater function `setX(x => ...)` for values derived from previous state | Always correct even when the same setter is called more than once per event | Must be pure — no logging/mutating side effects inside it |
+| New object/array on every state update | React's `Object.is` bail-out and the Compiler's memoization both work correctly | More allocations than mutating in place (usually irrelevant; occasionally worth a library like Immer for deeply nested state) |
+| Relying on the `Object.is` bail-out (e.g. `setCount(sameValue)`) | Skips wasted renders "for free," no extra code | Only works for values that are actually reference/primitive-equal — a mutated object never qualifies |
+| Pure render, side effects in `useEffect`/handlers | Compatible with the Compiler, StrictMode, and concurrent rendering | Requires discipline: it's easy to accidentally slip a mutation or a `Date.now()` into render |
+
+## Common Misconceptions
+
+- **"`setCount(count + 1)` called three times adds 3."** It adds 1 — all three reads see the same `count` snapshot from this render. Proven above with a failing/passing pair.
+- **"Mutating an object and calling the setter with the same reference will still just work, it's just against best practice."** It can silently fail to re-render, because React's bail-out check is a reference comparison (`Object.is`) — proven above: the array becomes length 2 in memory but the UI keeps showing 1.
+- **"`Object.is` bail-out only matters for performance."** It also explains *bugs* — the exact same mechanism that "harmlessly" skips a redundant `setCount(5)` is what silently swallows a mutated array/object update.
+- **"Purity is a style guideline, not something enforced."** The React Compiler's memoization actively depends on it — an impure render can make the Compiler serve a stale cached result, not just "look messy."
+- **"StrictMode's double-render means my component runs twice in production too."** Development-only — production always renders and runs effects exactly once (see the effect-timing proof in the reconciliation lesson).
+
+## Reading AI-generated code
+
+When a generated component updates state, check for these before trusting it:
+
+- Is an object or array being mutated in place (`.push`, `.sort()`, direct property assignment) before being passed to the setter, instead of spreading into a new reference? The bug is invisible until you notice the UI didn't update.
+- Is the same setter called more than once in one function using the **value** form (`setX(x + 1)`) instead of the **updater** form? All calls see the same snapshot.
+- Does an updater function passed to `setX` have side effects (logging, network calls, mutating an outer variable)? Purity is required, and StrictMode's double-invoke in development will call it twice.
+- Does any code inside the render body (not inside an event handler or `useEffect`) read something that can change between calls — `Date.now()`, `Math.random()`, a mutable module-level variable — or write to the DOM directly?
+- Does a call like `setCount(sameValueAsNow)` get treated as "definitely triggers a render," when it's actually a no-op due to the `Object.is` bail-out?
+
+<SpotTheBug code={`function Cart({ initialItems }) {
+  const [items, setItems] = useState(initialItems);
+
+  function markAllPacked() {
+    items.forEach((item) => { item.packed = true; });
+    setItems(items);
+  }
+
+  return (
+    <div>
+      <button onClick={markAllPacked}>Mark all packed</button>
+      <ul>
+        {items.map((item) => (
+          <li key={item.id}>{item.name} — {item.packed ? 'packed' : 'not packed'}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}`}>
+`markAllPacked` mutates every item in place (`item.packed = true`) and then calls `setItems(items)` with the **same array reference** it already had. React's `Object.is` check sees the identical reference and bails out — no re-render happens. Proven above with the equivalent minimal case: the underlying data really changed (every item now has `packed: true` in memory), but the screen keeps showing "not packed" until some unrelated state change forces a re-render, at which point it will *suddenly* show the already-mutated data, looking like a random, unrelated update caused it. The fix is a new array and new item objects: `setItems(items.map((item) => ({ ...item, packed: true })))`.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-A state variable is a **snapshot for the current render** — calling the setter doesn't change it mid-render, so use an **updater function** (`setX(x => ...)`) when the next value depends on the previous. Treat state as **immutable** (make new objects/arrays; React compares by reference). And keep **render pure** — no mutations or side effects during render; those go in event handlers and effects. StrictMode's double-render exists to catch violations of exactly this.
+A state variable is a **snapshot for the current render** — calling the setter doesn't change it mid-render, and even a closure that outlives the render keeps reading that render's value, proven above. React decides whether to re-render with an **`Object.is` reference check**: the identical value skips the render (proven above), and a **mutated object keeps the identical reference**, so mutating state and calling the setter with the same reference silently fails to re-render too — proven above with the exact same mechanism. Keep **render pure** — no mutations or side effects during render, since the [React Compiler](/react/en/react-19/the-react-compiler/) depends on that purity to memoize correctly — and always update object/array state by creating a **new reference**. StrictMode's double-render exists to catch violations of exactly this, in development only.
 </Callout>
 
 export const quizPurity = [
@@ -92,6 +302,7 @@ export const quizPurity = [
       'An error',
     ],
     answer: 1,
+    explain: 'All three calls read `count` from the same render\'s snapshot (0), so each independently computes 0 + 1 = 1 — the net effect is exactly one increment, not three.',
   },
   {
     q: 'How do you correctly increment state three times in one handler?',
@@ -102,16 +313,18 @@ export const quizPurity = [
       'Use a for loop over the DOM',
     ],
     answer: 1,
+    explain: 'The updater form always reads the latest PENDING value React has queued, not the frozen snapshot — so three calls correctly chain 0→1→2→3.',
   },
   {
     q: 'Why must you not mutate state (e.g. `todos.push(x); setTodos(todos)`)?',
     options: [
       'Mutation is slower',
-      'React detects changes by reference; mutating keeps the same reference so React may not re-render, and it breaks the snapshot model',
+      'React detects changes with an Object.is reference check; mutating keeps the same reference so React may not re-render, and it breaks the snapshot model',
       'Arrays cannot be state',
       'It is allowed and fine',
     ],
     answer: 1,
+    explain: 'Proven above: after `todos.push(\'b\'); setTodos(todos)`, the array is really length 2 in memory, but the same-reference Object.is check makes React skip the render — the UI keeps showing length 1.',
   },
   {
     q: 'What is StrictMode’s double-render for?',
@@ -122,6 +335,29 @@ export const quizPurity = [
       'To render on the server',
     ],
     answer: 1,
+    explain: 'It is a detector, not an optimization: a pure render produces identical output both times and nothing breaks; an impure one exposes its bug immediately, in development only.',
+  },
+  {
+    q: '```tsx\nfunction Counter() {\n  const [count, setCount] = useState(5);\n  return <button onClick={() => setCount(5)}>{count}</button>;\n}\n```\nHow many extra renders does clicking this button cause?',
+    options: [
+      'One, because setCount was called',
+      'Zero — React\'s Object.is bail-out sees the identical value 5 and skips the render entirely',
+      'Two, because of StrictMode',
+      'It throws, because you cannot set the same value twice',
+    ],
+    answer: 1,
+    explain: 'Proven above: calling setCount with the value the state already holds produces zero additional renders — the render is genuinely skipped, not run and thrown away.',
+  },
+  {
+    q: '```tsx\nfunction markAllPacked() {\n  items.forEach((item) => { item.packed = true; });\n  setItems(items);\n}\n```\nAfter calling this, does the UI immediately show every item as packed?',
+    options: [
+      'Yes, React always re-renders after any setState call',
+      'No — `items` is the same reference as before, so the Object.is bail-out skips the render even though the data was mutated',
+      'No, because arrays can never be state',
+      'Yes, but only in StrictMode',
+    ],
+    answer: 1,
+    explain: 'Proven above with the equivalent minimal case: mutating in place and calling the setter with the same array reference leaves the rendered UI stale, because the reference comparison finds no change — the fix is a new array of new objects.',
   },
 ];
 

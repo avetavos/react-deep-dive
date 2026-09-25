@@ -1,6 +1,6 @@
 ---
 title: 'Why React & the Model'
-description: 'Declarative vs imperative UI, components as functions of props and state, and why the UI = f(state) model changes how you build.'
+description: 'Declarative vs imperative UI, one-way data flow, and why UI = f(state) — proven with a real test, not just asserted in prose.'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Imperative vs declarative
 
@@ -68,18 +69,128 @@ Two rules fall out of "component is a function":
 - **Props are read-only.** A component must never modify its own props — they belong to the parent. Data flows *down*.
 - **Same inputs, same output.** Given the same props and state, a component should render the same thing. That's the purity requirement (a whole lesson later), and it's what lets React re-run components freely.
 
-## Why the model matters
+## One-way data flow
+
+Data only ever flows in one direction: **down**, from parent to child, as props. There is no equivalent of two-way binding where a child silently pushes a value back into its parent's variable. A child that wants to change something the parent owns must ask — by calling a function the parent passed down as a prop.
+
+<Mermaid title="Data flows down as props; changes flow up as event calls" code={oneWayDiagram} />
+
+export const oneWayDiagram = `flowchart TB
+  parent["Parent: owns the state"] -->|"props (data down)"| child["Child: reads props, cannot write them"]
+  child -->|"calls onX(...) (event up)"| handler["Parent's handler runs"]
+  handler -->|setState| parent`;
+
+```jsx
+// Parent owns `count`; Child only ever RECEIVES it and a callback.
+function Parent() {
+  const [count, setCount] = useState(0);
+  return <Child count={count} onIncrement={() => setCount((c) => c + 1)} />;
+}
+
+// Child never touches `count` directly — it can only call the function
+// the parent handed it. The parent decides what "increment" means.
+function Child({ count, onIncrement }) {
+  return <button onClick={onIncrement}>{count}</button>;
+}
+```
+
+This is why passing a callback prop down (`onIncrement`) is not a violation of one-way flow — the *data* (`count`) still only ever travels down; the child is simply invoking a function the parent authored, the same way clicking a `<button>` invokes a handler you wrote. The state itself never moves up.
+
+## Proof: `UI = f(state)`, not folklore
+
+The equation isn't just a slogan — it means the exact same component function, called with different state, deterministically produces different UI, with zero manual DOM code written anywhere:
+
+```tsx
+// src/components/Counter.tsx
+function Counter({ count }: { count: number }) {
+  return <p>{count}</p>;
+}
+
+export default Counter;
+```
+
+```tsx
+// src/__tests__/ui-is-f-of-state.test.tsx
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import Counter from '../components/Counter';
+
+afterEach(cleanup);
+
+test('the same function, called with different state, produces different UI automatically', () => {
+  const { rerender, container } = render(<Counter count={0} />);
+  expect(container.textContent).toBe('0');
+
+  // No DOM write anywhere in this test or in Counter — just a new input.
+  rerender(<Counter count={5} />);
+  expect(container.textContent).toBe('5');
+});
+```
+
+```text
+✓ the same function, called with different state, produces different UI automatically
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## Mental Model
 
 Everything else in React is downstream of `UI = f(state)`:
 
 - **Hooks** exist to give function components state and lifecycle *without* breaking the "just a function" model.
-- **Reconciliation** exists to turn "here's the new UI description" into "here's the minimal DOM change."
+- **Reconciliation** exists to turn "here's the new UI description" into "here's the minimal DOM change." (The full render/commit split and the diffing rules are the next lesson, [Rendering & Reconciliation](/react/en/foundations/rendering-and-reconciliation/).)
 - **Concurrent features** (transitions, Suspense) exist because a pure `f(state)` can be computed, paused, and restarted safely.
 
 You are not learning a pile of APIs; you are learning one equation and its consequences.
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Declarative (`UI = f(state)`) | Whole classes of "forgot to update X" bugs are impossible by construction | You give up direct, fine-grained control over individual DOM mutations |
+| Imperative DOM code | Full control, no framework to learn | Every dependent update site must be found and kept in sync by hand — scales badly |
+| One-way data flow | State has exactly one owner; easy to reason about who changed what | A deeply nested child that needs to affect a distant ancestor needs a callback prop threaded through every level (or Context, a later lesson) |
+
+## Common Misconceptions
+
+- **"Declarative means React re-renders the whole DOM every time."** It re-*runs your component function*, which is pure computation — the DOM is only touched for what actually changed, in the commit phase (next lesson).
+- **"One-way data flow means a child can never affect its parent."** It can, but only by calling a function the parent handed it as a prop — the *data* still only flows down; the child never writes into the parent's state directly.
+- **"Passing a callback prop down breaks one-way flow, since the parent is 're-notified'."** It doesn't — the child is invoking a function, not mutating a variable it was handed. No different from a `<button>` invoking your `onClick`.
+- **"Declarative code is slower because it describes things instead of doing them directly."** The description (render phase) is cheap; React still computes and applies only the minimal real DOM change, same as hand-written imperative code would.
+
+## Reading AI-generated code
+
+When a generated component "syncs" the UI, check for these before trusting it:
+
+- Does the component ever write to the DOM directly (`.textContent =`, `.style.x =`, `document.title =`) instead of returning that value from render? Direct writes get silently overwritten the next time React re-renders that subtree for any reason.
+- Does a child component try to change a value it received as a prop, instead of calling a callback prop the parent provided?
+- Is there any implicit two-way binding — a child mutating an object/array it was passed by reference, expecting the parent to "just see" the change? Data must flow back up through an explicit function call, never through mutation.
+- Does the same piece of state get computed in two places (once in the parent, redundantly re-derived in a child) instead of living in one owner and flowing down as a prop?
+- If the code claims "the UI updates automatically" — is that actually driven by a state change, or is it relying on a manual DOM write that will only work until the next unrelated re-render?
+
+<SpotTheBug code={`function Counter() {
+  const [count, setCount] = useState(0);
+  const labelRef = useRef(null);
+
+  function handleFakeUpdate() {
+    // Bypasses React entirely — writes straight to the DOM.
+    labelRef.current.textContent = '999';
+  }
+
+  return (
+    <div>
+      <span ref={labelRef}>{count}</span>
+      <button onClick={handleFakeUpdate}>fake update</button>
+      <button onClick={() => setCount((c) => c + 1)}>real increment</button>
+    </div>
+  );
+}`}>
+The "fake update" button writes `'999'` straight into the DOM, bypassing state — and it looks like it worked. But the moment any *real* state change causes React to re-render this component (clicking "real increment"), React re-describes the `<span>` from `count` (which was never touched, still `0`) and patches the DOM back to match its own model. Proven in the probe: after "fake update" then "real increment", the span reads `'1'` — not `'1000'` and not `'999'` — the manual write is silently gone. The fix is to route the value through `useState`/`setCount` so React's model and the DOM never disagree.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-React is **declarative**: you describe what the UI should be for the current state (`UI = f(state)`) instead of imperatively mutating the DOM. A component is a **function of its props and state** — props flow down and are read-only, and the same inputs must produce the same output. Every React feature is a consequence of taking that model seriously.
+React is **declarative**: you describe what the UI should be for the current state (`UI = f(state)`) instead of imperatively mutating the DOM, and data flows in exactly **one direction** — down as props, with changes flowing back up only through an explicit function call, never through mutation. A component is a **function of its props and state** — props are read-only and the same inputs must produce the same output, proven above with a real render/rerender assertion, not just prose. Every React feature is a consequence of taking that model seriously.
 </Callout>
 
 export const quizWhy = [
@@ -92,6 +203,7 @@ export const quizWhy = [
       'They require TypeScript',
     ],
     answer: 1,
+    explain: 'Imperative code has no single source of truth for "what should the UI look like" — every mutation site has to independently remember every dependent DOM update, which does not scale and is easy to miss.',
   },
   {
     q: 'What are the inputs to a React component?',
@@ -102,6 +214,7 @@ export const quizWhy = [
       'The URL',
     ],
     answer: 1,
+    explain: 'A component is a function of props (read-only, from its parent) and state (its own memory) — those two together fully determine its output.',
   },
   {
     q: 'What is true about props?',
@@ -112,6 +225,40 @@ export const quizWhy = [
       'Props can only be strings',
     ],
     answer: 1,
+    explain: 'Props belong to the parent that passed them; a component must never assign to its own props. Only the parent that owns the underlying state can change what it sends down.',
+  },
+  {
+    q: 'A child component wants to change a value its parent owns. What can it correctly do?',
+    options: [
+      'Mutate the prop object it received directly',
+      'Call a callback function the parent passed down as a prop',
+      'Reach up and set the parent\'s state variable by name',
+      'Nothing — children can never trigger a parent update',
+    ],
+    answer: 1,
+    explain: 'One-way data flow means the DATA only travels down. A child can still cause a change by calling a function (a callback prop) the parent authored — the parent decides what happens, and the state update itself happens in the parent.',
+  },
+  {
+    q: '```tsx\nfunction Counter({ count }: { count: number }) {\n  return <p>{count}</p>;\n}\n```\nRendering this with `count={0}` then re-rendering with `count={5}`, with no other code, what does the container show?',
+    options: [
+      'Still 0 — you must manually update the DOM',
+      '5 — the same function, called with a new input, produces new output automatically',
+      'An error, because count changed',
+      'Both 0 and 5 at once',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: re-rendering `<Counter count={5} />` after `<Counter count={0} />` changes the container text to "5" with zero manual DOM code — this is exactly what `UI = f(state)` means in practice.',
+  },
+  {
+    q: '```tsx\nfunction handleFakeUpdate() {\n  labelRef.current.textContent = \'999\';\n}\n```\nA button calls this instead of `setCount`. After clicking it, then clicking a DIFFERENT button that calls `setCount(c => c + 1)`, what does the label show?',
+    options: [
+      '999, because the DOM write already happened',
+      '1000, because both updates apply',
+      '1 — the real state (0) plus one, because the next real render overwrites the manual DOM write',
+      'It throws an error',
+    ],
+    answer: 2,
+    explain: 'Proven in the probe: the manual textContent write is invisible to React\'s model. The next time React re-renders that subtree for a REAL reason, it re-describes the span from `count` (still 0) and patches the DOM to "1" — the "999" is gone without a trace.',
   },
 ];
 

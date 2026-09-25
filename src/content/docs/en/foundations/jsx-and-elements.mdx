@@ -1,6 +1,6 @@
 ---
 title: 'JSX & Elements'
-description: 'What JSX compiles to, what a React element actually is (a plain object), and why that makes elements cheap to create and describe.'
+description: 'What JSX compiles to (proven with real compiler output), what a React element actually is (a plain object — $$typeof, type, key, props), why key and ref are not ordinary props the same way, and the shapes of children.'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## JSX is just syntax
 
@@ -18,11 +19,11 @@ JSX looks like HTML, but it is **syntax sugar** for regular JavaScript function 
 const el = <button className="primary">Click</button>;
 ```
 
-compiles (via the modern JSX transform) to roughly:
+compiles, via the modern **automatic JSX runtime**, to a call into `react/jsx-runtime`. Here's the actual output of the compiler (esbuild, `jsx: 'automatic'`) run against that exact line — not a paraphrase:
 
-```js
-import { jsx as _jsx } from "react/jsx-runtime";
-const el = _jsx("button", { className: "primary", children: "Click" });
+```text
+import { jsx } from "react/jsx-runtime";
+const el = /* @__PURE__ */ jsx("button", { className: "primary", children: "Click" });
 ```
 
 The important consequence: JSX is *an expression*. It evaluates to a value you can store in a variable, return from a function, put in an array, or pass as a prop. It isn't a template language with its own rules — it's JavaScript, so `{ }` inside JSX just drops back into a JS expression.
@@ -42,19 +43,36 @@ function List({ items, showHeader }) {
 
 ## An element is a plain object
 
-What does `_jsx("button", ...)` actually return? Not a DOM node — a **plain JavaScript object** describing what you want:
+What does `jsx("button", ...)` actually return? Not a DOM node — a **plain JavaScript object** describing what you want. Here's a real one, inspected in a test rather than described in prose:
 
-```js
-// Roughly what a React element is:
-const el = {
-  type: "button",                 // a string for host elements, or a function for components
-  props: { className: "primary", children: "Click" },
-  key: null,
-  // ...internal fields
-};
+```tsx
+// src/__tests__/element-is-an-object.test.tsx
+import { expect, test } from 'vitest';
+
+function Item(_props: { id: number }) {
+  return null;
+}
+
+test('a JSX element is a plain object: $$typeof, type, key, props', () => {
+  const el = <Item key="a" id={1} />;
+
+  expect(Object.keys(el).sort()).toEqual(['$$typeof', '_owner', '_store', 'key', 'props', 'type'].sort());
+  expect(String((el as unknown as { $$typeof: symbol }).$$typeof)).toBe('Symbol(react.transitional.element)');
+  expect(el.type).toBe(Item);          // a function type for a component
+  expect(el.key).toBe('a');            // key lives on the element itself...
+  expect((el.props as { key?: unknown }).key).toBeUndefined(); // ...never inside props (next section)
+  expect(el.props).toEqual({ id: 1 });
+});
 ```
 
-This is the key insight: **a React element is a cheap, immutable description** — not the real thing. Creating a thousand elements is just creating a thousand small objects. React builds a tree of these descriptions on every render, then compares it to the previous tree to decide what actual DOM to touch (that's reconciliation, next lesson).
+```text
+✓ a JSX element is a plain object: $$typeof, type, key, props
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+This is the key insight: **a React element is a cheap, immutable description** — not the real thing. Creating a thousand elements is just creating a thousand small objects (`$$typeof`, `type`, `key`, `props`, plus internal bookkeeping fields you don't touch). React builds a tree of these descriptions on every render, then compares it to the previous tree to decide what actual DOM to touch (that's reconciliation, next lesson).
 
 <Mermaid title="JSX to elements to DOM" code={jsxDiagram} />
 
@@ -79,8 +97,174 @@ The `type` field tells React what kind of node it is:
 
 This is why a component name **must be capitalized** in JSX: `<Counter />` (capital) means "call the `Counter` component," while `<counter />` (lowercase) means "create a host element literally named `counter`." The capitalization is how the compiler decides between a string type and a variable reference.
 
+## `key` is not a prop
+
+`key` looks like just another attribute in JSX, but React strips it off the element before it ever reaches `props`. It exists purely for reconciliation (next lesson) — reading it from inside the component always returns `undefined`, and development builds warn if you try:
+
+```tsx
+// src/__tests__/key-is-not-a-prop.test.tsx
+import { expect, test, vi } from 'vitest';
+
+function Item(_props: { id: number }) {
+  return null;
+}
+
+test('reading props.key is always undefined and warns in development', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  const el = <Item key="a" id={1} />;
+  const keyFromProps = (el.props as { key?: unknown }).key;
+
+  expect(keyFromProps).toBeUndefined();
+  expect(
+    spy.mock.calls.some(([msg]) => String(msg).includes('`key` is not a prop')),
+  ).toBe(true);
+
+  spy.mockRestore();
+});
+```
+
+```text
+✓ reading props.key is always undefined and warns in development
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+The real React 19.3 warning text, captured verbatim from that test:
+
+```text
+Item: `key` is not a prop. Trying to access it will result in `undefined` being returned. If you need to access the same value within the child component, you should pass it as a different prop. (https://react.dev/link/special-props)
+```
+
+If a component needs the same value the parent used for `key`, the parent must pass it again under a **different** prop name (e.g. `id`).
+
+## `ref` is a real prop in React 19
+
+Before React 19, a plain function component could not receive `ref` at all — you had to wrap it in `forwardRef` to accept one. **As of React 19, `ref` is an ordinary prop**: any function component can declare a `ref` parameter and use it directly, no `forwardRef` required.
+
+```tsx
+// src/components/TextInput.tsx
+import type { Ref } from 'react';
+
+function TextInput({ ref, placeholder }: { ref?: Ref<HTMLInputElement>; placeholder?: string }) {
+  return <input ref={ref} placeholder={placeholder} />;
+}
+
+export default TextInput;
+```
+
+```tsx
+// src/__tests__/ref-is-a-prop.test.tsx
+import { createRef } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import TextInput from '../components/TextInput';
+
+afterEach(cleanup);
+
+test('a plain function component receives `ref` as a prop, no forwardRef needed', () => {
+  const ref = createRef<HTMLInputElement>();
+  render(<TextInput ref={ref} placeholder="hi" />);
+
+  expect(ref.current).toBeInstanceOf(HTMLInputElement);
+  expect(ref.current?.placeholder).toBe('hi');
+});
+```
+
+```text
+✓ a plain function component receives `ref` as a prop, no forwardRef needed
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+`key` and `ref` are therefore in two different categories: `key` is stripped out and never reaches `props` under any name; `ref`, since React 19, lives right inside `props` like any other value and can be destructured normally.
+
+## Children shapes
+
+`props.children` is not always an array — its shape depends on how many children JSX sees:
+
+```tsx
+// src/__tests__/children-shapes.test.tsx
+import { expect, test } from 'vitest';
+
+test('children is undefined, a single value, or an array, depending on how many there are', () => {
+  const none = <input />;
+  const one = <div>Hi</div>;
+  const many = (
+    <div>
+      <span>A</span>
+      <span>B</span>
+    </div>
+  );
+
+  expect((none.props as { children?: unknown }).children).toBeUndefined();
+  expect((one.props as { children?: unknown }).children).toBe('Hi');
+  expect(Array.isArray((many.props as { children?: unknown[] }).children)).toBe(true);
+  expect((many.props as { children: unknown[] }).children).toHaveLength(2);
+});
+```
+
+```text
+✓ children is undefined, a single value, or an array, depending on how many there are
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Code that assumes `children` is always an array (`children.map(...)`) breaks the moment a component is used with exactly one child — use `Children.toArray` (or `Children.map`) from `react` if you need a uniform shape.
+
+## Mental Model
+
+Keep two things separate in your head: **elements** (the plain, cheap, immutable objects JSX produces every render) and **components** (the functions that get called to produce them). An element is a *description*, thrown away and recreated every render; a component *instance* — its state, its position in the tree — is what reconciliation (next lesson) works to preserve across those throwaway descriptions. `key` and `ref` both live outside the ordinary "props are just data" story because they're inputs to *that* preservation machinery, not to your component's rendering logic — which is exactly why `key` never reaches `props` at all, and why `ref` needed a special mechanism (`forwardRef`) until React 19 made it an ordinary prop.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| JSX (compiles to `jsx(type, props)`) | Reads like markup, is genuinely a JS expression underneath | Requires a build step (Babel/esbuild/SWC) — not valid JS on its own |
+| Elements as plain objects | Cheap to create in bulk; comparing old vs new tree is just object diffing | Nothing renders until React walks the tree — an element alone is inert |
+| `key` stripped from props | Reconciliation identity can't be confused with ordinary render data | A component that legitimately needs the same value must receive it under a second, explicit prop name |
+| `ref` as a plain prop (React 19) | No `forwardRef` boilerplate for components that just need to expose a DOM node | Older codebases/tutorials still show `forwardRef` — worth recognizing both forms |
+
+## Common Misconceptions
+
+- **"JSX is HTML, so browsers understand it directly."** Browsers never see JSX — it's compiled away before ship, into `jsx(type, props)` calls, as proven above.
+- **"A React element IS the DOM node."** It's a plain object describing what the DOM node *should* look like. Nothing exists in the real DOM until React commits it (next lesson).
+- **"`props.key` gives me the key I set for reconciliation."** It's always `undefined`, and reading it warns in dev — proven above. Pass the same value again under a different prop name if you need it inside the component.
+- **"You always need `forwardRef` to accept a ref in a function component."** Only true before React 19. Since 19, `ref` is a normal prop — proven above with zero `forwardRef` in sight.
+- **"`children` is always an array, so `.map` is always safe."** Only with 2+ children. One child is the bare value; zero children is `undefined` — proven above.
+
+## Reading AI-generated code
+
+When a generated component works with JSX elements directly, check for these before trusting it:
+
+- Does it try to read `props.key` (or destructure `key`) inside a component, expecting the value used in the parent's `key={...}`? That's always `undefined` — the value must be passed again under a different name.
+- Does it still wrap a component in `forwardRef` purely to accept a `ref`, when the codebase already targets React 19 (where `ref` is a plain prop)? Not wrong, but dated — worth flagging as simplifiable.
+- Does list-rendering code assume `props.children` is always an array (`children.map(...)`, `children[0]`) without accounting for the single-child and no-children cases?
+- Does it treat an element object as if it were a live DOM node (reading `.textContent`, calling `.addEventListener` on it) instead of on a `ref` to the real node?
+- Is a lowercase custom tag used where a capitalized component was intended (`<counter />` instead of `<Counter />`), silently creating an unknown host element instead of calling the component?
+
+<SpotTheBug code={`function List({ items }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <ListItem key={item.id} {...item} />
+      ))}
+    </ul>
+  );
+}
+
+function ListItem(props) {
+  // Trying to reuse the same id the parent used as the React key...
+  return <li data-id={props.key}>{props.label}</li>;
+}`}>
+`ListItem` reads `props.key` expecting the same `item.id` the parent used as `key={item.id}` — but `key` is stripped off before `props` is built, so `props.key` is always `undefined` (and React warns about the read in development, as proven above). The rendered `<li>` gets `data-id="undefined"` for every row. The fix: have the parent pass the id again under its own name, e.g. `<ListItem key={item.id} itemId={item.id} {...item} />`, and read `props.itemId` inside `ListItem`.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-JSX is syntax sugar that compiles to `jsx(type, props)` calls, so it's just a JavaScript **expression** — and `{ }` inside it is plain JS. Each call returns a **React element: a cheap, immutable plain object** (`{ type, props, key }`) that *describes* UI rather than being it. Capitalized types are components (functions React calls); lowercase types are host elements (real DOM tags).
+JSX is syntax sugar that compiles to `jsx(type, props)` calls — proven above with the real compiler output — so it's just a JavaScript **expression**, and `{ }` inside it is plain JS. Each call returns a **React element: a cheap, immutable plain object** (`$$typeof`, `type`, `key`, `props`) that *describes* UI rather than being it. **`key` is stripped out and never reaches `props`** (always `undefined`, and warned about in dev); **`ref`, since React 19, is an ordinary prop** requiring no `forwardRef`; and **`children`** is `undefined`, a bare value, or an array depending on how many children there are — all four proven with real tests, not just described.
 </Callout>
 
 export const quizJsx = [
@@ -93,16 +277,18 @@ export const quizJsx = [
       'A CSS rule',
     ],
     answer: 1,
+    explain: 'Proven above with real esbuild output: `<button className="primary">Click</button>` compiles to `jsx("button", { className: "primary", children: "Click" })` imported from `react/jsx-runtime`.',
   },
   {
     q: 'What is a React element?',
     options: [
       'A real DOM node',
-      'A cheap, immutable plain object describing what the UI should be ({ type, props, key })',
+      'A cheap, immutable plain object describing what the UI should be ($$typeof, type, key, props)',
       'A CSS class',
       'A hook',
     ],
     answer: 1,
+    explain: 'Proven above: `Object.keys(el)` on a real JSX element returns `$$typeof`, `type`, `key`, `props` plus internal bookkeeping fields — never a DOM node.',
   },
   {
     q: 'Why must a component be capitalized in JSX (`<Counter />` not `<counter />`)?',
@@ -113,16 +299,40 @@ export const quizJsx = [
       'JSX requires all tags to be capitalized',
     ],
     answer: 1,
+    explain: 'The compiler uses capitalization to decide whether the JSX tag becomes a string type (host element) or a variable reference (component function) in the compiled jsx(type, props) call.',
   },
   {
-    q: 'What is `{ }` inside JSX?',
+    q: '```tsx\nfunction Item(props: { id: number }) {\n  return null;\n}\nconst el = <Item key="a" id={1} />;\nconst k = (el.props as { key?: unknown }).key;\n```\nWhat is `k`?',
     options: [
-      'A special template directive',
-      'A drop back into a plain JavaScript expression',
-      'A CSS block',
-      'An object literal only',
+      '"a" — the key is copied into props',
+      'undefined — key is stripped off the element and never reaches props (and dev warns on the read)',
+      'It throws a TypeError',
+      '1 — it gets confused with id',
     ],
     answer: 1,
+    explain: 'Proven above: `(el.props as any).key` is `undefined`, and the exact React 19.3 dev warning was captured: "`key` is not a prop. Trying to access it will result in `undefined` being returned...".',
+  },
+  {
+    q: '```tsx\nfunction TextInput({ ref, placeholder }: { ref?: React.Ref<HTMLInputElement>; placeholder?: string }) {\n  return <input ref={ref} placeholder={placeholder} />;\n}\n```\nIn React 19, does this compile and work WITHOUT wrapping `TextInput` in `forwardRef`?',
+    options: [
+      'No — every ref-accepting function component must use forwardRef',
+      'Yes — since React 19, ref is an ordinary prop a plain function component can declare and use directly',
+      'Only for host elements like <input>, never for custom components',
+      'Only in Preact, not React',
+    ],
+    answer: 1,
+    explain: 'Proven above by rendering exactly this component and asserting `ref.current` is the real `<input>` DOM node — no `forwardRef` anywhere. This is a React 19 change; pre-19 code still needs `forwardRef` for the same result.',
+  },
+  {
+    q: 'For `<div><span>A</span><span>B</span></div>`, what is `props.children` on the outer `<div>` element?',
+    options: [
+      'undefined',
+      'The string "AB"',
+      'An array of the two <span> elements',
+      'A single <span> element',
+    ],
+    answer: 2,
+    explain: 'Proven above: with two or more children, `children` is an array (length 2 here). Zero children makes it `undefined`; exactly one child makes it that single value directly, not wrapped in an array.',
   },
 ];
 

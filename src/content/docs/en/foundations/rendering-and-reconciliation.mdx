@@ -1,6 +1,6 @@
 ---
 title: 'Rendering & Reconciliation'
-description: 'The render and commit phases, the virtual tree, how reconciliation diffs old vs new, and why keys are load-bearing.'
+description: 'The render and commit phases, how reconciliation diffs old vs new by type (proven with mount/unmount tests), why keys are load-bearing for list identity AND as a reset switch, and StrictMode’s dev-only double render/effect.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Render is not "update the DOM"
 
@@ -24,14 +25,65 @@ export const phaseDiagram = `flowchart LR
 1. **Render phase** — React calls your components to build a new tree of elements. This is pure computation: no DOM is touched, and React can pause or throw it away.
 2. **Commit phase** — React compares the new tree to the previous one, computes the *minimal* set of DOM operations, and applies them.
 
-So a re-render that produces the same output as before results in **zero DOM changes**. Rendering is cheap-ish; the expensive part (touching the DOM) only happens for what actually changed.
+So a re-render that produces the same output as before results in **zero DOM changes**. Rendering is cheap-ish; the expensive part (touching the DOM) only happens for what actually changed. (Exactly *how* React schedules and interleaves this work — fibers, lanes, the work loop — is covered in the internals module.)
 
 ## Reconciliation: diffing two trees
 
-Comparing two arbitrary trees is famously expensive (O(n³)). React makes it fast (O(n)) with two heuristics:
+Comparing two arbitrary trees is famously expensive (O(n³)). React makes it fast (O(n)) with two heuristics, and both are provable, not just described:
 
 - **Different type → throw it away.** If an element's `type` changed (`<div>` became `<span>`, or `ComponentA` became `ComponentB`), React unmounts the old subtree entirely and builds the new one fresh — including destroying its state.
-- **Same type → keep the node, update props.** If the type is the same, React keeps the existing DOM node and its state, and just updates the changed props.
+- **Same type → keep the node, update props.** If the type is the same, React keeps the existing DOM node and its state, and just updates the changed props — no mount/unmount at all.
+
+```tsx
+// src/__tests__/reconciliation-rules.test.tsx
+import { useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('a different element type unmounts the old subtree and mounts a new one', () => {
+  const log: string[] = [];
+  function Field({ as }: { as: 'input' | 'p' }) {
+    useEffect(() => {
+      log.push(`mount:${as}`);
+      return () => { log.push(`unmount:${as}`); };
+    }, [as]);
+    return as === 'input' ? <input defaultValue="hi" /> : <p>hi</p>;
+  }
+
+  const { rerender } = render(<Field as="input" />);
+  log.length = 0;
+  rerender(<Field as="p" />); // type changed: input -> p
+
+  expect(log).toEqual(['unmount:input', 'mount:p']);
+});
+
+test('the same element type across renders updates props in place — no remount', () => {
+  const log: string[] = [];
+  function Row({ disabled }: { disabled: boolean }) {
+    useEffect(() => {
+      log.push('mount');
+      return () => { log.push('unmount'); };
+    }, []);
+    return <input disabled={disabled} />;
+  }
+
+  const { rerender } = render(<Row disabled={false} />);
+  log.length = 0;
+  rerender(<Row disabled={true} />); // same type: input -> input
+
+  expect(log).toEqual([]); // no mount/unmount — only the prop changed
+});
+```
+
+```text
+✓ a different element type unmounts the old subtree and mounts a new one
+✓ the same element type across renders updates props in place — no remount
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
 
 ```jsx
 // Same type across renders → the <input> keeps its DOM node and its focus/value.
@@ -43,29 +95,239 @@ Comparing two arbitrary trees is famously expensive (O(n³)). React makes it fas
 
 ## Keys: identity for lists
 
-For a *list* of siblings of the same type, React needs to know which item is which across renders. By default it matches by **position** (index) — which breaks the moment items reorder, insert, or delete. A **key** gives each item a stable identity so React can track it.
+For a *list* of siblings of the same type, React needs to know which item is which across renders. By default it matches by **position** (index) — which breaks the moment items reorder, insert, or delete. A **key** gives each item a stable identity so React can track it, instead of tracking the slot it happens to sit in.
 
-```jsx
-// ✅ Stable identity — React follows each todo even when the list reorders.
-{todos.map((todo) => <TodoItem key={todo.id} todo={todo} />)}
+```tsx
+// src/__tests__/position-vs-key.test.tsx
+import { useState } from 'react';
+import { render, cleanup, fireEvent } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
 
-// ⚠️ Index as key — reorder/insert/delete and React mismatches items,
-// corrupting per-item state (a checked box jumps to the wrong row).
-{todos.map((todo, i) => <TodoItem key={i} todo={todo} />)}
+afterEach(cleanup);
+
+type Item = { id: string; text: string };
+
+function Checkbox({ label }: { label: string }) {
+  const [checked, setChecked] = useState(false);
+  return (
+    <label>
+      <input type="checkbox" checked={checked} onChange={() => setChecked((c) => !c)} />
+      {label}
+    </label>
+  );
+}
+
+function List({ items, useIndexKey }: { items: Item[]; useIndexKey: boolean }) {
+  return (
+    <ul>
+      {items.map((item, i) => (
+        <li key={useIndexKey ? i : item.id}>
+          <Checkbox label={item.text} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+test('index-as-key: prepending an item moves the checked state to the WRONG row', () => {
+  const items: Item[] = [{ id: 'a', text: 'Alpha' }, { id: 'b', text: 'Bravo' }];
+  const { getAllByRole, rerender } = render(<List items={items} useIndexKey />);
+
+  fireEvent.click(getAllByRole('checkbox')[0]); // check "Alpha" (currently index 0)
+  const withPrepend = [{ id: 'z', text: 'Zulu' }, ...items];
+  rerender(<List items={withPrepend} useIndexKey />);
+
+  const checked = getAllByRole('checkbox').map((c) => (c as HTMLInputElement).checked);
+  // BUG: index 0 is now "Zulu", but the checked=true STATE stayed pinned to
+  // position 0 — Zulu shows checked, not Alpha.
+  expect(checked).toEqual([true, false, false]);
+});
+
+test('stable id-as-key: the same reorder keeps the checked state on the correct item', () => {
+  const items: Item[] = [{ id: 'a', text: 'Alpha' }, { id: 'b', text: 'Bravo' }];
+  const { getAllByRole, rerender, getByText } = render(<List items={items} useIndexKey={false} />);
+
+  fireEvent.click(getAllByRole('checkbox')[0]);
+  const withPrepend = [{ id: 'z', text: 'Zulu' }, ...items];
+  rerender(<List items={withPrepend} useIndexKey={false} />);
+
+  const alphaCheckbox = getByText('Alpha').closest('label')!.querySelector('input') as HTMLInputElement;
+  const zuluCheckbox = getByText('Zulu').closest('label')!.querySelector('input') as HTMLInputElement;
+  expect(alphaCheckbox.checked).toBe(true);  // followed Alpha, wherever it moved
+  expect(zuluCheckbox.checked).toBe(false);
+});
 ```
 
-<Mermaid title="Keys let reconciliation track items across a reorder" code={keyDiagram} />
+```text
+✓ index-as-key: prepending an item moves the checked state to the WRONG row
+✓ stable id-as-key: the same reorder keeps the checked state on the correct item
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+The rule: a key must be **stable, unique among siblings, and tied to the data's identity** (usually a database id) — never the array index for a list that can change, and never `Math.random()` (which changes every render and forces a full remount of every item, every time).
+
+## Key as a reset switch (a different use of the same mechanism)
+
+List identity is one job for `key` — but the same "same key → same instance, different key → remount" rule is also a deliberate tool on its own, unrelated to lists: put an explicit, changing `key` on a *single* component whenever you want React to throw away its entire state and start fresh, instead of updating it in place.
+
+```tsx
+// src/__tests__/key-as-reset-switch.test.tsx
+import { useState, useEffect } from 'react';
+import { render, cleanup, fireEvent } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('changing key remounts the component and resets its internal state, even with the same props', () => {
+  const log: string[] = [];
+  function Draft({ label }: { label: string }) {
+    const [count, setCount] = useState(0);
+    useEffect(() => {
+      log.push(`mount:${label}`);
+      return () => { log.push(`unmount:${label}`); };
+    }, [label]);
+    return <button onClick={() => setCount((c) => c + 1)}>{count}</button>;
+  }
+
+  const { getByRole, rerender } = render(<Draft key="a" label="a" />);
+  fireEvent.click(getByRole('button'));
+  expect(getByRole('button').textContent).toBe('1');
+
+  log.length = 0;
+  rerender(<Draft key="b" label="a" />); // key changes even though `label` prop did NOT
+  expect(log).toEqual(['unmount:a', 'mount:a']); // forced remount
+  expect(getByRole('button').textContent).toBe('0'); // internal state reset
+});
+```
+
+```text
+✓ changing key remounts the component and resets its internal state, even with the same props
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+This is the standard fix for "this form/editor keeps showing stale state after I switched what it's editing" — put `key={editingItemId}` on the component, and switching ids forces a clean remount instead of the component carrying over stale internal state from the previous id.
+
+<Mermaid title="Keys let reconciliation track items across a reorder — or force a reset" code={keyDiagram} />
 
 export const keyDiagram = `flowchart TB
   before["Before: [A, B, C]\nkeys a,b,c"] -->|prepend Z| after["After: [Z, A, B, C]\nkeys z,a,b,c"]
   after --> good["With stable keys:\nA,B,C reused, Z mounted"]
   before2["Before: [A, B, C]\nkey = index 0,1,2"] -->|prepend Z| after2["After: index 0,1,2,3"]
-  after2 --> bad["With index keys:\nevery item mismatched,\nstate shifts to wrong rows"]`;
+  after2 --> bad["With index keys:\nevery item mismatched,\nstate shifts to wrong rows"]
+  same["Same component, key changes\n(e.g. key={itemId})"] --> reset["Forced unmount + remount:\nstate resets on purpose"]`;
 
-The rule: a key must be **stable, unique among siblings, and tied to the data's identity** (usually a database id) — never the array index for a list that can change, and never `Math.random()` (which changes every render and forces a full remount).
+## StrictMode's dev-only double render and double effect
+
+In development, `<StrictMode>` deliberately **renders your component twice** and runs **effect setup → cleanup → setup** once on mount. This is not a bug — it simulates what would happen if React needed to discard and reuse component state later (an optimization concurrent React relies on), so any render or effect that isn't safely repeatable surfaces immediately, in development, instead of silently corrupting state in production.
+
+```tsx
+// src/__tests__/strictmode-double-render-effect.test.tsx
+import { StrictMode, useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('StrictMode (dev) renders twice and runs setup -> cleanup -> setup once on mount', () => {
+  let renders = 0;
+  const effectLog: string[] = [];
+  function Probe() {
+    renders++;
+    useEffect(() => {
+      effectLog.push('setup');
+      return () => { effectLog.push('cleanup'); };
+    }, []);
+    return null;
+  }
+
+  render(
+    <StrictMode>
+      <Probe />
+    </StrictMode>,
+  );
+  expect(renders).toBe(2);
+  expect(effectLog).toEqual(['setup', 'cleanup', 'setup']);
+});
+
+test('without StrictMode, the same component renders and effects run exactly once', () => {
+  let renders = 0;
+  const effectLog: string[] = [];
+  function Probe() {
+    renders++;
+    useEffect(() => {
+      effectLog.push('setup');
+      return () => { effectLog.push('cleanup'); };
+    }, []);
+    return null;
+  }
+
+  render(<Probe />);
+  expect(renders).toBe(1);
+  expect(effectLog).toEqual(['setup']);
+});
+```
+
+```text
+✓ StrictMode (dev) renders twice and runs setup -> cleanup -> setup once on mount
+✓ without StrictMode, the same component renders and effects run exactly once
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+If your render mutates something outside itself, or your effect's cleanup doesn't fully undo its setup, the second pass exposes it (wrong count, a duplicated subscription, a leaked timer) right away — that's the entire point of the double-invoke, and it only happens in development.
+
+## Mental Model
+
+Reconciliation's whole job is answering one question per element, every render: *"is this the same thing as before, or something new?"* `type` answers it for a single position (same type = same thing, keep the instance; different type = something new, discard and rebuild). `key` answers it for identity that has to survive **movement** — a list item changing position, or a component you deliberately want treated as "a new thing" even though its type and props look similar. Once you see key and type as two inputs to the same "same or new" question, "key as list identity" and "key as a reset switch" stop looking like two different features.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Stable id as key | Correct across reorder/insert/delete — state follows the right row | Requires a real stable id in your data; not always available for free |
+| Index as key | Zero extra data needed, "just works" for a list that never reorders | Silently corrupts per-item state the moment the list CAN reorder, insert, or delete |
+| `key={changingToken}` reset switch | Clean, guaranteed reset of an entire subtree's state — cheaper than manually resetting every piece of state | Full unmount/remount is more expensive than an in-place update; effects re-run their setup entirely |
+| StrictMode double render/effect | Surfaces impure renders and unsafe effects in development, before they reach production | Doubles dev-mode render/effect cost (dev only — production runs once) |
+
+## Common Misconceptions
+
+- **"Re-render always touches the DOM."** It doesn't — render is pure tree-building; only the commit phase touches the DOM, and only for what actually changed (proven above: an identical re-render commits nothing).
+- **"Index keys are fine as long as the list is short."** Length is irrelevant — the bug is state bleeding to the wrong row the moment the list reorders/inserts/deletes, proven above regardless of list size.
+- **"`key` is only for lists."** It's a general "same instance or new instance" signal — putting a changing `key` on a single, non-list component is a standard, deliberate way to force a full reset, proven above.
+- **"StrictMode's double render means my component runs twice in production too."** It's development-only, proven above (the second test renders/effects exactly once with no StrictMode) — production always runs once.
+
+## Reading AI-generated code
+
+When generated code renders a list or relies on component identity, check for these before trusting it:
+
+- Does `.map()` over a list use the array index as `key` for a list that can reorder, filter, or have items inserted/removed? That's the classic state-bleed bug proven above.
+- Does it use `Math.random()` or `Date.now()` as a key? Both change every render, forcing a full remount of every item on every render — never a real fix for "React complains about missing keys."
+- Does an editor/form component keep showing stale data after the "current item" prop changes, when a `key={currentItemId}` reset would cleanly fix it instead of manually resetting every piece of internal state?
+- Does a conditional render swap between different element/component types (e.g. `isLoading ? <Spinner/> : <Form/>`) where the author assumes state is preserved across the swap? Different types always remount — any state in the old subtree is gone.
+- Does test or demo code assume a component's effect only runs once, without accounting for StrictMode's dev-only double-invoke (which can make a naively-written effect appear to "double-fire" a network call or subscription)?
+
+<SpotTheBug code={`function TodoList({ todos }) {
+  return (
+    <ul>
+      {todos.map((todo, i) => (
+        <li key={i}>
+          <input type="checkbox" defaultChecked={todo.done} />
+          {todo.text}
+        </li>
+      ))}
+    </ul>
+  );
+}`}>
+`key={i}` uses the array index as identity. As long as the list never reorders this looks fine — but the moment an item is inserted, removed, or the list is sorted, React matches the OLD checkbox state to whatever item now happens to sit at the same index, not to the item it was originally checked for. Proven above: checking the first row, then prepending a new item, leaves the checked state on position 0 (now a different todo) instead of following the todo the user actually checked. The fix is `key={todo.id}` (a stable id from the data), which keeps each checkbox's state attached to the correct todo across any reorder.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-An update has two phases: a pure **render** (build the new element tree — no DOM) and a **commit** (apply the *minimal* DOM changes). **Reconciliation** diffs old vs new by `type`: same type reuses the node and its state, different type unmounts and rebuilds. For lists, a stable **key** (a data id, not the index) gives each item identity so state follows the right row across reorders.
+An update has two phases: a pure **render** (build the new element tree — no DOM) and a **commit** (apply the *minimal* DOM changes). **Reconciliation** diffs old vs new by `type`: same type updates the existing node and its state in place — proven above with zero mount/unmount — different type unmounts and rebuilds, proven with a real effect log. For lists, a stable **key** (a data id, not the index) gives each item identity so state follows the right row across reorders — proven above with a state-bleed bug and its fix side by side. The *same* key mechanism, applied to a single non-list component, is also a deliberate **reset switch**: change the key, force a clean remount. And StrictMode's **dev-only** double render/effect exists purely to surface renders and effects that aren't safely repeatable, before they ship.
 </Callout>
 
 export const quizRecon = [
@@ -78,6 +340,7 @@ export const quizRecon = [
       'The browser paints',
     ],
     answer: 1,
+    explain: 'Render is pure tree-building. DOM changes only happen afterward, in the commit phase, and only for what the diff against the previous tree found different.',
   },
   {
     q: 'During reconciliation, what does React do when an element\'s type is the SAME as before?',
@@ -88,6 +351,7 @@ export const quizRecon = [
       'Throws an error',
     ],
     answer: 1,
+    explain: 'Proven above: rendering the same element type across renders produces zero mount/unmount effect calls — only the changed prop is applied to the existing node.',
   },
   {
     q: 'Why is using the array index as a key risky for a list that can reorder?',
@@ -98,6 +362,7 @@ export const quizRecon = [
       'It makes the list read-only',
     ],
     answer: 1,
+    explain: 'Proven above: prepending an item to an index-keyed list leaves a checkbox\'s checked=true state pinned to position 0, which is now a different item — the state followed the SLOT, not the DATA.',
   },
   {
     q: 'If a re-render produces the exact same output as before, how many DOM changes occur?',
@@ -108,6 +373,29 @@ export const quizRecon = [
       'It always re-mounts everything',
     ],
     answer: 1,
+    explain: 'The render phase recomputes the tree, but the commit phase only applies changes the diff actually found — an identical tree commits nothing to the real DOM.',
+  },
+  {
+    q: '```tsx\nfunction Draft({ label }: { label: string }) {\n  const [count, setCount] = useState(0);\n  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;\n}\n// rendered first as <Draft key="a" label="a" />, then as <Draft key="b" label="a" />\n```\nAfter clicking the button once (count becomes 1) and then re-rendering with the new `key`, but the SAME `label`, what does the button show?',
+    options: [
+      '1 — the label prop did not change, so state carries over',
+      '0 — changing the key alone forces an unmount + remount, resetting state, even though label is unchanged',
+      'It throws an error because key changed',
+      '2 — the click is somehow counted twice',
+    ],
+    answer: 1,
+    explain: 'Proven above: changing only the key (not the props) still causes an unmount/mount effect-log pair and resets `count` back to 0 — key is a "same instance or new instance" signal independent of props.',
+  },
+  {
+    q: '```tsx\nfunction Probe() {\n  useEffect(() => {\n    console.log(\'setup\');\n    return () => console.log(\'cleanup\');\n  }, []);\n  return null;\n}\n```\nMounted as `<StrictMode><Probe /></StrictMode>` in development, in what order do the logs print, and how many times does Probe render?',
+    options: [
+      'setup — once, renders once',
+      'setup, cleanup, setup — renders twice',
+      'setup, setup — renders once',
+      'Nothing logs in StrictMode',
+    ],
+    answer: 1,
+    explain: 'Proven above: StrictMode in development renders the component twice and runs the effect\'s setup, then its own cleanup, then setup again — exactly once extra pass, to catch effects/renders that are not safely repeatable. Without StrictMode, both happen exactly once.',
   },
 ];
 

@@ -1,6 +1,6 @@
 ---
 title: 'JSX & Elements'
-description: 'JSX compile เป็นอะไร, React element จริง ๆ คืออะไร (object ธรรมดา) และทำไมสิ่งนี้ทำให้ element สร้างได้ถูกและใช้อธิบาย UI ได้'
+description: 'JSX compile เป็นอะไร (พิสูจน์ด้วย compiler output จริง), React element จริง ๆ คืออะไร (object ธรรมดา — $$typeof, type, key, props), ทำไม key กับ ref ไม่ใช่ prop ธรรมดาแบบเดียวกัน และรูปทรงของ children'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## JSX เป็นแค่ syntax
 
@@ -18,11 +19,11 @@ JSX หน้าตาเหมือน HTML แต่เป็น **syntax sug
 const el = <button className="primary">Click</button>;
 ```
 
-compile (ผ่าน JSX transform สมัยใหม่) เป็นประมาณนี้:
+compile ผ่าน **automatic JSX runtime** สมัยใหม่ เป็นการเรียกเข้า `react/jsx-runtime` นี่คือ output จริงของ compiler (esbuild, `jsx: 'automatic'`) ที่รันกับบรรทัดนั้นเป๊ะ ๆ — ไม่ใช่การเล่าซ้ำ:
 
-```js
-import { jsx as _jsx } from "react/jsx-runtime";
-const el = _jsx("button", { className: "primary", children: "Click" });
+```text
+import { jsx } from "react/jsx-runtime";
+const el = /* @__PURE__ */ jsx("button", { className: "primary", children: "Click" });
 ```
 
 ผลที่สำคัญ: JSX เป็น *expression* ที่ประเมินค่าเป็นค่าที่คุณเก็บใส่ตัวแปรได้ return จากฟังก์ชันได้ ใส่ใน array ได้ หรือส่งเป็น prop ได้ ไม่ใช่ template language ที่มีกฎของตัวเอง — JSX คือ JavaScript ดังนั้น `{ }` ใน JSX ก็แค่หลุดกลับไปเป็น JS expression
@@ -42,19 +43,36 @@ function List({ items, showHeader }) {
 
 ## element คือ object ธรรมดา
 
-`_jsx("button", ...)` return อะไรจริง ๆ? ไม่ใช่ DOM node — แต่เป็น **object JavaScript ธรรมดา** ที่อธิบายสิ่งที่คุณต้องการ:
+`jsx("button", ...)` return อะไรจริง ๆ? ไม่ใช่ DOM node — แต่เป็น **object JavaScript ธรรมดา** ที่อธิบายสิ่งที่คุณต้องการ นี่คือ object จริง ที่ตรวจใน test แทนที่จะเล่าด้วย prose:
 
-```js
-// Roughly what a React element is:
-const el = {
-  type: "button",                 // a string for host elements, or a function for components
-  props: { className: "primary", children: "Click" },
-  key: null,
-  // ...internal fields
-};
+```tsx
+// src/__tests__/element-is-an-object.test.tsx
+import { expect, test } from 'vitest';
+
+function Item(_props: { id: number }) {
+  return null;
+}
+
+test('a JSX element is a plain object: $$typeof, type, key, props', () => {
+  const el = <Item key="a" id={1} />;
+
+  expect(Object.keys(el).sort()).toEqual(['$$typeof', '_owner', '_store', 'key', 'props', 'type'].sort());
+  expect(String((el as unknown as { $$typeof: symbol }).$$typeof)).toBe('Symbol(react.transitional.element)');
+  expect(el.type).toBe(Item);          // a function type for a component
+  expect(el.key).toBe('a');            // key lives on the element itself...
+  expect((el.props as { key?: unknown }).key).toBeUndefined(); // ...never inside props (next section)
+  expect(el.props).toEqual({ id: 1 });
+});
 ```
 
-นี่คือ insight สำคัญ: **React element คือคำอธิบายที่ถูกและ immutable** — ไม่ใช่ตัวจริง สร้าง element พันตัวก็แค่สร้าง object เล็ก ๆ พันตัว React สร้าง tree ของคำอธิบายเหล่านี้ทุกครั้งที่ render แล้วเทียบกับ tree ก่อนหน้าเพื่อตัดสินว่าจะแตะ DOM จริงตรงไหน (นั่นคือ reconciliation บทเรียนถัดไป)
+```text
+✓ a JSX element is a plain object: $$typeof, type, key, props
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+นี่คือ insight สำคัญ: **React element คือคำอธิบายที่ถูกและ immutable** — ไม่ใช่ตัวจริง สร้าง element พันตัวก็แค่สร้าง object เล็ก ๆ พันตัว (`$$typeof`, `type`, `key`, `props` บวก field ภายในที่คุณไม่ต้องแตะ) React สร้าง tree ของคำอธิบายเหล่านี้ทุกครั้งที่ render แล้วเทียบกับ tree ก่อนหน้าเพื่อตัดสินว่าจะแตะ DOM จริงตรงไหน (นั่นคือ reconciliation บทเรียนถัดไป)
 
 <Mermaid title="จาก JSX สู่ element สู่ DOM" code={jsxDiagram} />
 
@@ -79,8 +97,174 @@ field `type` บอก React ว่าเป็น node ชนิดไหน:
 
 นี่คือเหตุผลที่ชื่อ component **ต้องขึ้นต้นด้วยตัวใหญ่** ใน JSX: `<Counter />` (ตัวใหญ่) แปลว่า "เรียก component `Counter`" ส่วน `<counter />` (ตัวเล็ก) แปลว่า "สร้าง host element ชื่อ `counter` ตรง ๆ" ตัวเล็กตัวใหญ่คือวิธีที่ compiler ตัดสินระหว่าง type ที่เป็น string กับการอ้างถึงตัวแปร
 
+## `key` ไม่ใช่ prop
+
+`key` หน้าตาเหมือน attribute ธรรมดาใน JSX แต่ React ดึงมันออกจาก element ก่อนที่จะไปถึง `props` เลย มันมีไว้เพื่อ reconciliation เท่านั้น (บทถัดไป) — อ่านมันจากในตัว component จะได้ `undefined` เสมอ และ dev build จะ warn ถ้าคุณลองอ่าน:
+
+```tsx
+// src/__tests__/key-is-not-a-prop.test.tsx
+import { expect, test, vi } from 'vitest';
+
+function Item(_props: { id: number }) {
+  return null;
+}
+
+test('reading props.key is always undefined and warns in development', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  const el = <Item key="a" id={1} />;
+  const keyFromProps = (el.props as { key?: unknown }).key;
+
+  expect(keyFromProps).toBeUndefined();
+  expect(
+    spy.mock.calls.some(([msg]) => String(msg).includes('`key` is not a prop')),
+  ).toBe(true);
+
+  spy.mockRestore();
+});
+```
+
+```text
+✓ reading props.key is always undefined and warns in development
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ข้อความ warning จริงของ React 19.3 ที่ capture มาจาก test นี้เป๊ะ ๆ:
+
+```text
+Item: `key` is not a prop. Trying to access it will result in `undefined` being returned. If you need to access the same value within the child component, you should pass it as a different prop. (https://react.dev/link/special-props)
+```
+
+ถ้า component ต้องใช้ value เดียวกับที่ parent ใช้เป็น `key` จริง ๆ parent ต้องส่งมันมาอีกครั้งภายใต้ prop คนละชื่อ (เช่น `id`)
+
+## `ref` เป็น prop จริงใน React 19
+
+ก่อน React 19 function component ธรรมดารับ `ref` ไม่ได้เลย — ต้องห่อด้วย `forwardRef` ถึงจะรับได้ **ตั้งแต่ React 19 `ref` เป็น prop ธรรมดา**: function component ไหนก็ประกาศ parameter `ref` แล้วใช้ตรง ๆ ได้เลย ไม่ต้อง `forwardRef`
+
+```tsx
+// src/components/TextInput.tsx
+import type { Ref } from 'react';
+
+function TextInput({ ref, placeholder }: { ref?: Ref<HTMLInputElement>; placeholder?: string }) {
+  return <input ref={ref} placeholder={placeholder} />;
+}
+
+export default TextInput;
+```
+
+```tsx
+// src/__tests__/ref-is-a-prop.test.tsx
+import { createRef } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+import TextInput from '../components/TextInput';
+
+afterEach(cleanup);
+
+test('a plain function component receives `ref` as a prop, no forwardRef needed', () => {
+  const ref = createRef<HTMLInputElement>();
+  render(<TextInput ref={ref} placeholder="hi" />);
+
+  expect(ref.current).toBeInstanceOf(HTMLInputElement);
+  expect(ref.current?.placeholder).toBe('hi');
+});
+```
+
+```text
+✓ a plain function component receives `ref` as a prop, no forwardRef needed
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+`key` กับ `ref` จึงอยู่คนละหมวดกัน: `key` ถูกดึงออกและไม่มีวันไปถึง `props` ภายใต้ชื่อไหนเลย ส่วน `ref` ตั้งแต่ React 19 อยู่ใน `props` เหมือน value ธรรมดาอื่น ๆ destructure ได้ปกติ
+
+## รูปทรงของ children
+
+`props.children` ไม่ได้เป็น array เสมอไป — รูปทรงขึ้นกับว่า JSX เห็น children กี่ตัว:
+
+```tsx
+// src/__tests__/children-shapes.test.tsx
+import { expect, test } from 'vitest';
+
+test('children is undefined, a single value, or an array, depending on how many there are', () => {
+  const none = <input />;
+  const one = <div>Hi</div>;
+  const many = (
+    <div>
+      <span>A</span>
+      <span>B</span>
+    </div>
+  );
+
+  expect((none.props as { children?: unknown }).children).toBeUndefined();
+  expect((one.props as { children?: unknown }).children).toBe('Hi');
+  expect(Array.isArray((many.props as { children?: unknown[] }).children)).toBe(true);
+  expect((many.props as { children: unknown[] }).children).toHaveLength(2);
+});
+```
+
+```text
+✓ children is undefined, a single value, or an array, depending on how many there are
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+โค้ดที่สมมติว่า `children` เป็น array เสมอ (`children.map(...)`) จะพังทันทีที่ component ถูกใช้ด้วย child ตัวเดียวพอดี — ใช้ `Children.toArray` (หรือ `Children.map`) จาก `react` ถ้าต้องการรูปทรงที่สม่ำเสมอ
+
+## Mental Model
+
+แยกสองอย่างนี้ให้ชัดในหัว: **element** (object ธรรมดา ถูก immutable ที่ JSX สร้างทุก render) กับ **component** (ฟังก์ชันที่ถูกเรียกเพื่อสร้าง element เหล่านั้น) element คือ *คำอธิบาย* ที่ถูกทิ้งแล้วสร้างใหม่ทุก render ส่วน *instance* ของ component — state ของมัน ตำแหน่งของมันใน tree — คือสิ่งที่ reconciliation (บทถัดไป) พยายามรักษาไว้ข้ามคำอธิบายที่ถูกทิ้งเหล่านั้น `key` กับ `ref` ทั้งคู่อยู่นอกเรื่อง "props เป็นแค่ data" ธรรมดา เพราะมันเป็น input ให้กับกลไกการรักษานั้น ไม่ใช่ input ให้ logic การ render ของ component คุณ — นั่นคือเหตุผลที่ `key` ไม่มีวันไปถึง `props` เลย และทำไม `ref` ถึงต้องมีกลไกพิเศษ (`forwardRef`) จนกระทั่ง React 19 ทำให้มันเป็น prop ธรรมดา
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| JSX (compile เป็น `jsx(type, props)`) | อ่านเหมือน markup แต่ข้างในเป็น JS expression จริง | ต้องมี build step (Babel/esbuild/SWC) — ไม่ใช่ JS ที่ใช้ได้เองเปล่า ๆ |
+| element เป็น object ธรรมดา | สร้างจำนวนมากได้ถูก เทียบ tree เก่ากับใหม่ก็แค่ diff object | ไม่มีอะไร render จนกว่า React จะเดิน tree — element เดี่ยว ๆ ไม่ทำอะไรเลย |
+| `key` ถูกดึงออกจาก props | identity ของ reconciliation ปนกับ data ของ render ธรรมดาไม่ได้ | component ที่ต้องใช้ value เดียวกันจริง ๆ ต้องรับมันภายใต้ prop ชื่อที่สองอย่างชัดเจน |
+| `ref` เป็น prop ธรรมดา (React 19) | ไม่ต้องมี boilerplate `forwardRef` สำหรับ component ที่แค่ expose DOM node | codebase/tutorial เก่ายังโชว์ `forwardRef` อยู่ — ต้องรู้จักทั้งสองแบบ |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"JSX คือ HTML browser เข้าใจตรง ๆ"** browser ไม่เคยเห็น JSX เลย — มันถูก compile ทิ้งก่อนส่ง เป็นการเรียก `jsx(type, props)` พิสูจน์แล้วข้างบน
+- **"React element คือ DOM node เอง"** มันเป็น object ธรรมดาที่อธิบายว่า DOM node *ควร* หน้าตาเป็นยังไง ไม่มีอะไรอยู่ใน DOM จริงจนกว่า React จะ commit (บทถัดไป)
+- **"`props.key` ให้ key ที่ตั้งไว้สำหรับ reconciliation"** มันเป็น `undefined` เสมอ และการอ่านมัน warn ตอน dev — พิสูจน์แล้วข้างบน ส่ง value เดิมมาอีกครั้งภายใต้ prop ชื่ออื่นถ้าต้องใช้ในตัว component
+- **"ต้องมี `forwardRef` เสมอถึงจะรับ ref ใน function component ได้"** จริงแค่ก่อน React 19 ตั้งแต่ 19 `ref` เป็น prop ธรรมดา — พิสูจน์แล้วข้างบนโดยไม่มี `forwardRef` เลยสักตัว
+- **"`children` เป็น array เสมอ ใช้ `.map` ได้ปลอดภัยเสมอ"** จริงแค่ตอนมี children 2 ตัวขึ้นไป child ตัวเดียวคือ value เปล่า ๆ ไม่มี children เลยคือ `undefined` — พิสูจน์แล้วข้างบน
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ component ที่ generate มาทำงานกับ JSX element ตรง ๆ ให้เช็กสิ่งเหล่านี้ก่อนเชื่อมัน:
+
+- มันพยายามอ่าน `props.key` (หรือ destructure `key`) ในตัว component โดยหวังว่าจะได้ value ที่ parent ใช้ใน `key={...}` ไหม? นั่นเป็น `undefined` เสมอ — ต้องส่ง value เดิมมาอีกครั้งภายใต้ชื่ออื่น
+- มันยังห่อ component ด้วย `forwardRef` แค่เพื่อรับ `ref` ทั้งที่ codebase เล็งเป้า React 19 อยู่แล้ว (ที่ `ref` เป็น prop ธรรมดา) ไหม? ไม่ผิด แต่ล้าสมัย — ควร flag ว่าลดรูปได้
+- โค้ด list-rendering สมมติว่า `props.children` เป็น array เสมอ (`children.map(...)`, `children[0]`) โดยไม่คิดถึงกรณี child ตัวเดียวหรือไม่มี children เลยไหม?
+- มันปฏิบัติกับ element object เหมือนเป็น DOM node ที่มีชีวิต (อ่าน `.textContent`, เรียก `.addEventListener` บนมัน) แทนที่จะทำผ่าน `ref` ไปที่ node จริงไหม?
+- มีการใช้ custom tag ตัวเล็กทั้งที่ตั้งใจเป็น component ตัวใหญ่ไหม (`<counter />` แทน `<Counter />`) ซึ่งจะสร้าง host element ที่ไม่รู้จักแบบเงียบ ๆ แทนที่จะเรียก component?
+
+<SpotTheBug code={`function List({ items }) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <ListItem key={item.id} {...item} />
+      ))}
+    </ul>
+  );
+}
+
+function ListItem(props) {
+  // Trying to reuse the same id the parent used as the React key...
+  return <li data-id={props.key}>{props.label}</li>;
+}`}>
+`ListItem` อ่าน `props.key` โดยหวังว่าจะได้ `item.id` เดียวกับที่ parent ใช้เป็น `key={item.id}` — แต่ `key` ถูกดึงออกก่อนที่ `props` จะถูกสร้าง ดังนั้น `props.key` เป็น `undefined` เสมอ (และ React warn การอ่านนี้ตอน dev พิสูจน์แล้วข้างบน) `<li>` ที่ render ออกมาได้ `data-id="undefined"` ทุกแถว ทางแก้: ให้ parent ส่ง id มาอีกครั้งภายใต้ชื่อของตัวเอง เช่น `<ListItem key={item.id} itemId={item.id} {...item} />` แล้วอ่าน `props.itemId` ในตัว `ListItem`
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-JSX เป็น syntax sugar ที่ compile เป็นการเรียก `jsx(type, props)` จึงเป็นแค่ JavaScript **expression** — และ `{ }` ในนั้นคือ JS ธรรมดา แต่ละการเรียก return **React element: object ธรรมดาที่ถูกและ immutable** (`{ type, props, key }`) ที่ *อธิบาย* UI ไม่ใช่เป็น UI type ที่เป็นตัวใหญ่คือ component (ฟังก์ชันที่ React เรียก) type ตัวเล็กคือ host element (DOM tag จริง)
+JSX เป็น syntax sugar ที่ compile เป็นการเรียก `jsx(type, props)` — พิสูจน์แล้วข้างบนด้วย compiler output จริง — จึงเป็นแค่ JavaScript **expression** และ `{ }` ในนั้นคือ JS ธรรมดา แต่ละการเรียก return **React element: object ธรรมดาที่ถูกและ immutable** (`$$typeof`, `type`, `key`, `props`) ที่ *อธิบาย* UI ไม่ใช่เป็น UI **`key` ถูกดึงออกและไม่มีวันไปถึง `props`** (เป็น `undefined` เสมอ และ warn ตอน dev); **`ref` ตั้งแต่ React 19 เป็น prop ธรรมดา** ไม่ต้องใช้ `forwardRef`; และ **`children`** เป็น `undefined`, value เปล่า ๆ หรือ array ขึ้นกับจำนวน children — ทั้งสี่ข้อพิสูจน์ด้วย test จริง ไม่ใช่แค่คำอธิบาย
 </Callout>
 
 export const quizJsx = [
@@ -93,16 +277,18 @@ export const quizJsx = [
       'CSS rule',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วข้างบนด้วย esbuild output จริง: `<button className="primary">Click</button>` compile เป็น `jsx("button", { className: "primary", children: "Click" })` import จาก `react/jsx-runtime`',
   },
   {
     q: 'React element คืออะไร?',
     options: [
       'DOM node จริง',
-      'object ธรรมดาที่ถูกและ immutable ที่อธิบายว่า UI ควรเป็นอะไร ({ type, props, key })',
+      'object ธรรมดาที่ถูกและ immutable ที่อธิบายว่า UI ควรเป็นอะไร ($$typeof, type, key, props)',
       'CSS class',
       'hook',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วข้างบน: `Object.keys(el)` บน element จริงคืน `$$typeof`, `type`, `key`, `props` บวก field ภายใน — ไม่มีวันเป็น DOM node',
   },
   {
     q: 'ทำไม component ต้องขึ้นต้นด้วยตัวใหญ่ใน JSX (`<Counter />` ไม่ใช่ `<counter />`)?',
@@ -113,16 +299,40 @@ export const quizJsx = [
       'JSX บังคับให้ทุก tag เป็นตัวใหญ่',
     ],
     answer: 1,
+    explain: 'compiler ใช้ตัวเล็กตัวใหญ่ตัดสินว่า JSX tag จะกลายเป็น type แบบ string (host element) หรือการอ้างถึงตัวแปร (function ของ component) ในการเรียก jsx(type, props) ที่ compile ออกมา',
   },
   {
-    q: '`{ }` ใน JSX คืออะไร?',
+    q: '```tsx\nfunction Item(props: { id: number }) {\n  return null;\n}\nconst el = <Item key="a" id={1} />;\nconst k = (el.props as { key?: unknown }).key;\n```\n`k` คืออะไร?',
     options: [
-      'template directive พิเศษ',
-      'การหลุดกลับไปเป็น JavaScript expression ธรรมดา',
-      'CSS block',
-      'object literal เท่านั้น',
+      '"a" — key ถูกก๊อปเข้า props',
+      'undefined — key ถูกดึงออกจาก element และไม่มีวันไปถึง props (และ dev warn ตอนอ่าน)',
+      'มันจะ throw TypeError',
+      '1 — มันสับสนกับ id',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วข้างบน: `(el.props as any).key` เป็น `undefined` และ warning จริงของ React 19.3 ถูก capture มา: "`key` is not a prop. Trying to access it will result in `undefined` being returned..."',
+  },
+  {
+    q: '```tsx\nfunction TextInput({ ref, placeholder }: { ref?: React.Ref<HTMLInputElement>; placeholder?: string }) {\n  return <input ref={ref} placeholder={placeholder} />;\n}\n```\nใน React 19 อันนี้ compile และทำงานได้โดย**ไม่ต้อง**ห่อ `TextInput` ด้วย `forwardRef` ไหม?',
+    options: [
+      'ไม่ได้ — function component ที่รับ ref ทุกตัวต้องใช้ forwardRef',
+      'ได้ — ตั้งแต่ React 19 ref เป็น prop ธรรมดาที่ function component ธรรมดาประกาศและใช้ได้ตรง ๆ',
+      'ได้เฉพาะ host element อย่าง <input> เท่านั้น ไม่ใช่กับ custom component',
+      'ได้เฉพาะใน Preact ไม่ใช่ React',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบนด้วยการ render component นี้ตัวเป๊ะ ๆ แล้ว assert ว่า `ref.current` คือ DOM node `<input>` จริง — ไม่มี `forwardRef` เลย นี่คือการเปลี่ยนแปลงใน React 19 โค้ดก่อน 19 ยังต้องใช้ `forwardRef` เพื่อผลลัพธ์เดียวกัน',
+  },
+  {
+    q: 'สำหรับ `<div><span>A</span><span>B</span></div>` `props.children` ของ element `<div>` ชั้นนอกคืออะไร?',
+    options: [
+      'undefined',
+      'string "AB"',
+      'array ของ <span> สองตัว',
+      '<span> ตัวเดียว',
+    ],
+    answer: 2,
+    explain: 'พิสูจน์แล้วข้างบน: เมื่อมี children ตั้งแต่สองตัวขึ้นไป `children` เป็น array (ยาว 2 ในกรณีนี้) ไม่มี children เลยได้ `undefined`; child ตัวเดียวได้ value นั้นตรง ๆ ไม่ห่อ array',
   },
 ];
 
