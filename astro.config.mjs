@@ -41,6 +41,7 @@ export default defineConfig({
         { label: 'Performance & Patterns', items: [{ autogenerate: { directory: 'performance-and-patterns' } }] },
         { label: 'Tooling, Testing & Production', items: [{ autogenerate: { directory: 'tooling-and-production' } }] },
         { label: 'How React Works', translations: { th: 'React ทำงานอย่างไรข้างใน' }, items: [{ autogenerate: { directory: 'react-internals' } }] },
+        { label: 'Reading AI-generated React', translations: { th: 'อ่านโค้ด React ที่ AI เขียน' }, items: [{ autogenerate: { directory: 'reading-react' } }] },
         { label: 'Glossary', translations: { th: 'อภิธานศัพท์' }, link: 'glossary' },
       ],
       }), preact()],
