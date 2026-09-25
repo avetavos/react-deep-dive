@@ -1,6 +1,6 @@
 ---
 title: 'Rules & Custom Hooks'
-description: 'Why the Rules of Hooks exist (call order), the lint plugin that enforces them, and extracting custom hooks to share stateful logic.'
+description: 'Why the Rules of Hooks exist (call order), the real error React throws when you break them, the lint plugin that enforces them, extracting custom hooks that return stable functions, and the "use" exception to the rules.'
 sidebar:
   order: 6
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The two rules
 
@@ -45,6 +46,53 @@ If you call a hook conditionally, then on a render where the condition differs, 
 
 Enforce it automatically with the official lint rules (**eslint-plugin-react-hooks**) — they catch conditional hooks and missing effect dependencies before they ship.
 
+### Proof: the real error, not just a lint warning
+
+The Rules of Hooks aren't only a lint convention — breaking them at runtime, in a way ESLint's static analysis doesn't catch (for example, a condition that only sometimes reduces the hook count), throws a real React error, not a silent bug:
+
+```tsx
+// src/__tests__/conditional-hook-error.test.tsx
+import { useState } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+
+afterEach(cleanup);
+
+function Buggy({ skip }: { skip: boolean }) {
+  const [a] = useState('a');
+  if (!skip) {
+    // 🔴 Conditional hook call — only runs on some renders.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useState('b');
+  }
+  return <span>{a}</span>;
+}
+
+test('calling a hook conditionally on re-render throws React\'s real "Rendered fewer hooks" error', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { rerender } = render(<Buggy skip={false} />); // useState('a'), useState('b')
+  expect(() => {
+    rerender(<Buggy skip />); // this render only calls useState('a') — count changed
+  }).toThrowError(/Rendered fewer hooks than expected/);
+  spy.mockRestore();
+});
+```
+
+```text
+✓ calling a hook conditionally on re-render throws React's real "Rendered fewer hooks" error
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+The exact message React throws, captured in the probe:
+
+```text
+Rendered fewer hooks than expected. This may be caused by an accidental early return statement.
+```
+
+That second sentence is a real clue: the far more common real-world trigger isn't a hand-written `if` around a hook — it's an early `return` placed *before* a hook that used to run on every render.
+
 ## Custom hooks: sharing stateful logic
 
 A **custom hook** is simply a function whose name starts with `use` and which calls other hooks. That's it — there's no special API. It lets you extract and reuse *stateful logic* (not UI) across components.
@@ -77,8 +125,174 @@ The crucial thing to understand: custom hooks share **logic, not state**. Each c
 
 When to extract a custom hook: when two components need the same stateful behavior, or when a component's logic gets complex enough that naming it (`useForm`, `useDebouncedValue`, `useFetch`) makes the component clearer.
 
+### A well-written custom hook returns stable functions
+
+A custom hook that hands back a callback (for a memoized child, or an effect dependency elsewhere) should return the **same function reference** across re-renders whenever nothing it depends on changed — exactly like you'd want from any function you write by hand. `useCallback` inside the hook is what makes that true:
+
+```tsx
+// src/hooks/useCounter.ts
+import { useCallback, useState } from 'react';
+
+function useCounter() {
+  const [count, setCount] = useState(0);
+  const increment = useCallback(() => setCount((c) => c + 1), []);
+  return { count, increment };
+}
+
+export default useCounter;
+```
+
+```tsx
+// src/__tests__/custom-hook-stable-fn.test.tsx
+import { useCallback, useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function useCounter() {
+  const [count, setCount] = useState(0);
+  const increment = useCallback(() => setCount((c) => c + 1), []);
+  return { count, increment };
+}
+
+test('a well-written custom hook returns the same function reference across re-renders', () => {
+  const seen: (() => void)[] = [];
+  function Probe({ unrelated }: { unrelated: number }) {
+    const { increment } = useCounter();
+    seen.push(increment);
+    return <span>{unrelated}</span>;
+  }
+  const { rerender } = render(<Probe unrelated={1} />);
+  rerender(<Probe unrelated={2} />); // re-render for an unrelated reason
+  expect(seen).toHaveLength(2);
+  expect(seen[0]).toBe(seen[1]); // same reference, not a new one each render
+});
+
+test('calling increment() twice via act reaches count 2', () => {
+  function Probe() {
+    const { count, increment } = useCounter();
+    return <button onClick={increment}>{count}</button>;
+  }
+  const { getByRole } = render(<Probe />);
+  act(() => getByRole('button').click());
+  act(() => getByRole('button').click());
+  expect(getByRole('button').textContent).toBe('2');
+});
+```
+
+```text
+✓ a well-written custom hook returns the same function reference across re-renders
+✓ calling increment() twice via act reaches count 2
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+If `useCounter` had written `const increment = () => setCount(c => c + 1);` without `useCallback`, the first test would fail: every render would hand back a brand-new function, which is exactly the kind of thing that defeats a `React.memo` child or forces an effect depending on it to re-run needlessly (see the memoization lesson).
+
+## The `use` exception to the Rules of Hooks
+
+`use` (introduced alongside Server Components, and usable in Client Components too for unwrapping a promise handed down from the server) is explicitly **not** bound by the "only at the top level" rule the way `useState`/`useEffect`/etc. are. It's the one built-in that's designed to be called inside conditionals, loops, and after early returns:
+
+```tsx
+// src/components/Message.tsx
+import { use } from 'react';
+
+function Message({ show, promise }: { show: boolean; promise: Promise<string> }) {
+  // ✅ `use` is allowed after a conditional early return — a real hook
+  // (useState/useEffect/etc.) would violate the Rules of Hooks here.
+  if (!show) return <p>hidden</p>;
+  const text = use(promise);
+  return <p>{text}</p>;
+}
+
+export default Message;
+```
+
+```tsx
+// src/__tests__/use-conditional.test.tsx
+import { Suspense, use } from 'react';
+import { act, render, cleanup, screen, waitFor } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Message({ show, promise }: { show: boolean; promise: Promise<string> }) {
+  if (!show) return <p>hidden</p>;
+  const text = use(promise);
+  return <p>{text}</p>;
+}
+
+test('use() may be called after an early return, unlike a real Hook', async () => {
+  const promise = Promise.resolve('loaded');
+  await act(async () => {
+    render(
+      <Suspense fallback={<p>loading</p>}>
+        <Message show promise={promise} />
+      </Suspense>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('loaded')).toBeTruthy());
+});
+```
+
+```text
+✓ use() may be called after an early return, unlike a real Hook
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Don't take this as license to call `useState` after a conditional too — `use` is a special-cased exception (it's not tracked by React's per-render hook-slot list the way ordinary hooks are), not a loophole in the rule itself. The rule still applies to every hook whose name you didn't get from React's own `use()` API.
+
+## Mental Model
+
+The Rules of Hooks are not a style guideline layered on top of React — they're a direct consequence of the memory-slot mechanism from the module intro. If hooks were matched by name, conditional calls would be perfectly fine. Because they're matched by *position in a fixed, ordered list*, the list's shape must be identical every render, full stop. `use` gets to break this because it isn't part of that list at all — it reads directly from a Suspense-aware cache keyed on the promise/context you pass it, which is precisely why it doesn't need positional stability.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Enforcing rules via ESLint (`eslint-plugin-react-hooks`) | Catches most violations before they ever run | Some violations (a condition that only *sometimes* differs) only surface at runtime |
+| Custom hook with `useCallback`-wrapped returns | Safe to pass to memoized children / effect deps | Slightly more code in the hook itself |
+| `use()` for conditional data unwrapping | Lets you skip fetching/suspending work you don't need | Only works for promises and context — not a general escape hatch for other hooks |
+
+## Common Misconceptions
+
+- **"Breaking the Rules of Hooks is just a lint warning, not a real bug."** It can throw a genuine runtime error — "Rendered fewer hooks than expected" — proven above, not merely a linter complaint.
+- **"An early `return` before a hook is fine as long as the hook itself isn't inside an `if`."** It's exactly as dangerous: the early return skips the hook call on some renders, which is the same "count changed" problem a conditional causes.
+- **"Custom hooks automatically return stable references."** They don't — a custom hook is just a function; if it hands back a fresh closure every call without `useCallback`, callers get a new reference every render, same as if they'd written it inline.
+- **"`use` proves you can call any hook conditionally if you're careful."** `use` is a special, explicitly-documented exception built differently from ordinary hooks — it does not generalize to `useState`, `useEffect`, or any hook you or a library author writes.
+
+## Reading AI-generated code
+
+When a generated custom hook or component uses hooks, check for these before trusting it:
+
+- Is any hook called after an early `return`, inside an `if`/`for`/`while`, or inside a nested callback — anything other than the top level of a component or another hook?
+- Does a custom hook return a function without wrapping it in `useCallback`, when that function is passed to a memoized child or used as an effect dependency elsewhere?
+- Is `use()` being treated as safe for conditional calls, but the code actually calls `useState`/`useEffect`/etc. conditionally too, assuming the same exception applies?
+- Does a custom hook silently share state across components (e.g., via a module-level variable) when it should give each caller independent state?
+- Would the component's hook count actually change between renders for some prop combination that isn't immediately obvious from reading the top of the function?
+
+<SpotTheBug code={`function Profile({ userId }) {
+  const [user, setUser] = useState(null);
+
+  if (!userId) {
+    return <p>No user selected</p>;
+  }
+
+  useEffect(() => {
+    fetchUser(userId).then(setUser);
+  }, [userId]);
+
+  return <p>{user?.name}</p>;
+}`}>
+The `useEffect` call sits **after** an early `return` — when `userId` is falsy, this render calls only one hook (`useState`); when it's truthy, this render calls two (`useState` then `useEffect`). That is exactly the "hook count changes between renders" problem the Rules of Hooks exist to prevent, and it is not a style nit: proven earlier in this lesson, a component whose hook count drops between renders throws React's real runtime error, "Rendered fewer hooks than expected. This may be caused by an accidental early return statement." — which is precisely what happened here. The fix is to call `useEffect` (and any other hook) before any conditional `return`, and put the "should I even fetch" check inside the effect body instead: `useEffect(() => { if (!userId) return; fetchUser(userId).then(setUser); }, [userId]);`.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-The Rules of Hooks — **call hooks only at the top level, only from React functions** — exist because React matches hooks to memory slots **by call order**; a conditional hook shifts every later slot to the wrong state. Enforce them with `eslint-plugin-react-hooks`. A **custom hook** is just a `use*` function that calls hooks; it shares **logic, not state** — each caller gets its own independent state.
+The Rules of Hooks — **call hooks only at the top level, only from React functions** — exist because React matches hooks to memory slots **by call order**; breaking this (including via an early `return` before a hook) throws a real error, **"Rendered fewer hooks than expected."** A **custom hook** is just a `use*` function that calls hooks and shares **logic, not state** — wrap any function it returns in `useCallback` so callers get a stable reference. `use()` is the one documented **exception**: it may be called conditionally, in loops, or after early returns, because it isn't part of the ordered hook-slot list at all.
 </Callout>
 
 export const quizRules = [
@@ -91,6 +305,7 @@ export const quizRules = [
       'Call hooks inside loops; return them',
     ],
     answer: 1,
+    explain: 'Hooks must be called unconditionally at the top level, and only from function components or other custom hooks — never plain functions.',
   },
   {
     q: 'Why can you not call a hook conditionally?',
@@ -101,6 +316,7 @@ export const quizRules = [
       'Hooks cannot be inside functions at all',
     ],
     answer: 1,
+    explain: 'React has no idea what a hook is "named" — it only tracks the position each call occupies in an ordered list per render, so a changed count or order corrupts that mapping.',
   },
   {
     q: 'What is a custom hook?',
@@ -111,16 +327,40 @@ export const quizRules = [
       'A special React API you import',
     ],
     answer: 1,
+    explain: 'There is no special API for custom hooks — any function starting with "use" that calls other hooks qualifies, and it shares logic, not a shared state instance.',
   },
   {
-    q: 'Two components both call `useCounter()`. What do they share?',
+    q: '```tsx\nfunction Profile({ userId }) {\n  const [user, setUser] = useState(null);\n  if (!userId) {\n    return <p>No user</p>;\n  }\n  useEffect(() => { fetchUser(userId).then(setUser); }, [userId]);\n  return <p>{user?.name}</p>;\n}\n```\nWhat happens when `userId` goes from truthy to falsy across two renders?',
     options: [
-      'The same shared state — changes in one affect the other',
-      'Only the logic — each component gets its own independent state',
-      'Nothing; custom hooks cannot hold state',
-      'A global variable',
+      'Nothing — React handles this gracefully',
+      'React throws "Rendered fewer hooks than expected" because the second render only calls one hook instead of two',
+      'The effect runs twice instead of once',
+      'TypeScript raises a compile error',
     ],
     answer: 1,
+    explain: 'Proven in the probe: React throws exactly "Rendered fewer hooks than expected. This may be caused by an accidental early return statement." when a render calls fewer hooks than the previous one.',
+  },
+  {
+    q: 'A custom hook returns a callback without wrapping it in useCallback. What is the consequence for a caller that passes it to a `React.memo` child?',
+    options: [
+      'None — custom hooks always return stable references',
+      'The child receives a new function reference every render, defeating the memoization',
+      'A compile error',
+      'The custom hook stops working entirely',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: without useCallback, the returned function is a fresh closure each render — exactly like any hand-written inline function, it breaks a memoized child\'s prop comparison.',
+  },
+  {
+    q: 'Why is `use()` allowed after a conditional early return, when `useState` is not?',
+    options: [
+      'It is not actually allowed — this is a common misconception',
+      '`use` is a documented, special-cased exception that does not participate in React\'s ordered per-render hook-slot list the way ordinary hooks do',
+      'Because `use` never suspends',
+      'Because `use` is not really a hook, it is a regular function with no rules at all',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: use() inside a component after an early return works correctly. react.dev documents this explicitly as an exception — it does not generalize to useState, useEffect, or hooks you write yourself.',
   },
 ];
 

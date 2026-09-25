@@ -1,0 +1,336 @@
+---
+title: 'useId & the Other Hooks'
+description: 'The smaller built-in hooks: useId for SSR-safe unique ids, useSyncExternalStore for external stores, useDeferredValue with an initialValue, useDebugValue for custom-hook labels, and useInsertionEffect for CSS-in-JS.'
+sidebar:
+  order: 7
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+Five more built-in hooks round out the module. Each solves one narrow, specific problem — you'll reach for most of them rarely, but when you need one, nothing else does the job.
+
+<Mermaid title="Which of the smaller hooks do I need?" code={pickDiagram} />
+
+export const pickDiagram = `flowchart TD
+  q1{"Need a unique id for\n aria-* / label/input pairing?"} -->|yes| useId
+  q1 -->|no| q2{"Reading from a store\noutside React (Redux, browser API)?"}
+  q2 -->|yes| useSyncExternalStore
+  q2 -->|no| q3{"Want to keep showing OLD UI\nwhile new input is expensive to render?"}
+  q3 -->|yes| useDeferredValue
+  q3 -->|no| q4{"Writing a CSS-in-JS library\nthat injects style tags?"}
+  q4 -->|yes| useInsertionEffect
+  q4 -->|no| useDebugValue["useDebugValue\n(labeling your own custom hook\nin React DevTools)"]`;
+
+## `useId`: SSR-safe unique ids
+
+`useId` generates a unique, stable id string for one component instance — built specifically so it matches between server-rendered HTML and the client's hydration pass, which a hand-rolled counter or `Math.random()` cannot guarantee.
+
+```jsx
+import { useId } from 'react';
+
+function PasswordField() {
+  const passwordHintId = useId();
+  return (
+    <>
+      <label>
+        Password:
+        <input type="password" aria-describedby={passwordHintId} />
+      </label>
+      <p id={passwordHintId}>The password should contain at least 18 characters</p>
+    </>
+  );
+}
+```
+
+Hardcoding an id string works for exactly one instance of a component. Render `PasswordField` twice and a hardcoded id collides — invalid HTML (duplicate ids) and a broken `aria-describedby` association, because the browser's accessibility tree can only associate an id with one element.
+
+```tsx
+// src/__tests__/useid-duplicate-ids.test.tsx
+import { useId } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+// 🔴 Hardcoded id: every instance collides — invalid HTML (duplicate ids)
+// and broken `aria-describedby` association for assistive tech.
+function BadField() {
+  return (
+    <>
+      <input aria-describedby="hint" />
+      <p id="hint">Required</p>
+    </>
+  );
+}
+
+// ✅ useId: unique per component instance, stable across the component's life.
+function GoodField() {
+  const hintId = useId();
+  return (
+    <>
+      <input aria-describedby={hintId} />
+      <p id={hintId}>Required</p>
+    </>
+  );
+}
+
+test('hardcoded ids collide when a component renders more than once', () => {
+  const { container } = render(
+    <>
+      <BadField />
+      <BadField />
+    </>,
+  );
+  const ids = [...container.querySelectorAll('p')].map((p) => p.id);
+  expect(ids).toEqual(['hint', 'hint']); // duplicate — invalid HTML
+});
+
+test('useId gives each instance a distinct id', () => {
+  const { container } = render(
+    <>
+      <GoodField />
+      <GoodField />
+    </>,
+  );
+  const ids = [...container.querySelectorAll('p')].map((p) => p.id);
+  expect(new Set(ids).size).toBe(2); // no collision
+});
+```
+
+```text
+✓ hardcoded ids collide when a component renders more than once
+✓ useId gives each instance a distinct id
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+Rendering **more than one independent React app on the same page**? Pass an `identifierPrefix` option to `createRoot`/`hydrateRoot` (and match it on the server's `renderToPipeableStream`) so ids from the two apps can never clash:
+
+```js
+const root1 = createRoot(document.getElementById('root1'), { identifierPrefix: 'app1-' });
+const root2 = createRoot(document.getElementById('root2'), { identifierPrefix: 'app2-' });
+```
+
+**Don't** use `useId` to generate keys for a list — it's for accessibility attribute ids on a *fixed* number of elements per component instance, not per-item identity in a dynamic list (use each item's own stable data id for that).
+
+## `useSyncExternalStore`: subscribing to state outside React
+
+When state lives in a store that isn't React's own (a global variable, a browser API, a third-party library like Redux or Zustand's underlying subscription model), `useSyncExternalStore` is the hook that subscribes a component to it correctly — including a `getServerSnapshot` for SSR and protection against "tearing" (different components seeing different values from the same store during one render). This module's sibling lesson, [External Stores](/react/en/state-and-data/external-stores/), covers the full API, the tearing problem, and the classic selector pitfall in depth — this is the one-paragraph pointer, not a repeat of it.
+
+## `useDeferredValue`: an `initialValue` for the first render (React 19)
+
+`useDeferredValue` lets an expensive part of the UI lag behind an urgent update instead of blocking it. Since React 19, it takes a second argument, `initialValue`, used only for the component's very first render:
+
+```jsx
+import { useState, useDeferredValue } from 'react';
+
+function SearchPage() {
+  const [query, setQuery] = useState('');
+  const deferredQuery = useDeferredValue(query, ''); // '' only on first render
+  // ...
+}
+```
+
+Without `initialValue`, react.dev is explicit that the hook "will not defer during the initial render" — the very first render just gets `value` directly. With it, the first render gets `initialValue` instead, letting you show an immediate placeholder before any real query has been typed.
+
+```tsx
+// src/__tests__/useid-and-other-hooks.test.tsx (excerpt)
+test('useDeferredValue(value, initialValue) uses initialValue on the FIRST render, not a deferred empty value', () => {
+  const seenOnFirstRender: string[] = [];
+  function Search({ query }: { query: string }) {
+    const deferred = useDeferredValue(query, 'placeholder');
+    seenOnFirstRender.push(deferred);
+    return <output>{deferred}</output>;
+  }
+  render(<Search query="hello" />);
+  // react.dev: "During the initial render, the returned deferred value will
+  // be initialValue... If omitted, useDeferredValue will not defer during
+  // the initial render." The first render shows the placeholder, not 'hello'.
+  expect(seenOnFirstRender[0]).toBe('placeholder');
+});
+```
+
+```text
+✓ useDeferredValue(value, initialValue) uses initialValue on the FIRST render, not a deferred empty value
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## `useDebugValue`: labeling a custom hook in DevTools
+
+`useDebugValue` adds zero runtime behavior — it exists purely so React DevTools can show a readable label next to a custom hook's state instead of an opaque list of raw values:
+
+```jsx
+function useOnlineStatus() {
+  const [isOnline, setIsOnline] = useState(true);
+  // ...
+  useDebugValue(isOnline ? 'Online' : 'Offline');
+  return isOnline;
+}
+```
+
+For a value that's expensive to format into a readable string, pass a second `format` function — React only calls it when DevTools is actually inspecting that hook, not on every render:
+
+```jsx
+useDebugValue(date, (d) => d.toDateString());
+```
+
+You'll only ever call this from inside a **custom** hook you're authoring — it has nothing to add inside an ordinary component.
+
+## `useInsertionEffect`: CSS-in-JS authors only
+
+`useInsertionEffect` fires **before** any layout effects, specifically so a CSS-in-JS library can inject `<style>` tags into the DOM before your component's `useLayoutEffect` calls try to read layout that depends on those styles being present. Proven below against `useLayoutEffect`:
+
+```tsx
+// src/__tests__/useid-and-other-hooks.test.tsx (excerpt)
+test('useInsertionEffect fires before useLayoutEffect', () => {
+  const log: string[] = [];
+  function Widget() {
+    useInsertionEffect(() => {
+      log.push('insertion');
+    });
+    useLayoutEffect(() => {
+      log.push('layout');
+    });
+    return null;
+  }
+  render(<Widget />);
+  expect(log).toEqual(['insertion', 'layout']);
+});
+```
+
+```text
+✓ useInsertionEffect fires before useLayoutEffect
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+react.dev is direct about the audience: this hook is "primarily intended for CSS-in-JS library authors." It also comes with sharp caveats — you cannot update state from inside it, refs aren't attached yet when it runs, and it only ever runs on the client. Application code should reach for `useEffect` or `useLayoutEffect`; if you're not building a styling library, you almost certainly don't need `useInsertionEffect`.
+
+## Mental Model
+
+These five hooks aren't a random grab-bag — each one exists because a *specific* boundary needs crossing that the core hooks (`useState`, `useEffect`, `useRef`) weren't designed for: `useId` crosses the server/client boundary for identifier generation, `useSyncExternalStore` crosses the React/non-React state boundary, `useDeferredValue` crosses the urgent/non-urgent rendering priority boundary, `useInsertionEffect` crosses the styles-before-layout timing boundary, and `useDebugValue` crosses the runtime/DevTools-inspection boundary. If you're not standing at one of those five specific boundaries, you don't need the hook.
+
+## Trade-offs
+
+| Hook | Benefit | Cost |
+| --- | --- | --- |
+| `useId` | Guarantees no id collisions across instances or server/client hydration | One more hook call for something a hardcoded string "looks like" it could do |
+| `useSyncExternalStore` | Correct, tear-free subscriptions to non-React state, with SSR support | More setup than reading a global variable directly (but that directness is exactly what causes tearing) |
+| `useDeferredValue(value, initialValue)` | An immediate, sensible first paint instead of blocking on the real value | One more argument to remember; only matters for the very first render |
+| `useInsertionEffect` | Styles land before layout effects read them | Only useful inside a styling library; wrong tool for ordinary app effects |
+
+## Common Misconceptions
+
+- **"A hardcoded id string is fine as long as I only render the component once."** True until someone reuses the component a second time on the same page — proven above, that's an immediate, invalid-HTML collision.
+- **"`useId` is for React keys in a list."** It isn't — it's for accessibility attribute ids on a fixed set of elements per instance. List keys need per-item data identity, not `useId`.
+- **"`useDeferredValue` without `initialValue` also defers on the first render."** react.dev states the opposite: with no `initialValue`, the hook does not defer on that first render at all — it only starts deferring on subsequent updates.
+- **"`useInsertionEffect` is just an earlier `useEffect` for general use."** It's a narrow tool for style injection with real restrictions (no state updates, refs not yet attached) — reaching for it in ordinary application code is almost always the wrong call.
+
+## Reading AI-generated code
+
+When generated code uses one of these smaller hooks (or should, but doesn't), check for these before trusting it:
+
+- Is an accessibility id (`aria-describedby`, `htmlFor`/`id` pairing) hardcoded as a string literal instead of generated with `useId`?
+- Is `useId` being used to key a `.map()`-rendered list, instead of each item's own stable identifier?
+- Does a component read from an external store (a module-level variable, `window`, a non-React library) directly during render instead of through `useSyncExternalStore`, risking tearing or a server/client mismatch?
+- Is `useDeferredValue` used without considering whether the first render should show `initialValue` or the real value immediately?
+- Is `useInsertionEffect` used for something other than style injection — a sign the author reached for it without understanding its narrow purpose and restrictions?
+
+<SpotTheBug code={`function PasswordField() {
+  return (
+    <>
+      <label>
+        Password:
+        <input type="password" aria-describedby="password-hint" />
+      </label>
+      <p id="password-hint">At least 18 characters</p>
+    </>
+  );
+}`}>
+The id `"password-hint"` is a string literal, not generated per instance. Render `<PasswordField />` more than once on the same page — a login form and a signup form both open in a modal stack, say — and every instance shares the exact same `id`. That is invalid HTML (duplicate ids are not allowed) and breaks the accessibility association for every instance after the first: `aria-describedby="password-hint"` can only ever point assistive technology at the *first* `<p id="password-hint">` in the document, not each field's own hint. Proven in the probe: two instances of a hardcoded-id component render two `<p>` elements with the identical id `"hint"`, while two instances of the same component using `useId` produce two distinct ids. The fix is exactly what this lesson opened with — replace the literal string with `const passwordHintId = useId();` and use it for both the `aria-describedby` and the `id`.
+</SpotTheBug>
+
+<Callout title="The one-line takeaway">
+Five narrow-purpose hooks round out the set: **`useId`** for SSR-safe, collision-free ids (not list keys), **`useSyncExternalStore`** for tear-free subscriptions to state outside React (full treatment in [External Stores](/react/en/state-and-data/external-stores/)), **`useDeferredValue(value, initialValue)`** (React 19) for a sensible first paint before deferring kicks in, **`useDebugValue`** for labeling your own custom hooks in DevTools, and **`useInsertionEffect`** for CSS-in-JS authors injecting styles before layout effects read them. Each solves one specific boundary problem — reach for one only when you're actually standing at that boundary.
+</Callout>
+
+export const quizUseId = [
+  {
+    q: 'What problem does useId solve that a hardcoded id string does not?',
+    options: [
+      'It makes ids shorter',
+      'It guarantees a unique id per component instance, avoiding collisions when a component renders more than once — and matches between server and client',
+      'It automatically styles the element',
+      'It replaces the need for keys in lists',
+    ],
+    answer: 1,
+    explain: 'A hardcoded id collides the moment a component is rendered twice on the same page. useId generates a unique, stable id per instance and is designed to match during SSR hydration.',
+  },
+  {
+    q: 'Should you use useId to generate keys for a list rendered with .map()?',
+    options: [
+      'Yes, always',
+      'No — useId is for accessibility attribute ids on a fixed set of elements per instance, not per-item list identity',
+      'Only for lists longer than 10 items',
+      'Only in Server Components',
+    ],
+    answer: 1,
+    explain: 'List keys need to track each item\'s own identity across reorders/insertions/removals — useId generates one stable id per hook call per component instance, which is a different kind of stability.',
+  },
+  {
+    q: 'When should you reach for useSyncExternalStore instead of just reading a module-level variable during render?',
+    options: [
+      'Never — reading a variable directly is always fine',
+      'When state lives outside React and you need tear-free, SSR-correct subscriptions to it',
+      'Only when using TypeScript',
+      'Only for CSS-in-JS',
+    ],
+    answer: 1,
+    explain: 'Reading external state directly during render risks "tearing" (different components seeing different values in one render) and has no defined SSR behavior. useSyncExternalStore exists specifically to solve both — see the External Stores lesson for the full picture.',
+  },
+  {
+    q: 'What does the initialValue argument to useDeferredValue(value, initialValue) do?',
+    options: [
+      'It sets the value forever, ignoring updates',
+      'It is used only for the component\'s very first render; without it, the hook does not defer on that first render at all',
+      'It disables deferring entirely',
+      'It only works in Server Components',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: with initialValue supplied, the first render returns initialValue rather than the real value. react.dev states that omitting it means the hook simply does not defer on the first render.',
+  },
+  {
+    q: 'Who is useInsertionEffect intended for?',
+    options: [
+      'Every component that needs an effect to run a little earlier than useEffect',
+      'CSS-in-JS library authors injecting <style> tags before layout effects read layout',
+      'Data-fetching code that needs to run before render',
+      'Any effect that reads a ref',
+    ],
+    answer: 1,
+    explain: 'react.dev states it is "primarily intended for CSS-in-JS library authors." It also cannot update state and refs are not yet attached when it runs — not a general-purpose early effect.',
+  },
+  {
+    q: '```tsx\nfunction PasswordField() {\n  return (\n    <>\n      <input aria-describedby="hint" />\n      <p id="hint">Required</p>\n    </>\n  );\n}\n```\nWhat happens when this component is rendered twice on the same page?',
+    options: [
+      'Nothing — React automatically makes duplicate ids unique',
+      'Both instances share the literal id "hint" — invalid HTML, and aria-describedby only ever associates with the first one in the document',
+      'A build error is thrown',
+      'The second instance silently does not render',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: two instances of this exact component produce two <p> elements both with id="hint" — a real duplicate-id collision. Replacing the literal with useId() produces two distinct ids instead.',
+  },
+];
+
+<Quiz client:visible id="hooks-useid" questions={quizUseId} />
+
+<ProgressTracker client:visible id="hooks-useid" />

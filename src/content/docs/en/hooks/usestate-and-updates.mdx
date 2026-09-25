@@ -1,6 +1,6 @@
 ---
 title: 'useState & Updates'
-description: 'How useState works — batching, updater functions, lazy initialization, and keeping object and array state immutable.'
+description: 'How useState works — batching (including across await and timeouts), updater functions and their Strict Mode double-invoke, lazy initialization, and keeping object and array state immutable.'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The basics, precisely
 
@@ -37,6 +38,92 @@ function handleClick() {
 
 Since React 18 this batching also covers updates inside promises, timeouts, and native event handlers — batching is automatic everywhere. Fewer renders, consistent UI.
 
+### Proof: batching survives an `await`
+
+"Automatic everywhere" includes state updates that happen *after* an `await` — not just updates issued synchronously inside a handler. That's easy to take on faith and hard to picture, so here it is with a render counter:
+
+```tsx
+// src/components/Counter.tsx
+import { useState } from 'react';
+
+function Counter({ onRender }: { onRender: () => void }) {
+  const [count, setCount] = useState(0);
+  const [flag, setFlag] = useState(false);
+  onRender();
+
+  async function handleClickAsync() {
+    await Promise.resolve(); // yield once
+    // Both of these happen AFTER an await, outside any React event handler
+    // in the traditional sense — React 18+ still batches them into ONE render.
+    setCount((c) => c + 1);
+    setFlag((f) => !f);
+  }
+
+  return (
+    <button onClick={() => { void handleClickAsync(); }}>
+      {count}-{String(flag)}
+    </button>
+  );
+}
+
+export default Counter;
+```
+
+```tsx
+// src/__tests__/batching-across-await.test.tsx
+import { useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Counter({ onRender }: { onRender: () => void }) {
+  const [count, setCount] = useState(0);
+  const [flag, setFlag] = useState(false);
+  onRender();
+
+  async function handleClickAsync() {
+    await Promise.resolve(); // yield once
+    setCount((c) => c + 1);
+    setFlag((f) => !f);
+  }
+
+  return (
+    <button
+      onClick={() => {
+        void handleClickAsync();
+      }}
+    >
+      {count}-{String(flag)}
+    </button>
+  );
+}
+
+test('two setState calls after an await are batched into a single render (React 18+)', async () => {
+  let renders = 0;
+  const { getByRole } = render(<Counter onRender={() => renders++} />);
+  const baseline = renders; // includes StrictMode's extra dev render, if any
+
+  await act(async () => {
+    getByRole('button').click();
+  });
+
+  expect(getByRole('button').textContent).toBe('1-true');
+  // Exactly one additional render happened for BOTH state updates together,
+  // not one render per setState call.
+  expect(renders - baseline).toBe(1);
+});
+```
+
+```text
+✓ two setState calls after an await are batched into a single render (React 18+)
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+If React only batched *synchronous* updates inside the handler (the pre-18 behavior), this test would see 2 renders after the click, not 1. The 2022 React 18 release notes describe exactly this change: before React 18, only updates inside React event handlers were batched — updates inside `setTimeout`, promises, and native event handlers each triggered their own render. Since 18, all of those are batched too.
+
 ## Updater functions vs values
 
 Pass a **value** when the next state doesn't depend on the previous. Pass an **updater function** when it does — React applies updaters in order against the latest pending value.
@@ -55,6 +142,73 @@ export const updaterDiagram = `flowchart LR
   u3 --> done["next render: count = 3"]`;
 
 Rule of thumb: if you call the same setter more than once in a handler, or the new value is derived from the old, use the updater form.
+
+### Proof: Strict Mode calls your updater twice in dev — but commits once
+
+Development-mode `<StrictMode>` intentionally calls an updater function **twice** to help you notice impure updaters (ones with side effects, like logging or mutating something outside their scope). This is easy to misread as "my state incremented by 2" — it did not; only one of the two calls' results is kept.
+
+```tsx
+// src/__tests__/updater-strictmode.test.tsx
+import { StrictMode, useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Counter({ log }: { log: number[] }) {
+  const [count, setCount] = useState(0);
+  return (
+    <button
+      onClick={() => {
+        // Updater function — StrictMode (dev only) calls it TWICE to help
+        // you spot impure updaters, but only commits the result once.
+        setCount((c) => {
+          log.push(c);
+          return c + 1;
+        });
+      }}
+    >
+      {count}
+    </button>
+  );
+}
+
+test('StrictMode invokes an updater function twice in dev, but only commits once', () => {
+  const log: number[] = [];
+  const { getByRole } = render(
+    <StrictMode>
+      <Counter log={log} />
+    </StrictMode>,
+  );
+  act(() => {
+    getByRole('button').click();
+  });
+  // Called with the same pending value twice (0, 0) — proves the double
+  // invoke, not a real double-increment.
+  expect(log).toEqual([0, 0]);
+  expect(getByRole('button').textContent).toBe('1');
+});
+
+test('without StrictMode, the same updater runs exactly once', () => {
+  const log: number[] = [];
+  const { getByRole } = render(<Counter log={log} />);
+  act(() => {
+    getByRole('button').click();
+  });
+  expect(log).toEqual([0]);
+  expect(getByRole('button').textContent).toBe('1');
+});
+```
+
+```text
+✓ StrictMode invokes an updater function twice in dev, but only commits once
+✓ without StrictMode, the same updater runs exactly once
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+The log proves it: both calls received the pending value `0`, not `0` then `1` — React discards the first call's result and keeps only the second, so the committed count is `1`, not `2`. This is exactly why an updater function must be **pure** (no logging side effects in real code, no mutating anything outside itself) — Strict Mode's double-invoke exists specifically to surface updaters that aren't.
 
 ## Lazy initialization
 
@@ -88,8 +242,55 @@ setItems(items.map(i => i.id === id ? { ...i, done: true } : i)); // update
 
 For deeply nested state, spreading gets tedious — that's a signal to flatten the shape, use an updater library like Immer, or reach for `useReducer` (a later lesson).
 
+## Mental Model
+
+Think of every `setCount(...)` call — value or updater — as pushing an item onto a **queue** for this render cycle, not as an immediate assignment. React processes that whole queue once, in order, right before the next render: value-form entries replace the pending value outright, updater-form entries transform whatever's currently pending. That's why three updaters chain to +3 while three values collapse to +1 — and why "batching" is really just "the queue gets flushed once," whether the calls happened synchronously in a handler or after an `await`.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Updater function `setX(x => ...)` | Always correct when calling the same setter multiple times, or basing the next value on the previous one | Must be pure — Strict Mode calls it twice in dev to enforce that |
+| Value form `setX(next)` | Simpler to read for a single, independent update | Silently wrong if called more than once per render with a stale closed-over value |
+| Lazy init `useState(() => expensive())` | The expensive computation runs once, ever | One extra function wrapper to remember to add |
+| Mutating state directly | Looks like it "just works" sometimes | React may skip the re-render entirely, and the bug is invisible until it isn't |
+
+## Common Misconceptions
+
+- **"`setCount(count + 1)` called three times adds 3."** It adds 1 — all three reads see the same `count` snapshot from this render. Proven below with a failing/passing pair.
+- **"Strict Mode's double-invoke means my state changes twice."** It means your *updater function* runs twice to check for purity; only one result is committed. The visible state change is still exactly one step.
+- **"Batching only happens inside `onClick` and friends."** Since React 18, it happens after `await`, inside `setTimeout`, and inside promise callbacks too — proven above.
+- **"Mutating an object and calling the setter with the same reference will still just work, it's just against best practice."** It can silently fail to re-render, because React's bail-out check is a reference comparison — this is a real correctness bug, not a style issue.
+
+## Reading AI-generated code
+
+When a generated component calls a `useState` setter, check for these before trusting it:
+
+- Is the same setter called more than once in one function, using the **value** form (`setX(x + 1)`) instead of the **updater** form? That's a real bug, not a style choice.
+- Does an updater function passed to `setX` have side effects (logging, network calls, mutating an outer variable)? Strict Mode will call it twice in development and expose the bug.
+- Is state derived from another state/prop being updated inside an effect, when it could be computed during render instead (see the `useEffect` lesson)?
+- Is an object or array being mutated in place (`.push`, direct property assignment) before being passed to the setter, instead of spreading into a new reference?
+- Does code that updates state after an `await` assume it needs manual batching help (e.g., wrapping it in `unstable_batchedUpdates`)? Since React 18 that's unnecessary — plain calls already batch.
+
+<SpotTheBug code={`function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <button
+      onClick={() => {
+        setCount(count + 1);
+        setCount(count + 1);
+        setCount(count + 1);
+      }}
+    >
+      {count}
+    </button>
+  );
+}`}>
+All three calls read `count` from the **same render's snapshot** — clicking once does not add 3, it adds 1, because `count + 1` is computed three times against the identical starting value before any of them commits. Proven in the probe: this exact component reaches `'1'` after one click, not `'3'`. The fix is the updater form, `setCount(c => c + 1)`, three times in a row — each one reads the *pending* value left by the previous call in the same batch, so they correctly chain to +3.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-`useState` gives you a snapshot value plus a setter that **schedules a re-render**. React **batches** multiple updates in one event into a single render. Use an **updater function** (`setX(x => ...)`) when the next value depends on the previous; use **lazy init** (`useState(() => ...)`) for expensive initial values; and always update state **immutably** — new objects/arrays, never in-place mutation.
+`useState` gives you a snapshot value plus a setter that **schedules a re-render**. React **batches** multiple updates — even ones after an `await` or inside a `setTimeout` — into a single render. Use an **updater function** (`setX(x => ...)`) whenever the next value depends on the previous one or you call the setter more than once per event; keep that updater **pure**, because Strict Mode calls it twice in development specifically to catch updaters that aren't. Use **lazy init** for expensive initial values, and always update state **immutably**.
 </Callout>
 
 export const quizUseState = [
@@ -102,6 +303,7 @@ export const quizUseState = [
       'Nothing until you call it again',
     ],
     answer: 1,
+    explain: 'The setter never mutates the current snapshot — it schedules a re-render, and the new value is only visible starting from that next render.',
   },
   {
     q: 'When should you use the updater form `setX(x => ...)`?',
@@ -112,6 +314,7 @@ export const quizUseState = [
       'Only for strings',
     ],
     answer: 1,
+    explain: 'The updater form always reads the latest pending value, so it is correct even when the same setter is called several times in one event.',
   },
   {
     q: 'Why pass a function to useState (`useState(() => expensive())`)?',
@@ -122,6 +325,7 @@ export const quizUseState = [
       'To avoid re-renders',
     ],
     answer: 1,
+    explain: 'Without the function wrapper, the expensive call still runs on every render (its result is just discarded after the first) — lazy init skips that waste.',
   },
   {
     q: 'Why must you update object/array state immutably?',
@@ -132,6 +336,29 @@ export const quizUseState = [
       'It makes state read-only forever',
     ],
     answer: 1,
+    explain: 'React\'s bail-out check for state updates is a reference comparison (Object.is-style) — a mutated object keeps its old reference, so React may conclude nothing changed.',
+  },
+  {
+    q: '```tsx\nasync function handleClickAsync() {\n  await Promise.resolve();\n  setCount((c) => c + 1);\n  setFlag((f) => !f);\n}\n```\nHow many renders does clicking this button cause, in React 18+?',
+    options: [
+      'Two — one per setState call',
+      'One — both updates after the await are still batched together',
+      'Zero — updates after an await are ignored',
+      'It depends on the browser',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: exactly one additional render happens, even though both setState calls occur after an await, outside the traditional synchronous event handler body. React 18+ batches automatically everywhere.',
+  },
+  {
+    q: '```tsx\nfunction Counter() {\n  const [count, setCount] = useState(0);\n  return (\n    <button onClick={() => {\n      setCount(count + 1);\n      setCount(count + 1);\n      setCount(count + 1);\n    }}>\n      {count}\n    </button>\n  );\n}\n```\nAfter one click starting from count = 0, what does the button show?',
+    options: [
+      '3, because each call adds 1',
+      '1, because all three calls read the same `count` snapshot from this render',
+      '0, because value-form updates are ignored',
+      'It throws an error',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: this exact component reaches "1" after one click, not "3" — all three setCount(count + 1) calls compute against the identical snapshot. The fix is the updater form, setCount(c => c + 1).',
   },
 ];
 

@@ -1,6 +1,6 @@
 ---
 title: 'useRef & the DOM'
-description: 'Refs for mutable values that survive renders without triggering them, refs for DOM access, and ref as a regular prop in React 19 (forwardRef is no longer needed).'
+description: 'Refs for mutable values that survive renders without triggering them, refs for DOM access, ref as a regular prop in React 19 (forwardRef is deprecated), ref callback cleanup functions, and useImperativeHandle.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## A ref is a box that survives renders
 
@@ -74,23 +75,207 @@ const ref = useRef(null);
 <MyInput ref={ref} placeholder="Search" />;
 ```
 
-The old form still works — `forwardRef` is not removed — but it's now legacy. New components should take `ref` as a prop.
+The old form still works, but react.dev is now explicit about its timeline, not just "legacy":
 
-For the rarer case where you want to expose a *custom* imperative API (not the raw DOM node) to a parent, `useImperativeHandle` lets you define exactly what the ref exposes:
+> `forwardRef` will be deprecated in a future release. — [react.dev/reference/react/forwardRef](https://react.dev/reference/react/forwardRef)
 
-```jsx
-function FancyInput({ ref }) {
-  const inputRef = useRef(null);
+That's stronger than "not needed anymore" — it's a stated deprecation plan. For new components, accept `ref` as a prop. If you're maintaining code that still uses `forwardRef`, it keeps working; there's no forcing function to migrate it today, but new components shouldn't add more of it.
+
+For the rarer case where you want to expose a *custom* imperative API (not the raw DOM node) to a parent, `useImperativeHandle` lets you define exactly what the ref exposes — and in React 19 it composes directly with `ref`-as-a-prop, no `forwardRef` wrapper required:
+
+```tsx
+// src/components/FancyInput.tsx
+import { useImperativeHandle, useRef } from 'react';
+
+type FancyInputHandle = {
+  focus: () => void;
+  clear: () => void;
+};
+
+function FancyInput({ ref }: { ref?: React.Ref<FancyInputHandle> }) {
+  const inputRef = useRef<HTMLInputElement>(null);
   useImperativeHandle(ref, () => ({
-    focus: () => inputRef.current.focus(),
-    clear: () => { inputRef.current.value = ''; },
+    focus: () => inputRef.current?.focus(),
+    clear: () => {
+      if (inputRef.current) inputRef.current.value = '';
+    },
   }));
   return <input ref={inputRef} />;
 }
+
+export default FancyInput;
 ```
 
+Type-checks clean under `tsc --strict` in a React 19.3 project — no `forwardRef`, no separate generic-parameter dance:
+
+```text
+$ tsc --strict --jsx react-jsx src/components/FancyInput.tsx
+No errors found
+```
+
+## Ref callback cleanup functions (React 19)
+
+A `ref` can also be a **callback** instead of a ref object — React calls it with the DOM node when attached. Since React 19, that callback may **return a cleanup function**, which React calls when the ref detaches (or right before running a new callback instance):
+
+```tsx
+// src/components/TrackedList.tsx
+import { useRef } from 'react';
+
+function TrackedList({ items }: { items: string[] }) {
+  const itemsRef = useRef<HTMLLIElement[]>([]);
+  return (
+    <ul>
+      {items.map((item) => (
+        <li
+          key={item}
+          ref={(node) => {
+            if (!node) return;
+            itemsRef.current.push(node);
+            // React 19: return a cleanup function from a ref callback.
+            return () => {
+              itemsRef.current = itemsRef.current.filter((n) => n !== node);
+            };
+          }}
+        >
+          {item}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export default TrackedList;
+```
+
+Before this cleanup form existed, the only way to know a node was detached was that React called the callback again with `null` — easy to forget, and impossible to pair cleanly with per-node setup. Proven below: cleanup runs both on unmount and whenever a *new* callback instance replaces the old one (React tears down the previous ref before attaching the next):
+
+```tsx
+// src/__tests__/ref-callback-cleanup.test.tsx
+import { useRef, useState } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function List({ log }: { log: string[] }) {
+  const itemsRef = useRef<HTMLLIElement[]>([]);
+  const [items] = useState(['a', 'b']);
+  return (
+    <ul>
+      {items.map((item) => (
+        <li
+          key={item}
+          ref={(node) => {
+            if (!node) return;
+            itemsRef.current.push(node);
+            log.push(`attach ${item}`);
+            // React 19: a ref callback may return a cleanup function.
+            return () => {
+              itemsRef.current = itemsRef.current.filter((n) => n !== node);
+              log.push(`detach ${item}`);
+            };
+          }}
+        >
+          {item}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+test('a ref callback cleanup function runs on unmount (React 19)', () => {
+  const log: string[] = [];
+  const { unmount } = render(<List log={log} />);
+  expect(log).toEqual(['attach a', 'attach b']);
+  log.length = 0;
+  unmount();
+  expect(log).toEqual(['detach a', 'detach b']);
+});
+
+test('a ref callback cleanup runs when a NEW callback instance is passed on re-render', () => {
+  const log: string[] = [];
+  function Box({ tag, log }: { tag: string; log: string[] }) {
+    return (
+      <div
+        ref={() => {
+          log.push(`attach:${tag}`);
+          return () => { log.push(`detach:${tag}`); };
+        }}
+      />
+    );
+  }
+  const { rerender } = render(<Box tag="v1" log={log} />);
+  expect(log).toEqual(['attach:v1']);
+  log.length = 0;
+  // A brand new inline function is passed -> React tears down the old ref
+  // (runs its cleanup) before attaching the new one.
+  rerender(<Box tag="v2" log={log} />);
+  expect(log).toEqual(['detach:v1', 'attach:v2']);
+});
+```
+
+```text
+✓ a ref callback cleanup function runs on unmount (React 19)
+✓ a ref callback cleanup runs when a NEW callback instance is passed on re-render
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+react.dev's own caveat backs the second test directly: *"When you pass a different `ref` callback, React will call the previous callback's cleanup function if provided."* — without a cleanup function, React instead falls back to calling the old callback with `null`, a behavior the docs say **will be removed in a future version**. Write the cleanup form for any ref callback you author today.
+
+## Mental Model
+
+A ref is React's answer to "I need a value that outlives this render, but I don't want React to schedule work because of it." State is for values the render function *depends on*; a ref is for values that live *alongside* the render function without participating in it. That is also why reading or writing `ref.current` during render (not inside an event handler or an effect) is a real bug, not a style nitpick — render is supposed to be a pure computation of "props/state → UI," and refs are mutable, unordered escape hatches from exactly that computation.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `ref` as a plain prop (React 19) | No `forwardRef` wrapper, less indirection, ref forwarding reads like any other prop | Requires React 19+; code targeting older React still needs `forwardRef` |
+| Ref callback with cleanup (React 19) | Correct per-node attach/detach pairing, even when the callback identity changes | One more function shape to learn versus the plain ref-object form |
+| `useImperativeHandle` | Exposes a minimal, intentional API instead of the raw DOM node | Extra indirection — only worth it when the raw node is the wrong thing to expose |
+| Reading a ref during render | None | Makes the component's output depend on mutable, un-tracked state — breaks the purity the compiler and Strict Mode rely on |
+
+## Common Misconceptions
+
+- **"`forwardRef` is legacy but perfectly fine to keep writing."** react.dev now states a deprecation plan for it, not just "no longer necessary" — new components should accept `ref` as a prop.
+- **"A ref callback without a return value just does nothing extra."** It still works today (React falls back to calling it with `null` on detach), but that fallback is explicitly slated for removal — always return a cleanup function in new code.
+- **"Reading `ref.current` during render is just as safe as reading state."** It isn't: refs are mutable and unordered with respect to rendering, so a value read during render can be stale, inconsistent under Strict Mode's double-render, or simply wrong the next time the same render is replayed.
+- **"`useImperativeHandle` replaces normal props."** It's for the rare case of exposing an *imperative* API (`focus()`, `scrollIntoView()`) — most component communication should still go through props and state, not a ref handle.
+
+## Reading AI-generated code
+
+When a generated component uses refs, check for these before trusting it:
+
+- Is `ref.current` read (or written) during the render body itself, instead of inside an event handler or an effect?
+- Does a component wrap itself in `forwardRef` when it could just accept `ref` as a prop (React 19+ target)?
+- Does a ref callback that needs to detach cleanly (adding to a list, subscribing to an observer) return a cleanup function, or does it rely on the deprecated null-callback fallback?
+- Is `useImperativeHandle` used to expose a whole DOM node (defeating its purpose) instead of a small, intentional set of methods?
+- Is a ref being used to store a value that's actually displayed in the UI — a sign it should be state instead?
+
+<SpotTheBug code={`function Clock() {
+  const ref = useRef(0);
+  ref.current = Date.now(); // written during render
+  const value = ref.current; // read during render
+  return <span>{value}</span>;
+}`}>
+Both the write and the read happen in the render body itself, not in an event handler or an effect. React's own lint rule for this (`react-hooks/refs`, part of `eslint-plugin-react-hooks@7.1.1`, the compiler-aware successor to the older `react-hooks` rule set) rejects it outright when run against this exact pattern:
+
+```text
+Error: Cannot access refs during render
+
+React refs are values that are not needed for rendering. Refs should only be
+accessed outside of render, such as in event handlers or effects. Accessing
+a ref value (the `current` property) during render can cause your component
+not to update as expected (https://react.dev/reference/react/useRef).
+```
+
+The fix is to move both the write and the read into an effect (or an event handler) and store anything the UI needs to display in **state**, not a ref — a ref's mutations are invisible to React's scheduler, so a component that reads one during render can silently render stale or inconsistent values, especially under Strict Mode's extra render pass or the React Compiler's memoization, both of which assume render is a pure function of props and state.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-A **ref** is a mutable `{ current }` box that persists across renders but **does not trigger one** — use it for values you must remember but not display (timer ids, previous values) and for **DOM access** (focus, measure) as an escape hatch. In **React 19, `ref` is a normal prop**, so `forwardRef` is legacy — accept `ref` and pass it down directly. Use `useImperativeHandle` only to expose a custom imperative API instead of the raw node.
+A **ref** is a mutable `{ current }` box that persists across renders but **does not trigger one** — use it for values you must remember but not display (timer ids, previous values) and for **DOM access** (focus, measure) as an escape hatch, never read or write it during render. In **React 19, `ref` is a normal prop** (`forwardRef` is now explicitly on a deprecation path), a **ref callback may return a cleanup function**, and `useImperativeHandle` composes with both to expose a custom imperative API instead of the raw node.
 </Callout>
 
 export const quizRef = [
@@ -103,6 +288,7 @@ export const quizRef = [
       'State does not survive re-renders',
     ],
     answer: 1,
+    explain: 'Both survive re-renders, but only a state update schedules one. Mutating ref.current is invisible to React\'s scheduler.',
   },
   {
     q: 'What is a good use for a ref?',
@@ -113,6 +299,7 @@ export const quizRef = [
       'Replacing all state',
     ],
     answer: 1,
+    explain: 'Refs are for values the render output does not depend on directly — timer ids, previous values, imperative DOM handles.',
   },
   {
     q: 'In React 19, how do you pass a ref through your own component to an inner DOM node?',
@@ -123,16 +310,40 @@ export const quizRef = [
       'Use a global variable',
     ],
     answer: 1,
+    explain: 'React 19 made ref a regular prop for function components, removing the need for forwardRef in new code.',
   },
   {
-    q: 'What does useImperativeHandle do?',
+    q: 'What does react.dev say about forwardRef\'s future, beyond calling it "legacy"?',
     options: [
-      'Triggers a re-render',
-      'Lets a component expose a custom imperative API through its ref instead of the raw DOM node',
-      'Replaces useEffect',
-      'Memoizes a value',
+      'Nothing — it will be supported forever with no changes',
+      '"forwardRef will be deprecated in a future release"',
+      'It was removed already in React 19',
+      'It only works with class components now',
     ],
     answer: 1,
+    explain: 'react.dev\'s forwardRef reference page states directly: "forwardRef will be deprecated in a future release." — a stated timeline, not just a style recommendation.',
+  },
+  {
+    q: '```tsx\n<li\n  ref={(node) => {\n    if (!node) return;\n    list.push(node);\n    return () => {\n      list.splice(list.indexOf(node), 1);\n    };\n  }}\n/>\n```\nWhen does the returned function run?',
+    options: [
+      'Never — return values from ref callbacks are ignored',
+      'When this `<li>` unmounts, or when a new ref callback instance replaces this one',
+      'On every render, regardless of whether the ref changed',
+      'Only if you call it manually',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: the cleanup function returned from a ref callback (React 19) runs both on unmount and when a new callback instance is passed on re-render, before the new one attaches.',
+  },
+  {
+    q: '```tsx\nfunction Clock() {\n  const ref = useRef(0);\n  ref.current = Date.now();\n  const value = ref.current;\n  return <span>{value}</span>;\n}\n```\nWhat is wrong with this component?',
+    options: [
+      'Nothing — refs can be read and written anywhere',
+      'It reads and writes ref.current during render, which React\'s lint rule (react-hooks/refs) flags as an error because render must stay pure',
+      'useRef cannot hold numbers',
+      'It should use useState instead of useRef for the timer id',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: eslint-plugin-react-hooks\'s `refs` rule throws "Cannot access refs during render" for exactly this pattern. Refs must only be read/written in event handlers or effects.',
   },
 ];
 

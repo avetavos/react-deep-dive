@@ -1,6 +1,6 @@
 ---
 title: 'Rules & Custom Hooks'
-description: 'ทำไม Rules of Hooks ถึงมี (call order), lint plugin ที่บังคับใช้กฎเหล่านี้ และการแยก custom hook มา reuse stateful logic'
+description: 'ทำไม Rules of Hooks ถึงมี (call order), error จริงที่ React throw เมื่อทำผิดกฎ, lint plugin ที่บังคับใช้กฎเหล่านี้, การแยก custom hook ที่ return function แบบ stable และข้อยกเว้น "use" ต่อกฎ'
 sidebar:
   order: 6
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## สองกฎ
 
@@ -45,6 +46,53 @@ export const ruleDiagram = `flowchart TB
 
 บังคับใช้อัตโนมัติด้วย lint rule ทางการ (**eslint-plugin-react-hooks**) — plugin นี้จับ hook แบบมีเงื่อนไขและ effect dependency ที่ขาดก่อน ship
 
+### พิสูจน์: error จริง ไม่ใช่แค่ lint warning
+
+Rules of Hooks ไม่ได้เป็นแค่ธรรมเนียมของ lint — การทำผิดกฎตอน runtime ในแบบที่ static analysis ของ ESLint จับไม่ได้ (เช่นเงื่อนไขที่ *บางครั้ง* เท่านั้นที่ทำให้จำนวน hook ลดลง) จะ throw error จริงของ React ไม่ใช่บั๊กเงียบ ๆ:
+
+```tsx
+// src/__tests__/conditional-hook-error.test.tsx
+import { useState } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+
+afterEach(cleanup);
+
+function Buggy({ skip }: { skip: boolean }) {
+  const [a] = useState('a');
+  if (!skip) {
+    // 🔴 Conditional hook call — only runs on some renders.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useState('b');
+  }
+  return <span>{a}</span>;
+}
+
+test('calling a hook conditionally on re-render throws React\'s real "Rendered fewer hooks" error', () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { rerender } = render(<Buggy skip={false} />); // useState('a'), useState('b')
+  expect(() => {
+    rerender(<Buggy skip />); // this render only calls useState('a') — count changed
+  }).toThrowError(/Rendered fewer hooks than expected/);
+  spy.mockRestore();
+});
+```
+
+```text
+✓ calling a hook conditionally on re-render throws React's real "Rendered fewer hooks" error
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ข้อความจริงที่ React throw จับได้ในโพรบ:
+
+```text
+Rendered fewer hooks than expected. This may be caused by an accidental early return statement.
+```
+
+ประโยคที่สองคือเบาะแสจริง: สาเหตุที่พบบ่อยกว่าในโค้ดจริงไม่ใช่ `if` ที่เขียนล้อม hook เอง — แต่เป็น `return` ก่อนเวลาที่วางไว้ *ก่อน* hook ที่เคยรันทุก render
+
 ## Custom hooks: การแชร์ stateful logic
 
 **custom hook** คือ function ที่ชื่อขึ้นต้นด้วย `use` และเรียก hook อื่น เท่านั้นเอง — ไม่มี API พิเศษ แต่ให้คุณแยกและ reuse *stateful logic* (ไม่ใช่ UI) ข้าม component
@@ -77,8 +125,174 @@ function StatusBar() {
 
 เมื่อไรควรแยก custom hook: เมื่อสอง component ต้องการ stateful behavior เดียวกัน หรือเมื่อ logic ของ component ซับซ้อนพอที่การตั้งชื่อ (`useForm`, `useDebouncedValue`, `useFetch`) ทำให้ component ชัดขึ้น
 
+### custom hook ที่เขียนดี return function แบบ stable
+
+custom hook ที่ส่ง callback กลับมา (สำหรับ memoized child หรือ effect dependency ที่อื่น) ควร return **function reference เดียวกัน** ข้าม re-render เมื่อไม่มีอะไรที่มันขึ้นกับเปลี่ยน — เหมือนกับที่คุณอยากได้จาก function ใดก็ตามที่เขียนมือ `useCallback` ข้างในตัว hook คือสิ่งที่ทำให้เป็นจริง:
+
+```tsx
+// src/hooks/useCounter.ts
+import { useCallback, useState } from 'react';
+
+function useCounter() {
+  const [count, setCount] = useState(0);
+  const increment = useCallback(() => setCount((c) => c + 1), []);
+  return { count, increment };
+}
+
+export default useCounter;
+```
+
+```tsx
+// src/__tests__/custom-hook-stable-fn.test.tsx
+import { useCallback, useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function useCounter() {
+  const [count, setCount] = useState(0);
+  const increment = useCallback(() => setCount((c) => c + 1), []);
+  return { count, increment };
+}
+
+test('a well-written custom hook returns the same function reference across re-renders', () => {
+  const seen: (() => void)[] = [];
+  function Probe({ unrelated }: { unrelated: number }) {
+    const { increment } = useCounter();
+    seen.push(increment);
+    return <span>{unrelated}</span>;
+  }
+  const { rerender } = render(<Probe unrelated={1} />);
+  rerender(<Probe unrelated={2} />); // re-render for an unrelated reason
+  expect(seen).toHaveLength(2);
+  expect(seen[0]).toBe(seen[1]); // same reference, not a new one each render
+});
+
+test('calling increment() twice via act reaches count 2', () => {
+  function Probe() {
+    const { count, increment } = useCounter();
+    return <button onClick={increment}>{count}</button>;
+  }
+  const { getByRole } = render(<Probe />);
+  act(() => getByRole('button').click());
+  act(() => getByRole('button').click());
+  expect(getByRole('button').textContent).toBe('2');
+});
+```
+
+```text
+✓ a well-written custom hook returns the same function reference across re-renders
+✓ calling increment() twice via act reaches count 2
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+ถ้า `useCounter` เขียน `const increment = () => setCount(c => c + 1);` โดยไม่มี `useCallback` test แรกจะ fail: ทุก render จะส่ง function ใหม่กลับมา ซึ่งเป็นสิ่งที่ทำลาย `React.memo` child หรือทำให้ effect ที่ขึ้นกับมันรันใหม่โดยไม่จำเป็นพอดี (ดูบท memoization)
+
+## ข้อยกเว้น `use` ต่อ Rules of Hooks
+
+`use` (มาพร้อม Server Components และใช้ใน Client Components ได้ด้วยสำหรับแกะ promise ที่ส่งมาจาก server) **ไม่ถูกผูก** ด้วยกฎ "top level เท่านั้น" แบบที่ `useState`/`useEffect`/ฯลฯ ถูกผูก มันคือ built-in ตัวเดียวที่ถูกออกแบบมาให้เรียกใน condition, loop และหลัง early return ได้:
+
+```tsx
+// src/components/Message.tsx
+import { use } from 'react';
+
+function Message({ show, promise }: { show: boolean; promise: Promise<string> }) {
+  // ✅ `use` is allowed after a conditional early return — a real hook
+  // (useState/useEffect/etc.) would violate the Rules of Hooks here.
+  if (!show) return <p>hidden</p>;
+  const text = use(promise);
+  return <p>{text}</p>;
+}
+
+export default Message;
+```
+
+```tsx
+// src/__tests__/use-conditional.test.tsx
+import { Suspense, use } from 'react';
+import { act, render, cleanup, screen, waitFor } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Message({ show, promise }: { show: boolean; promise: Promise<string> }) {
+  if (!show) return <p>hidden</p>;
+  const text = use(promise);
+  return <p>{text}</p>;
+}
+
+test('use() may be called after an early return, unlike a real Hook', async () => {
+  const promise = Promise.resolve('loaded');
+  await act(async () => {
+    render(
+      <Suspense fallback={<p>loading</p>}>
+        <Message show promise={promise} />
+      </Suspense>,
+    );
+  });
+  await waitFor(() => expect(screen.getByText('loaded')).toBeTruthy());
+});
+```
+
+```text
+✓ use() may be called after an early return, unlike a real Hook
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+อย่าตีความว่านี่คือใบอนุญาตให้เรียก `useState` หลัง condition ด้วย — `use` เป็นข้อยกเว้นแบบพิเศษเฉพาะ (มันไม่ถูก track ด้วย per-render hook-slot list แบบ hook ปกติ) ไม่ใช่ช่องโหว่ในตัวกฎเอง กฎยังใช้กับ hook ทุกตัวที่ชื่อไม่ได้มาจาก API `use()` ของ React เอง
+
+## Mental Model
+
+Rules of Hooks ไม่ใช่แนวทาง style ที่วางทับ React — มันคือผลลัพธ์ตรงจากกลไก memory-slot ที่พูดไว้ใน intro ของโมดูล ถ้า hook ถูกจับคู่ด้วยชื่อ การเรียกแบบมีเงื่อนไขจะไม่มีปัญหาเลย เพราะมันถูกจับคู่ด้วย *ตำแหน่งใน list ที่เรียงลำดับตายตัว* รูปทรงของ list ต้องเหมือนกันทุก render เต็ม ๆ `use` ได้รับสิทธิ์ทำลายกฎนี้เพราะมันไม่ได้เป็นส่วนหนึ่งของ list นั้นเลย — มันอ่านตรงจาก cache ที่รู้จัก Suspense คีย์ด้วย promise/context ที่คุณส่งเข้าไป ซึ่งเป็นเหตุผลตรง ๆ ว่าทำไมมันไม่ต้องการความเสถียรของตำแหน่ง
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| บังคับใช้กฎด้วย ESLint (`eslint-plugin-react-hooks`) | จับการทำผิดกฎส่วนใหญ่ได้ก่อนรันจริง | บางการทำผิด (เงื่อนไขที่ *บางครั้ง* เท่านั้นที่ต่างออกไป) โผล่แค่ตอน runtime |
+| custom hook ที่ return ด้วย `useCallback` ห่อไว้ | ส่งให้ memoized child / effect deps ได้ปลอดภัย | code ในตัว hook เพิ่มขึ้นนิดหน่อย |
+| `use()` สำหรับแกะ data แบบมีเงื่อนไข | ข้าม fetch/suspend งานที่ไม่ต้องการได้ | ใช้ได้แค่กับ promise และ context — ไม่ใช่ escape hatch ทั่วไปสำหรับ hook อื่น |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ทำผิด Rules of Hooks แค่ lint warning ไม่ใช่บั๊กจริง"** มันโยน runtime error จริงได้ — "Rendered fewer hooks than expected" — พิสูจน์แล้วด้านบน ไม่ใช่แค่ linter บ่น
+- **"early `return` ก่อน hook ไม่เป็นไรตราบใดที่ hook เองไม่ได้อยู่ใน `if`"** อันตรายพอ ๆ กัน: early return ข้ามการเรียก hook ในบาง render ซึ่งเป็นปัญหา "จำนวนเปลี่ยน" แบบเดียวกับที่ condition ทำให้เกิด
+- **"custom hook return reference แบบ stable ให้อัตโนมัติ"** ไม่จริง — custom hook ก็แค่ function ถ้ามันส่ง closure ใหม่ทุกครั้งโดยไม่มี `useCallback` ผู้เรียกจะได้ reference ใหม่ทุก render เหมือนเขียน inline เอง
+- **"`use` พิสูจน์ว่าเรียก hook ไหนก็ได้แบบมีเงื่อนไขถ้าระวังพอ"** `use` เป็นข้อยกเว้นพิเศษที่ระบุไว้ชัดเจนและสร้างต่างจาก hook ปกติ — มันไม่ generalize ไปถึง `useState`, `useEffect` หรือ hook ใดที่คุณหรือ library author เขียนเอง
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ custom hook หรือ component ที่ generate มาใช้ hook ให้เช็กสิ่งเหล่านี้ก่อนเชื่อมัน:
+
+- มี hook ตัวไหนถูกเรียกหลัง early `return`, ใน `if`/`for`/`while` หรือใน nested callback — อะไรก็ตามที่ไม่ใช่ top level ของ component หรือ hook อื่นหรือเปล่า?
+- custom hook return function โดยไม่ห่อด้วย `useCallback` ทั้งที่ function นั้นถูกส่งให้ memoized child หรือใช้เป็น effect dependency ที่อื่นหรือเปล่า?
+- `use()` ถูกมองว่าปลอดภัยสำหรับเรียกแบบมีเงื่อนไข แต่ code จริงเรียก `useState`/`useEffect`/ฯลฯ แบบมีเงื่อนไขด้วย โดยสมมติว่าข้อยกเว้นเดียวกันใช้ได้หรือเปล่า?
+- custom hook แชร์ state ข้าม component แบบเงียบ ๆ (เช่นผ่าน module-level variable) ทั้งที่ควรให้แต่ละผู้เรียกได้ state อิสระหรือเปล่า?
+- จำนวน hook ของ component จะเปลี่ยนจริงระหว่าง render สำหรับ prop combination บางแบบที่ไม่ชัดเจนตอนอ่านหัว function หรือเปล่า?
+
+<SpotTheBug code={`function Profile({ userId }) {
+  const [user, setUser] = useState(null);
+
+  if (!userId) {
+    return <p>No user selected</p>;
+  }
+
+  useEffect(() => {
+    fetchUser(userId).then(setUser);
+  }, [userId]);
+
+  return <p>{user?.name}</p>;
+}`}>
+`useEffect` อยู่ **หลัง** early `return` — เมื่อ `userId` เป็น falsy render นี้เรียกแค่ hook เดียว (`useState`); เมื่อเป็น truthy render นี้เรียกสองตัว (`useState` แล้ว `useEffect`) นั่นคือปัญหา "จำนวน hook เปลี่ยนข้าม render" ที่ Rules of Hooks มีไว้ป้องกันตรง ๆ และไม่ใช่แค่เรื่อง style: พิสูจน์แล้วก่อนหน้าในบทนี้ component ที่จำนวน hook ลดลงข้าม render จะ throw runtime error จริงของ React ว่า "Rendered fewer hooks than expected. This may be caused by an accidental early return statement." — ซึ่งตรงกับสิ่งที่เกิดขึ้นตรงนี้เป๊ะ ทางแก้คือเรียก `useEffect` (และ hook อื่น) ก่อน conditional `return` ใด ๆ แล้วย้ายเช็ก "ควร fetch ไหม" เข้าไปในตัว effect แทน: `useEffect(() => { if (!userId) return; fetchUser(userId).then(setUser); }, [userId]);`
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-Rules of Hooks — **เรียก hook ที่ top level เท่านั้น เรียกจาก React function เท่านั้น** — มีเพราะ React จับคู่ hook กับ memory slot **ตามลำดับการเรียก** hook แบบมีเงื่อนไขทำให้ slot ที่เหลือทั้งหมดเลื่อนไปอ่าน state ผิด บังคับใช้ด้วย `eslint-plugin-react-hooks` **custom hook** คือแค่ function `use*` ที่เรียก hook อื่น โดยแชร์ **logic ไม่ใช่ state** — ผู้เรียกแต่ละคนได้ state ของตัวเองอิสระ
+Rules of Hooks — **เรียก hook ที่ top level เท่านั้น เรียกจาก React function เท่านั้น** — มีเพราะ React จับคู่ hook กับ memory slot **ตามลำดับการเรียก** การทำผิดกฎนี้ (รวมถึงผ่าน early `return` ก่อน hook) โยน error จริง **"Rendered fewer hooks than expected"** **custom hook** คือแค่ function `use*` ที่เรียก hook อื่นและแชร์ **logic ไม่ใช่ state** — ห่อ function ที่มัน return ด้วย `useCallback` เพื่อให้ผู้เรียกได้ reference แบบ stable `use()` คือ**ข้อยกเว้น**ที่มีเอกสารรองรับตัวเดียว: เรียกแบบมีเงื่อนไข ใน loop หรือหลัง early return ได้ เพราะมันไม่ได้เป็นส่วนหนึ่งของ ordered hook-slot list เลย
 </Callout>
 
 export const quizRules = [
@@ -91,6 +305,7 @@ export const quizRules = [
       'เรียก hook ใน loop; return ค่าออกมา',
     ],
     answer: 1,
+    explain: 'hook ต้องถูกเรียกแบบไม่มีเงื่อนไขที่ top level และเรียกจาก function component หรือ custom hook อื่นเท่านั้น — ไม่ใช่ function ธรรมดา',
   },
   {
     q: 'ทำไมเรียก hook แบบมีเงื่อนไขไม่ได้?',
@@ -101,6 +316,7 @@ export const quizRules = [
       'hook อยู่ใน function ไม่ได้เลย',
     ],
     answer: 1,
+    explain: 'React ไม่รู้จัก "ชื่อ" ของ hook เลย — มันแค่ track ตำแหน่งที่แต่ละ call ครองใน list ที่เรียงลำดับต่อ render จำนวนหรือลำดับที่เปลี่ยนจึงทำลาย mapping นั้น',
   },
   {
     q: 'custom hook คืออะไร?',
@@ -111,16 +327,40 @@ export const quizRules = [
       'React API พิเศษที่ต้อง import',
     ],
     answer: 1,
+    explain: 'ไม่มี API พิเศษสำหรับ custom hook — function ใดก็ตามที่ชื่อขึ้นต้นด้วย "use" และเรียก hook อื่นถือว่าใช่ และมันแชร์ logic ไม่ใช่ state instance ที่แชร์กัน',
   },
   {
-    q: 'สอง component เรียก `useCounter()` ทั้งคู่ ทั้งสองแชร์อะไรกัน?',
+    q: '```tsx\nfunction Profile({ userId }) {\n  const [user, setUser] = useState(null);\n  if (!userId) {\n    return <p>No user</p>;\n  }\n  useEffect(() => { fetchUser(userId).then(setUser); }, [userId]);\n  return <p>{user?.name}</p>;\n}\n```\nเมื่อ `userId` เปลี่ยนจาก truthy เป็น falsy ข้ามสอง render จะเกิดอะไรขึ้น?',
     options: [
-      'state เดียวกันที่แชร์กัน — เปลี่ยนอันหนึ่งกระทบอีกอัน',
-      'แค่ logic — แต่ละ component ได้ state ของตัวเองอิสระ',
-      'ไม่มีอะไร; custom hook ถือ state ไม่ได้',
-      'global variable',
+      'ไม่มีอะไร — React จัดการเรื่องนี้ให้อย่างนุ่มนวล',
+      'React throw "Rendered fewer hooks than expected" เพราะ render ที่สองเรียก hook แค่ตัวเดียวแทนที่จะเป็นสองตัว',
+      'effect รันสองครั้งแทนที่จะเป็นครั้งเดียว',
+      'TypeScript แจ้ง compile error',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: React throw ตรง ๆ ว่า "Rendered fewer hooks than expected. This may be caused by an accidental early return statement." เมื่อ render หนึ่งเรียก hook น้อยกว่า render ก่อนหน้า',
+  },
+  {
+    q: 'custom hook return callback โดยไม่ห่อด้วย useCallback ผลที่ตามมาสำหรับผู้เรียกที่ส่งมันให้ `React.memo` child คืออะไร?',
+    options: [
+      'ไม่มีผล — custom hook return reference แบบ stable เสมอ',
+      'child ได้ function reference ใหม่ทุก render ทำลาย memoization',
+      'compile error',
+      'custom hook หยุดทำงานทั้งหมด',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: ถ้าไม่มี useCallback function ที่ return มาเป็น closure ใหม่ทุก render — เหมือน function inline ที่เขียนมือ มันทำลายการเทียบ prop ของ memoized child',
+  },
+  {
+    q: 'ทำไม `use()` เรียกหลัง conditional early return ได้ ในขณะที่ `useState` ไม่ได้?',
+    options: [
+      'จริง ๆ ไม่ได้ — นี่เป็นความเข้าใจผิดที่พบบ่อย',
+      '`use` เป็นข้อยกเว้นพิเศษที่มีเอกสารรองรับ ไม่ได้เข้าร่วม ordered per-render hook-slot list แบบที่ hook ปกติต้องเข้าร่วม',
+      'เพราะ `use` ไม่เคย suspend',
+      'เพราะ `use` ไม่ใช่ hook จริง ๆ มันเป็น function ธรรมดาที่ไม่มีกฎอะไรเลย',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: use() ใน component หลัง early return ทำงานถูกต้อง react.dev ระบุข้อยกเว้นนี้ไว้ชัดเจน — มันไม่ generalize ไปถึง useState, useEffect หรือ hook ที่คุณเขียนเอง',
   },
 ];
 

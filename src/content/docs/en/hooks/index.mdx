@@ -20,11 +20,12 @@ The trick is that React associates each hook call with a slot in the component's
 
 | Lesson | What you'll learn |
 |--------|-------------------|
-| useState & updates | State, batching, updater functions, lazy init, immutability |
-| useEffect & effects | Synchronizing with external systems — and when you don't need it |
-| useRef & the DOM | Mutable values, DOM refs, and ref-as-a-prop in React 19 |
-| Memoization & the compiler | useMemo/useCallback/memo — and how the React Compiler changes the game |
-| Rules & custom hooks | Why the rules exist, and extracting reusable stateful logic |
+| useState & updates | State, batching (including across `await`), updater functions and their Strict Mode double-invoke, lazy init, immutability |
+| useEffect & effects | Synchronizing with external systems, effect ordering, `useEffectEvent` (19.2), and abort-safe fetching |
+| useRef & the DOM | Mutable values, DOM refs, ref-as-a-prop in React 19, ref callback cleanup, and `useImperativeHandle` |
+| Memoization & the compiler | useMemo/useCallback/memo, reading real React Compiler output, and when manual memoization still matters |
+| Rules & custom hooks | Why the rules exist, the real error when you break them, stable custom-hook returns, and the `use` exception |
+| useId & the other hooks | `useId`, `useSyncExternalStore`, `useDeferredValue`'s `initialValue`, `useDebugValue`, and `useInsertionEffect` |
 
 ## The one thing to hold onto
 

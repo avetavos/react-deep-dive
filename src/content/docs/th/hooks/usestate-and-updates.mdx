@@ -1,6 +1,6 @@
 ---
 title: 'useState & Updates'
-description: 'useState ทำงานอย่างไร — batching, updater function, lazy initialization และการทำให้ object กับ array state เป็น immutable'
+description: 'useState ทำงานอย่างไร — batching (รวมถึงข้าม await และ timeout), updater function กับ Strict Mode double-invoke, lazy initialization และการทำให้ object กับ array state เป็น immutable'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## พื้นฐานแบบเป๊ะ ๆ
 
@@ -37,6 +38,92 @@ function handleClick() {
 
 ตั้งแต่ React 18 การ batch นี้ครอบคลุมการอัปเดตใน promise, timeout และ native event handler ด้วย — batch เกิดอัตโนมัติทุกที่ render น้อยลง UI สอดคล้องกัน
 
+### พิสูจน์: batching อยู่รอดข้าม `await`
+
+"อัตโนมัติทุกที่" รวมถึงการอัปเดต state ที่เกิด *หลัง* `await` ด้วย — ไม่ใช่แค่การอัปเดตที่ยิงแบบ synchronous ใน handler เชื่อเฉย ๆ ก็ได้แต่นึกภาพยาก เลยพิสูจน์ด้วย render counter:
+
+```tsx
+// src/components/Counter.tsx
+import { useState } from 'react';
+
+function Counter({ onRender }: { onRender: () => void }) {
+  const [count, setCount] = useState(0);
+  const [flag, setFlag] = useState(false);
+  onRender();
+
+  async function handleClickAsync() {
+    await Promise.resolve(); // yield once
+    // Both of these happen AFTER an await, outside any React event handler
+    // in the traditional sense — React 18+ still batches them into ONE render.
+    setCount((c) => c + 1);
+    setFlag((f) => !f);
+  }
+
+  return (
+    <button onClick={() => { void handleClickAsync(); }}>
+      {count}-{String(flag)}
+    </button>
+  );
+}
+
+export default Counter;
+```
+
+```tsx
+// src/__tests__/batching-across-await.test.tsx
+import { useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Counter({ onRender }: { onRender: () => void }) {
+  const [count, setCount] = useState(0);
+  const [flag, setFlag] = useState(false);
+  onRender();
+
+  async function handleClickAsync() {
+    await Promise.resolve(); // yield once
+    setCount((c) => c + 1);
+    setFlag((f) => !f);
+  }
+
+  return (
+    <button
+      onClick={() => {
+        void handleClickAsync();
+      }}
+    >
+      {count}-{String(flag)}
+    </button>
+  );
+}
+
+test('two setState calls after an await are batched into a single render (React 18+)', async () => {
+  let renders = 0;
+  const { getByRole } = render(<Counter onRender={() => renders++} />);
+  const baseline = renders; // includes StrictMode's extra dev render, if any
+
+  await act(async () => {
+    getByRole('button').click();
+  });
+
+  expect(getByRole('button').textContent).toBe('1-true');
+  // Exactly one additional render happened for BOTH state updates together,
+  // not one render per setState call.
+  expect(renders - baseline).toBe(1);
+});
+```
+
+```text
+✓ two setState calls after an await are batched into a single render (React 18+)
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ถ้า React batch แค่การอัปเดตแบบ synchronous ใน handler เท่านั้น (พฤติกรรมก่อน 18) test นี้จะเห็น 2 render หลังคลิก ไม่ใช่ 1 release note ของ React 18 ปี 2022 อธิบายการเปลี่ยนแปลงนี้ตรง ๆ: ก่อน React 18 มีแค่การอัปเดตใน React event handler เท่านั้นที่ batch — การอัปเดตใน `setTimeout`, promise และ native event handler ต่างก็ trigger render ของตัวเอง ตั้งแต่ 18 ทั้งหมดนี้ถูก batch ด้วย
+
 ## Updater function เทียบกับ value
 
 ส่ง **value** เมื่อ state ถัดไปไม่ได้ขึ้นกับค่าก่อนหน้า ส่ง **updater function** เมื่อขึ้นกับค่าก่อนหน้า — React รัน updater ตามลำดับกับค่า pending ล่าสุด
@@ -55,6 +142,73 @@ export const updaterDiagram = `flowchart LR
   u3 --> done["next render: count = 3"]`;
 
 หลักง่าย ๆ: ถ้าคุณเรียก setter ตัวเดิมมากกว่าหนึ่งครั้งใน handler หรือค่าใหม่คำนวณจากค่าเก่า ให้ใช้ updater form
+
+### พิสูจน์: Strict Mode เรียก updater สองครั้งตอน dev — แต่ commit ครั้งเดียว
+
+`<StrictMode>` ตอน dev ตั้งใจเรียก updater function **สองครั้ง** เพื่อช่วยให้คุณสังเกตเห็น updater ที่ไม่ pure (มี side effect เช่น log หรือ mutate อะไรนอก scope ของมัน) จุดนี้อ่านผิดง่ายมากว่า "state เพิ่มขึ้น 2" — ไม่จริง มีแค่ผลลัพธ์ของหนึ่งในสอง call ที่ถูกเก็บไว้
+
+```tsx
+// src/__tests__/updater-strictmode.test.tsx
+import { StrictMode, useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Counter({ log }: { log: number[] }) {
+  const [count, setCount] = useState(0);
+  return (
+    <button
+      onClick={() => {
+        // Updater function — StrictMode (dev only) calls it TWICE to help
+        // you spot impure updaters, but only commits the result once.
+        setCount((c) => {
+          log.push(c);
+          return c + 1;
+        });
+      }}
+    >
+      {count}
+    </button>
+  );
+}
+
+test('StrictMode invokes an updater function twice in dev, but only commits once', () => {
+  const log: number[] = [];
+  const { getByRole } = render(
+    <StrictMode>
+      <Counter log={log} />
+    </StrictMode>,
+  );
+  act(() => {
+    getByRole('button').click();
+  });
+  // Called with the same pending value twice (0, 0) — proves the double
+  // invoke, not a real double-increment.
+  expect(log).toEqual([0, 0]);
+  expect(getByRole('button').textContent).toBe('1');
+});
+
+test('without StrictMode, the same updater runs exactly once', () => {
+  const log: number[] = [];
+  const { getByRole } = render(<Counter log={log} />);
+  act(() => {
+    getByRole('button').click();
+  });
+  expect(log).toEqual([0]);
+  expect(getByRole('button').textContent).toBe('1');
+});
+```
+
+```text
+✓ StrictMode invokes an updater function twice in dev, but only commits once
+✓ without StrictMode, the same updater runs exactly once
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+```
+
+log พิสูจน์ตรง ๆ: ทั้งสอง call ได้ค่า pending เดียวกันคือ `0` ไม่ใช่ `0` แล้ว `1` — React ทิ้งผลลัพธ์ของ call แรกและเก็บแค่ call ที่สอง ดังนั้น count ที่ commit จริงคือ `1` ไม่ใช่ `2` นี่คือเหตุผลที่ updater function ต้อง **pure** (ห้าม log หรือ mutate อะไรนอกตัวมันเองใน code จริง) — double-invoke ของ Strict Mode มีไว้เพื่อเปิดโปง updater ที่ไม่ pure โดยเฉพาะ
 
 ## Lazy initialization
 
@@ -88,8 +242,55 @@ setItems(items.map(i => i.id === id ? { ...i, done: true } : i)); // update
 
 สำหรับ state ที่ nested ลึก การ spread จะเริ่มยุ่ง — นั่นคือสัญญาณว่าควร flatten รูปทรง, ใช้ library อย่าง Immer, หรือหันไปใช้ `useReducer` (บทเรียนถัดไป)
 
+## Mental Model
+
+มองการเรียก `setCount(...)` ทุกครั้ง — value หรือ updater — เป็นการ push item เข้า **queue** ของ render cycle นี้ ไม่ใช่การ assign ทันที React ประมวลผล queue ทั้งก้อนครั้งเดียว ตามลำดับ ก่อน render ถัดไปพอดี: entry แบบ value แทนที่ pending value ตรง ๆ, entry แบบ updater แปลงค่าที่ pending อยู่ตอนนั้น นั่นคือเหตุผลที่ updater สามตัวต่อกันได้ +3 ในขณะที่ value สามตัวยุบเหลือ +1 — และ "batching" จริง ๆ ก็แค่ "queue ถูก flush ครั้งเดียว" ไม่ว่าการเรียกจะเกิดแบบ synchronous ใน handler หรือหลัง `await`
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| Updater function `setX(x => ...)` | ถูกต้องเสมอเมื่อเรียก setter ตัวเดิมหลายครั้ง หรือคำนวณค่าใหม่จากค่าเก่า | ต้อง pure — Strict Mode เรียกมันสองครั้งตอน dev เพื่อบังคับข้อนี้ |
+| Value form `setX(next)` | อ่านง่ายกว่าสำหรับการอัปเดตเดี่ยวที่เป็นอิสระ | ผิดแบบเงียบ ๆ ถ้าเรียกมากกว่าหนึ่งครั้งต่อ render ด้วย value ที่ closure ค้างไว้ |
+| Lazy init `useState(() => expensive())` | การคำนวณที่แพงรันแค่ครั้งเดียวตลอดไป | ต้องจำห่อ function เพิ่มอีกชั้น |
+| Mutate state ตรง ๆ | บางครั้งดูเหมือน "ทำงานได้เฉย ๆ" | React อาจข้าม re-render ไปเลย และบั๊กมองไม่เห็นจนกว่าจะเห็น |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"เรียก `setCount(count + 1)` สามครั้งจะบวก 3"** มันบวกแค่ 1 — ทั้งสาม call เห็น `count` snapshot เดียวกันจาก render นี้ พิสูจน์ด้านล่างด้วยคู่ fail/pass
+- **"double-invoke ของ Strict Mode แปลว่า state เปลี่ยนสองครั้ง"** มันแปลว่า *updater function* ของคุณรันสองครั้งเพื่อเช็ก purity มีแค่ผลลัพธ์เดียวที่ถูก commit การเปลี่ยน state ที่เห็นจริงยังเป็นแค่หนึ่งขั้นตอน
+- **"batching เกิดแค่ใน `onClick` และเพื่อน ๆ"** ตั้งแต่ React 18 มันเกิดหลัง `await`, ใน `setTimeout` และใน promise callback ด้วย — พิสูจน์แล้วด้านบน
+- **"mutate object แล้วเรียก setter ด้วย reference เดิมก็ยังทำงานได้ปกติ แค่ผิด best practice"** มันอาจข้าม re-render แบบเงียบ ๆ ได้เพราะ bail-out check ของ React คือการเทียบ reference — นี่คือบั๊กด้านความถูกต้องจริง ไม่ใช่แค่เรื่อง style
+
+## อ่านโค้ดที่ AI เขียน
+
+เมื่อ component ที่ generate มาเรียก setter ของ `useState` ให้เช็กสิ่งเหล่านี้ก่อนเชื่อมัน:
+
+- setter ตัวเดิมถูกเรียกมากกว่าหนึ่งครั้งใน function เดียว ด้วย form **value** (`setX(x + 1)`) แทน form **updater** หรือเปล่า? นั่นคือบั๊กจริง ไม่ใช่แค่ทางเลือก style
+- updater function ที่ส่งให้ `setX` มี side effect ไหม (log, network call, mutate ตัวแปรนอก)? Strict Mode จะเรียกมันสองครั้งตอน dev แล้วเผยบั๊กออกมา
+- state ที่ derive จาก state/prop อื่นถูกอัปเดตใน effect ทั้งที่คำนวณตอน render ได้เลยไหม (ดูบท `useEffect`)?
+- object หรือ array ถูก mutate ในที่เดิม (`.push`, assign property ตรง ๆ) ก่อนส่งให้ setter แทนที่จะ spread เป็น reference ใหม่หรือเปล่า?
+- code ที่อัปเดต state หลัง `await` สมมติว่าต้องช่วย batch เอง (เช่นห่อด้วย `unstable_batchedUpdates`) หรือเปล่า? ตั้งแต่ React 18 ไม่จำเป็นแล้ว — เรียกตรง ๆ ก็ batch อยู่แล้ว
+
+<SpotTheBug code={`function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <button
+      onClick={() => {
+        setCount(count + 1);
+        setCount(count + 1);
+        setCount(count + 1);
+      }}
+    >
+      {count}
+    </button>
+  );
+}`}>
+ทั้งสาม call อ่าน `count` จาก **snapshot เดียวกันของ render นี้** — คลิกครั้งเดียวไม่ได้บวก 3 มันบวก 1 เพราะ `count + 1` ถูกคำนวณสามครั้งกับค่าเริ่มต้นเดียวกันก่อนที่ตัวไหนจะ commit พิสูจน์แล้วในโพรบ: component นี้ตัวเป๊ะ ๆ ได้ `'1'` หลังคลิกครั้งเดียว ไม่ใช่ `'3'` ทางแก้คือ updater form, `setCount(c => c + 1)` สามครั้งติดกัน — แต่ละอันอ่านค่า *pending* ที่ call ก่อนหน้าทิ้งไว้ใน batch เดียวกัน จึงต่อกันได้ +3 ถูกต้อง
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-`useState` ให้ค่า snapshot พร้อม setter ที่ **schedule re-render** React **batch** หลายการอัปเดตใน event เดียวเป็น render เดียว ใช้ **updater function** (`setX(x => ...)`) เมื่อค่าถัดไปขึ้นกับค่าก่อนหน้า ใช้ **lazy init** (`useState(() => ...)`) สำหรับ initial value ที่แพง และอัปเดต state แบบ **immutable** เสมอ — object/array ใหม่ ไม่ใช่ mutate ในที่เดิม
+`useState` ให้ค่า snapshot พร้อม setter ที่ **schedule re-render** React **batch** หลายการอัปเดต — แม้แต่ที่เกิดหลัง `await` หรือใน `setTimeout` — เป็น render เดียว ใช้ **updater function** (`setX(x => ...)`) เมื่อค่าถัดไปขึ้นกับค่าก่อนหน้า หรือเรียก setter มากกว่าหนึ่งครั้งต่อ event และรักษา updater นั้นให้ **pure** เพราะ Strict Mode เรียกมันสองครั้งตอน dev เพื่อจับ updater ที่ไม่ pure โดยเฉพาะ ใช้ **lazy init** สำหรับ initial value ที่แพง และอัปเดต state แบบ **immutable** เสมอ
 </Callout>
 
 export const quizUseState = [
@@ -102,6 +303,7 @@ export const quizUseState = [
       'ไม่ทำอะไรจนกว่าจะเรียกอีกครั้ง',
     ],
     answer: 1,
+    explain: 'setter ไม่เคย mutate snapshot ปัจจุบัน — มันแค่ schedule re-render และ value ใหม่จะเห็นได้ตั้งแต่ render ถัดไปเท่านั้น',
   },
   {
     q: 'เมื่อไรควรใช้ updater form `setX(x => ...)`?',
@@ -112,6 +314,7 @@ export const quizUseState = [
       'เฉพาะกับ string',
     ],
     answer: 1,
+    explain: 'updater form อ่านค่า pending ล่าสุดเสมอ จึงถูกต้องแม้ setter ตัวเดิมถูกเรียกหลายครั้งใน event เดียว',
   },
   {
     q: 'ทำไมต้องส่ง function ให้ useState (`useState(() => expensive())`)?',
@@ -122,6 +325,7 @@ export const quizUseState = [
       'เพื่อหลีกเลี่ยง re-render',
     ],
     answer: 1,
+    explain: 'ถ้าไม่ห่อด้วย function การเรียกที่แพงยังรันทุก render (แค่ผลลัพธ์ถูกทิ้งหลัง render แรก) — lazy init ตัดความสูญเปล่านั้นออก',
   },
   {
     q: 'ทำไมต้องอัปเดต object/array state แบบ immutable?',
@@ -132,6 +336,29 @@ export const quizUseState = [
       'ทำให้ state read-only ตลอดไป',
     ],
     answer: 1,
+    explain: 'bail-out check ของ React สำหรับการอัปเดต state คือการเทียบ reference (สไตล์ Object.is) — object ที่ mutate แล้วยังคง reference เดิม React จึงอาจสรุปว่าไม่มีอะไรเปลี่ยน',
+  },
+  {
+    q: '```tsx\nasync function handleClickAsync() {\n  await Promise.resolve();\n  setCount((c) => c + 1);\n  setFlag((f) => !f);\n}\n```\nการคลิกปุ่มนี้ทำให้ render กี่ครั้งใน React 18+?',
+    options: [
+      'สองครั้ง — ครั้งละหนึ่ง setState call',
+      'ครั้งเดียว — ทั้งสองการอัปเดตหลัง await ยังถูก batch เข้าด้วยกัน',
+      'ศูนย์ครั้ง — การอัปเดตหลัง await ถูกเมิน',
+      'ขึ้นอยู่กับ browser',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: เกิด render เพิ่มแค่ครั้งเดียว แม้ทั้งสอง setState call จะเกิดหลัง await นอก event handler แบบ synchronous ดั้งเดิม React 18+ batch อัตโนมัติทุกที่',
+  },
+  {
+    q: '```tsx\nfunction Counter() {\n  const [count, setCount] = useState(0);\n  return (\n    <button onClick={() => {\n      setCount(count + 1);\n      setCount(count + 1);\n      setCount(count + 1);\n    }}>\n      {count}\n    </button>\n  );\n}\n```\nหลังคลิกหนึ่งครั้งจาก count = 0 ปุ่มจะโชว์อะไร?',
+    options: [
+      '3 เพราะแต่ละ call บวก 1',
+      '1 เพราะทั้งสาม call อ่าน snapshot `count` เดียวกันจาก render นี้',
+      '0 เพราะ value-form update ถูกเมิน',
+      'มันจะ throw error',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วในโพรบ: component นี้ตัวเป๊ะ ๆ ได้ "1" หลังคลิกครั้งเดียว ไม่ใช่ "3" — ทั้งสาม setCount(count + 1) คำนวณกับ snapshot เดียวกัน ทางแก้คือ updater form, setCount(c => c + 1)',
   },
 ];
 

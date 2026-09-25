@@ -20,11 +20,12 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 | บทเรียน | สิ่งที่คุณจะได้เรียน |
 |--------|-------------------|
-| useState & updates | state, batching, updater function, lazy init, immutability |
-| useEffect & effects | การ sync กับ external system — และเมื่อไรที่ไม่ต้องใช้ |
-| useRef & the DOM | mutable value, DOM ref และ ref-เป็น-prop ใน React 19 |
-| Memoization & the compiler | useMemo/useCallback/memo — และ React Compiler เปลี่ยนเกมอย่างไร |
-| Rules & custom hooks | ทำไม rules ถึงมี และการแยก stateful logic มา reuse |
+| useState & updates | state, batching (รวมถึงข้าม `await`), updater function กับ Strict Mode double-invoke, lazy init, immutability |
+| useEffect & effects | การ sync กับ external system, ลำดับการรัน effect, `useEffectEvent` (19.2) และการ fetch แบบ abort-safe |
+| useRef & the DOM | mutable value, DOM ref, ref-เป็น-prop ใน React 19, ref callback cleanup และ `useImperativeHandle` |
+| Memoization & the compiler | useMemo/useCallback/memo, การอ่าน React Compiler output จริง และเมื่อไร manual memoization ยังจำเป็น |
+| Rules & custom hooks | ทำไม rules ถึงมี, error จริงเมื่อทำผิดกฎ, custom hook ที่ return แบบ stable และข้อยกเว้น `use` |
+| useId & hook อื่น ๆ | `useId`, `useSyncExternalStore`, `initialValue` ของ `useDeferredValue`, `useDebugValue` และ `useInsertionEffect` |
 
 ## สิ่งเดียวที่ต้องจำให้ขึ้นใจ
 

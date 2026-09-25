@@ -1,6 +1,6 @@
 ---
 title: 'useEffect & Effects'
-description: 'What effects are actually for — synchronizing with external systems — dependencies and cleanup, and the modern rule that you probably do not need an effect.'
+description: 'What effects are actually for — synchronizing with external systems — dependencies and cleanup, the modern rule that you probably do not need an effect, effect ordering, useEffectEvent, and abort-safe fetching.'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## What an effect is for
 
@@ -84,8 +85,342 @@ function handleSubmit() {
 
 The quick test: *"Is this synchronizing with something outside React?"* If yes, effect. If it's deriving data or reacting to an interaction, no effect.
 
+## Effect ordering: mount, unmount, and dependency changes
+
+Once a tree has effects at more than one level, the *order* they fire in matters — a parent effect that assumes a child's effect has already run (or vice versa) will read stale state. React's actual order, proven below:
+
+- **On mount**, passive effects commit **bottom-up**: every child's effect runs before its parent's.
+- **On unmount**, cleanup runs **top-down** — the reverse of mount order: the parent's cleanup runs before the child's.
+- **On a dependency change**, a single effect's own cleanup (for the old value) always runs immediately before its own new setup (for the new value) — never batched with any other effect.
+
+```tsx
+// src/__tests__/effect-order.test.tsx
+import { useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Child({ log }: { log: string[] }) {
+  useEffect(() => {
+    log.push('child effect');
+    return () => { log.push('child cleanup'); };
+  });
+  return <span>child</span>;
+}
+
+function Parent({ log }: { log: string[] }) {
+  useEffect(() => {
+    log.push('parent effect');
+    return () => { log.push('parent cleanup'); };
+  });
+  return <Child log={log} />;
+}
+
+test('mount runs child effects before parent effects', () => {
+  const log: string[] = [];
+  render(<Parent log={log} />);
+  // React commits passive effects bottom-up: children first, then parent.
+  expect(log).toEqual(['child effect', 'parent effect']);
+});
+
+test('unmount runs parent cleanup before child cleanup (reverse of mount order)', () => {
+  const log: string[] = [];
+  const { unmount } = render(<Parent log={log} />);
+  log.length = 0;
+  unmount();
+  expect(log).toEqual(['parent cleanup', 'child cleanup']);
+});
+
+test('on a dependency change, an effect\'s own cleanup runs before its new setup', () => {
+  const log: string[] = [];
+  function Timer({ id }: { id: number }) {
+    useEffect(() => {
+      log.push(`setup ${id}`);
+      return () => { log.push(`cleanup ${id}`); };
+    }, [id]);
+    return null;
+  }
+  const { rerender } = render(<Timer id={1} />);
+  log.length = 0;
+  rerender(<Timer id={2} />);
+  expect(log).toEqual(['cleanup 1', 'setup 2']);
+});
+```
+
+Real run, in a Vite + React 19.3 + Vitest + React Testing Library probe:
+
+```text
+✓ mount runs child effects before parent effects
+✓ unmount runs parent cleanup before child cleanup (reverse of mount order)
+✓ on a dependency change, an effect's own cleanup runs before its new setup
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+## `useEffectEvent`: the stale-closure problem, solved (React 19.2)
+
+Go back to the connection example. Now say the effect also needs to log something that changes often — say, a `theme` — without re-connecting every time `theme` changes:
+
+```jsx
+function ChatRoom({ roomId, theme }) {
+  useEffect(() => {
+    const connection = createConnection(roomId);
+    connection.on('connected', () => {
+      showNotification('Connected!', theme); // reads theme
+    });
+    connection.connect();
+    return () => connection.disconnect();
+  }, [roomId, theme]); // 🔴 now reconnects every time theme changes too
+}
+```
+
+Add `theme` to the deps and the connection resets on every theme toggle — reconnecting has nothing to do with theming. Leave it out and the linter flags a real bug: `showNotification` would close over a **stale** `theme` from whenever the effect last ran. Before 19.2, the fix was awkward restructuring (a ref that mirrors the latest value). **`useEffectEvent`** is the tool React shipped specifically for this: it lets you extract the non-reactive part of an effect into an "Effect Event" that always sees the latest props/state, without being itself a reactive dependency.
+
+```tsx
+// src/components/Timer.tsx
+import { useEffect, useEffectEvent, useState } from 'react';
+
+function Timer({ onTick }: { onTick: () => void }) {
+  const [count, setCount] = useState(0);
+  const [increment, setIncrement] = useState(1);
+
+  // useEffectEvent: reads the LATEST `increment` without being reactive.
+  const onTickEvent = useEffectEvent(() => {
+    setCount((c) => c + increment);
+    onTick();
+  });
+
+  useEffect(() => {
+    const id = setInterval(onTickEvent, 1000);
+    return () => clearInterval(id);
+    // Empty deps: the interval is set up once. `increment` is read through
+    // useEffectEvent, so it is intentionally NOT a dependency here.
+  }, []);
+
+  return (
+    <div>
+      <output data-testid="count">{count}</output>
+      <button onClick={() => setIncrement((i) => i + 1)}>bump increment</button>
+    </div>
+  );
+}
+
+export default Timer;
+```
+
+The function returned by `useEffectEvent` is **not reactive** — its identity is stable, and calling it always runs with the component's latest props and state, as if it were declared right there in the effect. That is exactly why it must **never** be added to the effect's dependency array: doing so would defeat the point (making the effect re-run on every render) and the official ESLint rule blocks it outright. Effect Events may only be declared in the same component or hook as the effect that calls them — the linter enforces that restriction too.
+
+```tsx
+// src/__tests__/effect-event.test.tsx
+import { useEffect, useEffectEvent, useState } from 'react';
+import { act, render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+
+afterEach(cleanup);
+
+function Timer({ onTick }: { onTick: () => void }) {
+  const [count, setCount] = useState(0);
+  const [increment, setIncrement] = useState(1);
+
+  const onTickEvent = useEffectEvent(() => {
+    setCount((c) => c + increment);
+    onTick();
+  });
+
+  useEffect(() => {
+    const id = setInterval(onTickEvent, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div>
+      <output data-testid="count">{count}</output>
+      <button onClick={() => setIncrement((i) => i + 1)}>bump increment</button>
+    </div>
+  );
+}
+
+test('useEffectEvent reads the latest increment without re-running the effect (no interval reset)', () => {
+  vi.useFakeTimers();
+  const onTick = vi.fn();
+  const { getByTestId, getByRole } = render(<Timer onTick={onTick} />);
+
+  act(() => {
+    vi.advanceTimersByTime(1000); // tick with increment=1
+  });
+  expect(getByTestId('count').textContent).toBe('1');
+
+  act(() => {
+    getByRole('button').click(); // increment becomes 2 — if the effect had
+  });                             // re-run, the interval would reset here.
+
+  act(() => {
+    vi.advanceTimersByTime(1000); // tick with increment=2, same interval
+  });
+  expect(getByTestId('count').textContent).toBe('3'); // 1 + 2, not reset to 0
+  expect(onTick).toHaveBeenCalledTimes(2); // interval never got torn down/rebuilt
+
+  vi.useRealTimers();
+});
+```
+
+```text
+✓ useEffectEvent reads the latest increment without re-running the effect (no interval reset)
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Real ESLint output (`eslint-plugin-react-hooks@7.1.1`, the successor to the v6 line the compiler rules shipped in) for the version that *does* put the Effect Event in the deps array:
+
+```text
+warning  Functions returned from `useEffectEvent` must not be included in the dependency array.
+Remove `onTickEvent` from the list  react-hooks/exhaustive-deps
+```
+
+`useEffectEvent` shipped as a stable feature in **React 19.2** (October 2025) — the React 19.2 announcement lists it alongside `<Activity>` and React Performance Tracks. If you're on an earlier version, the ref-mirroring workaround is still the correct fallback.
+
+## Fetch-in-effect: the race condition, and `AbortController`
+
+Fetching directly inside an effect has a classic bug: if `userId` changes quickly (e.g. clicking through a list), an earlier, slower request can resolve **after** a later, faster one — and overwrite fresh state with stale data. Returning an `AbortController.abort()` call from the cleanup fixes it: the stale request's promise rejects instead of resolving into state.
+
+```tsx
+// src/components/Profile.tsx
+import { useEffect, useState } from 'react';
+
+declare function fetchUser(userId: string, signal: AbortSignal): Promise<string>;
+
+function Profile({ userId }: { userId: string }) {
+  const [name, setName] = useState('loading');
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUser(userId, controller.signal)
+      .then((result: string) => setName(result))
+      .catch((err: Error) => {
+        if (err.name !== 'AbortError') throw err; // ignore our own abort
+      });
+    return () => controller.abort(); // cancel the in-flight request
+  }, [userId]);
+  return <output>{name}</output>;
+}
+
+export default Profile;
+```
+
+Proven with a fake "slow" request that starts first but would resolve last:
+
+```tsx
+// src/__tests__/effect-abort-race.test.tsx
+import { useEffect, useState } from 'react';
+import { act, render, cleanup, screen, waitFor } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+// Simulates a slow-then-fast response: the FIRST request resolves LAST.
+function fakeFetchUser(id: string, signal: AbortSignal): Promise<string> {
+  const delay = id === 'slow' ? 50 : 10;
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => resolve(`user:${id}`), delay);
+    signal.addEventListener('abort', () => {
+      clearTimeout(t);
+      reject(new DOMException('Aborted', 'AbortError'));
+    });
+  });
+}
+
+function Profile({ userId }: { userId: string }) {
+  const [name, setName] = useState('loading');
+  useEffect(() => {
+    const controller = new AbortController();
+    fakeFetchUser(userId, controller.signal)
+      .then((result) => setName(result))
+      .catch((err) => {
+        if (err.name !== 'AbortError') throw err;
+      });
+    return () => controller.abort();
+  }, [userId]);
+  return <output data-testid="name">{name}</output>;
+}
+
+test('AbortController prevents the stale (slow) response from overwriting the fresh one', async () => {
+  const { rerender } = render(<Profile userId="slow" />);
+  // Switch to a fast request before the slow one resolves — without abort,
+  // the slow response would land last and overwrite the fresh state.
+  await act(async () => {
+    rerender(<Profile userId="fast" />);
+  });
+  await waitFor(() => expect(screen.getByTestId('name').textContent).toBe('user:fast'));
+  // Give the (aborted) slow request's original timer a chance to fire too.
+  await new Promise((r) => setTimeout(r, 60));
+  expect(screen.getByTestId('name').textContent).toBe('user:fast');
+});
+```
+
+```text
+✓ AbortController prevents the stale (slow) response from overwriting the fresh one
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Without the `AbortController`, this test fails: the slow request's `.then` still fires 40ms after the fast one and leaves `name` back at `user:slow`.
+
+## Mental Model
+
+An effect is not a lifecycle hook attached to the component's births and deaths — it is a *synchronization loop* attached to a single reactive value (or set of values). Think of React re-running "cleanup old value, set up new value" every time any dependency changes, mount and unmount being just the first setup and the final cleanup of that same loop. `useEffectEvent` exists because "read the latest value" and "re-synchronize" are two different needs that used to be forced into the same dependency array.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Deriving state during render instead of an effect | Fewer renders, no redundant state | None — always prefer this when possible |
+| `useEffectEvent` for non-reactive reads | No stale closures, no unnecessary re-syncs | Only available since React 19.2; can't be called outside its own effect/component |
+| `AbortController` in cleanup | No race conditions overwriting fresh state with stale data | Every fetch-in-effect needs this boilerplate, or a data-fetching library that does it for you |
+| Omitting the dependency array entirely | Simple to write | Runs after every render — usually the wrong tool |
+
+## Common Misconceptions
+
+- **"I can just add the value to the dependency array to silence the linter."** Sometimes that's correct. Often it's a sign the effect is doing two unrelated things (reconnect vs. notify) that should be split, or that the value should be read through `useEffectEvent` instead.
+- **"Effects run in the order they're written in one component."** True within one component, but across a tree, mount order is child-before-parent and unmount order is parent-before-child — proven above.
+- **"`useEffectEvent` deps get auto-filled like a normal function."** The opposite: including the Effect Event itself in the array is an ESLint error, precisely because its whole purpose is to not be reactive.
+- **"Aborting a fetch is optional cleanup."** Without it, a component that changes its data dependency quickly (search-as-you-type, tab switching) will intermittently show data for the *previous* selection — a genuine, user-visible bug, not just wasted network traffic.
+
+## Reading AI-generated code
+
+When a generated component uses `useEffect`, check for these before trusting it:
+
+- Does the effect's dependency array include everything it reads, or has a value been "left out" to stop a re-run — instead of using `useEffectEvent` or restructuring?
+- If the effect reads a value that changes often but shouldn't cause a re-sync (like a callback or a theme), is it wrapped in `useEffectEvent` rather than silently omitted from deps?
+- Does a `fetch`/subscription effect return a cleanup that aborts or unsubscribes — or does it leak on unmount and on every dependency change?
+- If the effect's dependent value can change quickly (an id from a list, a search query), is there `AbortController`-based cancellation, or can a stale response overwrite fresh state?
+- Is the effect doing something that belongs in an event handler (analytics, a POST) instead of reacting to a state flag?
+
+<SpotTheBug code={`function Timer() {
+  const [count, setCount] = useState(0);
+  const [increment, setIncrement] = useState(1);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCount((c) => c + increment); // reads increment from the closure
+    }, 1000);
+    return () => clearInterval(id);
+  }, []); // empty deps — the interval is only ever set up once
+
+  return (
+    <div>
+      <output>{count}</output>
+      <button onClick={() => setIncrement((i) => i + 1)}>bump increment</button>
+    </div>
+  );
+}`}>
+The interval callback closes over `increment` from the render where the effect ran — with an empty dependency array, that effect runs exactly once, on mount, so the callback keeps referencing the **initial** `increment` (`1`) forever. Clicking "bump increment" changes the `increment` state and re-renders the component, but the already-running `setInterval` callback was created once and never gets recreated, so every tick still adds `1`, no matter how many times the button is clicked. Proven in the probe: the fixed version (extracting the tick logic into `useEffectEvent`, as shown earlier in this lesson) reaches `count === 3` after one tick at `increment=1` and one at `increment=2` — this buggy version would still show `2` (`0 + 1 + 1`) instead. The fix is `useEffectEvent`, not adding `increment` to the deps array (that would reconnect — recreate — the interval every time it changes, which is its own bug: the countdown restarts instead of ticking steadily).
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-`useEffect` exists to **synchronize with external systems** (connections, subscriptions, browser APIs) — list every reactive value it reads in the **dependency array**, and always return a **cleanup** that undoes the setup. But most of the time you **don't need an effect**: derive values during render (or with `useMemo`), and put event-driven logic in **event handlers**. Reach for an effect only when you're syncing with something outside React.
+`useEffect` exists to **synchronize with external systems** — list every reactive value it reads in the **dependency array**, return a **cleanup** that undoes the setup, and remember the real ordering: mount runs child-before-parent, unmount runs parent-before-child, and a dependency change always runs an effect's own cleanup right before its own new setup. For a value that must stay *current* without becoming a dependency, reach for **`useEffectEvent`** (React 19.2) instead of lying to the linter or restructuring around it. And for most things — deriving data, reacting to events — you **don't need an effect** at all.
 </Callout>
 
 export const quizEffect = [
@@ -98,6 +433,7 @@ export const quizEffect = [
       'To replace event handlers',
     ],
     answer: 1,
+    explain: 'useEffect exists to keep a component in sync with something outside React — a connection, subscription, or browser API — not as a general post-render callback.',
   },
   {
     q: 'You need `fullName` from `firstName` and `lastName`. What is the right approach?',
@@ -108,6 +444,7 @@ export const quizEffect = [
       'Compute it in a cleanup function',
     ],
     answer: 1,
+    explain: 'Derived values should be computed during render, not stored in state and synchronized with an effect — that adds an extra render and a place for the two values to drift apart.',
   },
   {
     q: 'What must a cleanup function do?',
@@ -118,16 +455,40 @@ export const quizEffect = [
       'Nothing — cleanup is optional decoration',
     ],
     answer: 1,
+    explain: 'The cleanup function must undo the effect\'s setup so the old connection, timer, or listener does not keep running or firing after the effect re-syncs or the component unmounts.',
   },
   {
-    q: 'Logic that should run because the user clicked submit belongs where?',
+    q: '```tsx\nfunction Parent() {\n  useEffect(() => { console.log("parent"); return () => console.log("parent cleanup"); });\n  return <Child />;\n}\nfunction Child() {\n  useEffect(() => { console.log("child"); return () => console.log("child cleanup"); });\n  return null;\n}\n```\nOn mount, and then on unmount, what order do the logs print in?',
     options: [
-      'In a useEffect watching a "submitted" state',
-      'In the event handler that caused the submit',
-      'In the render body',
-      'In useMemo',
+      'Mount: parent, child. Unmount: parent cleanup, child cleanup.',
+      'Mount: child, parent. Unmount: parent cleanup, child cleanup.',
+      'Mount: child, parent. Unmount: child cleanup, parent cleanup.',
+      'The order is not guaranteed by React.',
     ],
     answer: 1,
+    explain: 'Proven in the probe: mount commits passive effects bottom-up (child before parent), and unmount runs cleanup top-down (parent before child) — the reverse of mount order.',
+  },
+  {
+    q: 'Why can\'t you just add the function returned by `useEffectEvent` to the effect\'s dependency array?',
+    options: [
+      'You can — it is required for correctness',
+      'Its identity is intentionally non-reactive, so including it defeats the point and the ESLint rule flags it as an error',
+      'It causes a TypeScript error',
+      'useEffectEvent functions cannot be called from inside useEffect at all',
+    ],
+    answer: 1,
+    explain: 'An Effect Event\'s whole purpose is to read the latest props/state without being a reactive dependency itself. eslint-plugin-react-hooks explicitly warns: "Functions returned from useEffectEvent must not be included in the dependency array."',
+  },
+  {
+    q: 'A component fetches user data in an effect keyed on `userId`, which can change quickly. What prevents a slow, stale response from overwriting a fresher one?',
+    options: [
+      'Nothing is needed — React automatically ignores stale responses',
+      'Returning an AbortController.abort() call from the effect\'s cleanup, and ignoring the resulting AbortError',
+      'Adding a setTimeout delay before every fetch',
+      'Using useLayoutEffect instead of useEffect',
+    ],
+    answer: 1,
+    explain: 'Proven in the probe: without AbortController, a fake "slow" request that started first still resolves after a faster one and overwrites the state. Aborting the previous request in cleanup and ignoring its AbortError fixes the race.',
   },
 ];
 
