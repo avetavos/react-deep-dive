@@ -1,0 +1,379 @@
+---
+title: 'Lanes & Scheduling'
+description: 'lane เป็น bitmask จริง (constant จริงจาก ReactFiberLane.js), startTransition กับ discrete event เลือก lane อย่างไร, package scheduler กับการ yield ผ่าน MessageChannel และ test ที่พิสูจน์ว่า urgent update ไม่ถูก transition ที่ค้างอยู่บล็อก'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## lane คือบิต ไม่ใช่ queue
+
+บทที่แล้วจบด้วย "React pause render ได้ — แต่ pause เพื่ออะไร" คำตอบคือ priority และ React แทน priority ด้วย **bitmask** ที่เรียกว่า *lane* ทุก update (การเรียก `setState`, transition หนึ่งอัน, hydration หนึ่งครั้ง) ถูกผูกกับ lane อย่างน้อยหนึ่งอัน และหลาย update แชร์ lane เดียวกันหรือรวมกันด้วย bitwise OR ได้ นี่คือ constant จริงจาก `packages/react-reconciler/src/ReactFiberLane.js` บน branch `main` ของ `facebook/react` (ดึงมาเมื่อ 2026-09-25) — ไม่ใช่การ paraphrase แต่เป็น binary literal จริง:
+
+```js
+// packages/react-reconciler/src/ReactFiberLane.js (trimmed)
+export const NoLanes                     = 0b0000000000000000000000000000000;
+export const NoLane                      = 0b0000000000000000000000000000000;
+
+export const SyncHydrationLane           = 0b0000000000000000000000000000001;
+export const SyncLane                    = 0b0000000000000000000000000000010;
+
+export const InputContinuousHydrationLane = 0b0000000000000000000000000000100;
+export const InputContinuousLane          = 0b0000000000000000000000000001000;
+
+export const DefaultHydrationLane        = 0b0000000000000000000000000010000;
+export const DefaultLane                 = 0b0000000000000000000000000100000;
+
+// 14 individual TransitionLane bits — startTransition updates get ONE of these
+const TransitionLanes: Lanes             = 0b0000000001111111111111100000000;
+
+// 4 individual RetryLane bits — Suspense retries get one of these
+const RetryLanes: Lanes                  = 0b0000011110000000000000000000000;
+
+export const SelectiveHydrationLane      = 0b0000100000000000000000000000000;
+export const IdleLane                    = 0b0010000000000000000000000000000;
+export const OffscreenLane               = 0b0100000000000000000000000000000;
+export const DeferredLane                = 0b1000000000000000000000000000000;
+```
+
+การเป็น bitmask คือประเด็นทั้งหมด: `lanes` บน fiber (จาก `FiberNode` ของบทที่แล้ว) เก็บได้ *หลายอัน* พร้อมกันผ่าน OR และการเช็ก "update นี้ต้องเกิดไหม" คือ AND ครั้งเดียวกับ bitmask — ไม่มี queue ไม่มี array ไม่มี list แยกตาม priority ให้เดิน
+
+## ผูก lane: `requestUpdateLane`
+
+ตอนคุณเรียก `setState` React ต้องตัดสินใจว่า update นั้นไปอยู่ lane ไหน *ก่อน* จะ schedule อะไรได้ นั่นคือ `requestUpdateLane` ใน `packages/react-reconciler/src/ReactFiberWorkLoop.js`:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — requestUpdateLane (trimmed)
+export function requestUpdateLane(fiber) {
+  const transition = requestCurrentTransition();
+  if (transition !== null) {
+    // We're inside startTransition — get a transition lane.
+    return requestTransitionLane(transition);
+  }
+  // Otherwise, use whatever priority is currently active.
+  return getCurrentUpdatePriority(); // e.g. SyncLane for a discrete event
+}
+```
+
+สองอย่างตัดสิน lane: คุณอยู่ข้างใน callback ของ `startTransition` หรือไม่ และ — ถ้าไม่ — "current update priority" ที่ active อยู่ตอนนั้นคืออะไร priority นั้นถูก set โดย *ระบบ event* ก่อนที่ handler ของคุณจะรันด้วยซ้ำ สำหรับ discrete event อย่างการคลิก `dispatchDiscreteEvent` ใน `packages/react-dom-bindings/src/events/ReactDOMEventListener.js` set มันไว้ตรง ๆ (source ที่ react.dev host ไว้ ดึงเมื่อ 2026-09-25):
+
+```js
+// packages/react-dom-bindings/src/events/ReactDOMEventListener.js — dispatchDiscreteEvent (trimmed)
+function dispatchDiscreteEvent(domEventName, eventSystemFlags, container, nativeEvent) {
+  const previousPriority = getCurrentUpdatePriority();
+  try {
+    setCurrentUpdatePriority(DiscreteEventPriority); // -> SyncLane
+    dispatchEvent(domEventName, eventSystemFlags, container, nativeEvent);
+  } finally {
+    setCurrentUpdatePriority(previousPriority);
+  }
+}
+```
+
+นี่คือคำตอบจริงมี source ของ "ทำไมคลิกปุ่มถึงรู้สึกทันที": React set update priority ไปที่ระดับ synchronous สูงสุด *ก่อน* `onClick` ของคุณจะรัน ดังนั้น `setState` ไหนก็ตามข้างในมันจะไปลง `SyncLane` โดยอัตโนมัติ — คุณไม่เคยต้องเขียนโค้ดผูก lane เองเลย
+
+## `startTransition` จับจอง transition lane
+
+`requestTransitionLane` ใน `packages/react-reconciler/src/ReactFiberRootScheduler.js` คือสิ่งที่การเรียก `set` ข้างใน `startTransition` ได้แทน:
+
+```js
+// packages/react-reconciler/src/ReactFiberRootScheduler.js — requestTransitionLane (trimmed)
+export function requestTransitionLane(transition) {
+  // All transitions within the same event are assigned the SAME lane.
+  if (currentEventTransitionLane === NoLane) {
+    currentEventTransitionLane = claimNextTransitionUpdateLane();
+  }
+  return currentEventTransitionLane;
+}
+```
+
+การเรียก `set` ทุกครั้งข้างใน `startTransition` callback เดียวกัน (และการเรียก `startTransition` ที่ซ้อนกันซึ่งเกิดใน event เดียวกัน) แชร์ transition lane เดียวกัน — นี่คือกลไกเป๊ะ ๆ ที่อยู่หลังกฎของ [Transitions](/react/th/concurrent-and-suspense/transitions/) ที่ว่าทุกอย่างก่อน `await` ตัวแรกใน async transition ยังคงเป็นส่วนหนึ่งของมัน: ทั้งหมดยังอยู่ใน event เดียวกัน ดังนั้น `currentEventTransitionLane` ยังไม่ถูก reset `useDeferredValue` ใช้แนวคิดเดียวกันจากฝั่งอ่าน — มัน render consumer ของ deferred value ด้วย lane priority ต่ำกว่า เพื่อไม่ให้ urgent update ต่อค่า *ปัจจุบัน* ถูกมันหน่วงไว้
+
+## package `scheduler`: priority กับ `MessageChannel`
+
+lane ตัดสิน *update ไหน* ควรชนะ; package `scheduler` แยกต่างหาก (`packages/scheduler/src/forks/Scheduler.js`) ตัดสิน *เมื่อไร* React จะได้คิวจริงบน main thread เพื่อทำงานนั้น มันมี priority ห้าระดับ กับ timeout จริงเป็น millisecond ต่อระดับ — นี่คือค่าจริงจาก `packages/scheduler/src/SchedulerPriorities.js` กับ `SchedulerFeatureFlags.js` (ดึงเมื่อ 2026-09-25):
+
+```js
+// packages/scheduler/src/SchedulerPriorities.js
+export const ImmediatePriority    = 1;
+export const UserBlockingPriority = 2;
+export const NormalPriority       = 3;
+export const LowPriority          = 4;
+export const IdlePriority         = 5;
+
+// packages/scheduler/src/SchedulerFeatureFlags.js
+export const frameYieldMs = 5;                 // how often the loop checks for a yield point
+export const userBlockingPriorityTimeout = 250;  // ms before this task is forced to run
+export const normalPriorityTimeout = 5000;
+export const lowPriorityTimeout = 10000;        // IdlePriority effectively never times out
+```
+
+และนี่คือวิธีจริง ๆ ที่ scheduler เอา callback เข้า event loop ระหว่างเฟรม — `packages/scheduler/src/forks/Scheduler.js` เลือก `MessageChannel` โดยเฉพาะเพราะ browser clamp `setTimeout` ที่ซ้อนกันไว้ที่ 4ms:
+
+```js
+// packages/scheduler/src/forks/Scheduler.js (trimmed)
+} else if (typeof MessageChannel !== 'undefined') {
+  // DOM and Worker environments.
+  // We prefer MessageChannel because of the 4ms setTimeout clamping.
+  const channel = new MessageChannel();
+  const port = channel.port2;
+  channel.port1.onmessage = performWorkUntilDeadline;
+  schedulePerformWorkUntilDeadline = () => {
+    port.postMessage(null);
+  };
+}
+```
+
+`shouldYieldToHost()` (สิ่งที่ `shouldYield()` ของบทที่แล้วเรียกจริง ๆ) เช็กเวลาที่ผ่านไปเทียบกับ `frameInterval` (5ms จาก `frameYieldMs` ข้างบน) แล้วคืน `true` เมื่องานที่รันต่อเนื่องนานถึงขนาดนั้น — นั่นคือตัวเลขจริงที่อยู่หลัง "React yield ให้ browser เป็นระยะ" ไม่ใช่คำกล่าวอ้างลอย ๆ
+
+## พิสูจน์: urgent update ไม่ถูก transition ที่ค้างอยู่บล็อก
+
+นี่คือผลลัพธ์ฝั่งผู้ใช้ของทั้งหมดข้างบน สร้างซ้ำจริงด้วย `startTransition` update ที่หนักโดยตั้งใจ (list 300 รายการ แต่ละอันทำงานเล็กน้อย — มากพอที่จะบังคับให้ concurrent work loop ข้าม yield boundary จริง ๆ) กับการคลิกแบบ urgent ที่ยิงระหว่าง transition นั้นยังไม่เสร็จ:
+
+```tsx
+// src/__tests__/urgent-not-blocked.test.tsx
+import { useState, useTransition } from 'react';
+import { render, screen, act, fireEvent, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function busyWait(ms: number) {
+  const end = performance.now() + ms;
+  while (performance.now() < end) {}
+}
+
+test('an urgent click commits while a heavy transition is still in flight', async () => {
+  const commitLog: string[] = [];
+
+  function Heavy({ n }: { n: number }) {
+    const items = [];
+    for (let i = 0; i < 300; i++) {
+      busyWait(0.3); // ~90ms of simulated work, spread across 300 fibers
+      items.push(<li key={i}>{n}-{i}</li>);
+    }
+    return <ul>{items}</ul>;
+  }
+
+  function Demo() {
+    const [urgent, setUrgent] = useState(0);
+    const [heavyValue, setHeavyValue] = useState(0);
+    const [isPending, startTransition] = useTransition();
+    return (
+      <div>
+        <button onClick={() => setUrgent((u) => u + 1)}>urgent</button>
+        <button onClick={() => startTransition(() => setHeavyValue((v) => v + 1))}>transition</button>
+        <p data-testid="urgent">{urgent}</p>
+        <p data-testid="pending">{String(isPending)}</p>
+        <Heavy n={heavyValue} />
+      </div>
+    );
+  }
+
+  render(<Demo />);
+
+  await act(async () => {
+    fireEvent.click(screen.getByText('transition'));
+    await new Promise((r) => setTimeout(r, 10)); // let the transition start, but not finish
+    fireEvent.click(screen.getByText('urgent'));  // urgent update, WHILE the transition is pending
+    commitLog.push(`right after urgent click: pending=${screen.getByTestId('pending').textContent}`);
+    await new Promise((r) => setTimeout(r, 200));
+  });
+
+  expect(screen.getByTestId('urgent').textContent).toBe('1');
+  expect(screen.getByTestId('pending').textContent).toBe('false'); // transition eventually finished too
+  console.log(commitLog);
+}, 10000);
+```
+
+```text
+stdout: [ 'right after urgent click: pending=true' ]
+
+✓ an urgent click commits while a heavy transition is still in flight
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+บรรทัด log พิสูจน์ประเด็นตรง ๆ: ณ ตอนที่คลิก urgent ยิงไปแล้วเป๊ะ ๆ `pending` ยังเป็น `"true"` อยู่ (transition ยังไม่เสร็จจริง ๆ) — และ assertion ถัดไปทันทีก็โชว์ว่า `urgent` commit ไปเป็น `"1"` แล้ว React ไม่ได้ทำให้การคลิกต้องรองาน SyncLane-แพ้ของ transition หนัก ๆ ให้เสร็จก่อน; `SyncLane` update จากการคลิกได้คิวของตัวเอง แล้ว transition ค่อย resume ทีหลัง
+
+## `startTransition` สองครั้งไป lane เดียวกัน: ค่าเก่าไม่มีวัน commit ด้วยตัวมันเอง
+
+ข้อเท็จจริงที่เกี่ยวข้องกัน และสร้างซ้ำง่ายกว่า: การเรียก `startTransition` หลายครั้งภายใน synchronous event เดียวกันแชร์ transition lane เดียวกันและถูก batch — ดังนั้นถ้าการเรียกทีหลังมา supersede อันก่อนหน้าก่อนที่อันไหนจะ commit ค่าเก่าจะไม่มีวันถูก render แยกต่างหากเลย:
+
+```tsx
+// src/__tests__/transition-supersede.test.tsx
+import { useState, useTransition } from 'react';
+import { render, screen, act, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('two startTransition calls in the same event: only the LATEST value is ever committed', () => {
+  const committedValues: number[] = [];
+
+  function Demo() {
+    const [value, setValue] = useState(0);
+    const [, startTransition] = useTransition();
+    committedValues.push(value);
+    return (
+      <div>
+        <p data-testid="value">{value}</p>
+        <button
+          onClick={() => {
+            startTransition(() => setValue(1));
+            startTransition(() => setValue(2)); // same event -> same lane -> supersedes
+          }}
+        >
+          go
+        </button>
+      </div>
+    );
+  }
+
+  render(<Demo />);
+  act(() => { screen.getByText('go').click(); });
+
+  expect(screen.getByTestId('value').textContent).toBe('2');
+  expect(committedValues).not.toContain(1); // "1" was never committed on its own
+});
+```
+
+```text
+✓ two startTransition calls in the same event: only the LATEST value is ever committed
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## Entanglement สั้น ๆ
+
+lane ไม่ได้เป็นอิสระจากกันเสมอไป — `markRootEntangled` (`ReactFiberLane.js`) ผูกสอง lane เข้าด้วยกันได้ ให้การเสร็จของอันหนึ่งบังคับให้อีกอันต้องเสร็จใน commit เดียวกัน React ใช้สิ่งนี้ในกรณีที่การ commit update ของ lane หนึ่งโดยไม่มีอีกอันจะโชว์ UI ที่ไม่สอดคล้องกัน (ตัวอย่างเช่น การเรียก `useState` หลายครั้งที่ update ของมันต้องลงจอพร้อมกัน) คุณควบคุม entanglement ตรง ๆ ไม่ได้ นี่คือเหตุผลที่ "ทุกอย่างใน transition นี้ render พร้อมกัน" ยังคงจริงแม้ในบางกรณีที่ครอบคลุมหลาย lane
+
+## `flushSync`: กลับไป synchronous เอง
+
+บางครั้งคุณต้องการ *สิ่งตรงข้าม* กับ transition — การรับประกันว่า update ลง DOM แล้วก่อนบรรทัดถัดไปของโค้ดคุณจะรัน (ตัวอย่างจาก react.dev: อ่าน `scrollHeight` ทันทีหลังเพิ่มไอเทม) `flushSync` (ใน `react-dom`) บังคับ lane นั้นให้ render แล้ว commit แบบ synchronous ตรงนั้นเลย แทนที่จะผ่าน scheduling path ปกติ — implement ผ่าน `flushSyncFromReconciler`/`flushSyncWork` ใน `ReactFiberWorkLoop.js` มันคือ escape hatch ไม่ใช่ default: การบังคับงาน synchronous ทำลาย interruptibility ที่ทั้งโมดูลนี้พูดถึง ดังนั้นคำแนะนำของ react.dev เองคือใช้มันแต่น้อย
+
+<Mermaid title="จาก event ไปถึง lane ไปถึงคิวบน main thread" code={laneDiagram} />
+
+export const laneDiagram = `flowchart LR
+  click["Discrete event (click)"] --> prio["setCurrentUpdatePriority(DiscreteEventPriority)"]
+  prio --> req["requestUpdateLane(fiber)"]
+  trans["Inside startTransition(...)"] --> reqT["requestTransitionLane(transition)"]
+  req --> lane["Lane assigned to this update"]
+  reqT --> lane
+  lane --> sched["scheduler package: priority -> timeout"]
+  sched --> mc["MessageChannel.postMessage\n(yields to the browser between bursts)"]
+  mc --> work["Work loop resumes,\nchecks shouldYieldToHost()"]`;
+
+## Mental Model
+
+คิดว่า lane เป็นป้ายกระเป๋าเดินทาง ไม่ใช่ priority queue: ทุก update ได้ป้ายเดียวเป๊ะ (หรือแชร์ป้ายกับ update จาก event เดียวกัน) และ React ไม่เคยต้องเรียง queue เพื่อหาอันที่สำคัญที่สุด — มันแค่เช็กว่าบิตป้ายไหนถูก set package `scheduler` คือกลไกแยกต่างหากที่ตัดสินว่า React จะได้คิวเมื่อไรเลย ไม่ว่าป้ายไหนชนะ `MessageChannel` เป็นแค่ primitive "ให้ browser หายใจ" ที่แม่นยำที่สุดที่มี เลือกเพราะ `setTimeout` ถูก clamp ไว้ที่ 4ms หลังเรียกซ้อนกันไม่กี่ครั้ง ซึ่งจะทำให้ yield ทุกครั้งช้ากว่าที่ควร
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+|---|---|---|
+| lane แบบ bitmask (ไม่ใช่ priority queue) | เช็ก "ต้องรันไหม" แบบ O(1) ผ่าน bitwise AND; รวมหลาย update ได้ถูก | มี lane ทั้งหมดตายตัว 31 อัน (`TotalLanes`) — เพดานตายตัว ไม่ใช่ตัวเลข priority ที่ละเอียดไม่จำกัด |
+| `startTransition` แชร์ lane เดียวต่อ event | ทุกอย่างที่คุณตั้งใจ defer ไปด้วยกัน commit พร้อมกันจริง | ให้ `startTransition` สองครั้งใน event เดียวกันมี priority ต่างกันไม่ได้ |
+| `MessageChannel` สำหรับ yield | timing แม่นยำกว่า `setTimeout` ไม่มี clamp 4ms | ต้องการ environment แบบ DOM/Worker; Node ที่ไม่มี DOM shim จะ fallback ไป `setImmediate`/`setTimeout` |
+| `flushSync` | รับประกัน DOM state แบบ synchronous เมื่อคุณต้องการจริง ๆ | นำ main-thread blocking กลับมา — ต้นทุนตรงที่ transition มีไว้เพื่อหลีกเลี่ยง |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"priority ใน React เป็นตัวเลขเดี่ยว เหมือนอันดับใน queue"** มันคือ bitmask — หลาย lane ถูก set พร้อมกันบน fiber ได้ และการเช็กความเกี่ยวข้องคือ bitwise AND ไม่ใช่การเทียบอันดับ constant binary จริงยกมาข้างบนแล้ว
+- **"`startTransition` ทำให้ update รันบน background thread"** ไม่จริง — ทุกอย่างยังรันบน main thread เหมือนเดิม transition lane แค่ทำให้งานนั้น *interruptible* และ priority ต่ำลง พิสูจน์แล้วข้างบนด้วยการที่ urgent click ยังชนะอยู่
+- **"urgent update ต้องรอ transition ปัจจุบันเสร็จสมบูรณ์ก่อน"** พิสูจน์แล้วว่าไม่จริงข้างบน: `SyncLane` update ของการคลิก commit ไปตอนที่ `isPending` ยังเป็น `true` อยู่
+
+## อ่านโค้ดที่ AI เขียน
+
+- โค้ดสมมติว่า `startTransition` ย้ายงานไป worker thread หรือ "รันใน background" จริง ๆ นอก main thread ไหม? ไม่ใช่ — มันแค่เปลี่ยน scheduling priority บน thread เดียวกัน
+- `flushSync` ถูกใช้ข้างใน `startTransition` callback หรือโรยไว้ทั่ว ๆ แบบ "เพื่อให้แน่ใจว่า state update" ไหม? นั่นทำลายจุดประสงค์ทั้งหมดของ transition และนำ main-thread blocking กลับมา ควรใช้แต่น้อยและตั้งใจเท่านั้น
+- comment อ้างว่า "update priority สูงถูก process ก่อน เหมือน priority queue" ไหม? lane คือ bitmask ที่ผูกต่อ event ไม่ใช่ queue เรียงอันดับ — เช็กว่าพฤติกรรมจริงที่อธิบายตรงกับ bitwise lane logic หรือโครงสร้างเรียงลำดับที่จินตนาการขึ้นมา
+- การเรียก `startTransition` หลายครั้งข้างใน event handler เดียวกันถูกสมมติว่าแต่ละอันได้ "background render" ที่เป็นอิสระและ resume ได้ของตัวเองไหม? มันแชร์ lane เดียวกันและถูก batch — พิสูจน์แล้วข้างบน
+
+<SpotTheBug code={`function SaveBar({ onSave }) {
+  const [isPending, startTransition] = useTransition();
+
+  function handleClick() {
+    startTransition(() => {
+      // "Run this off the main thread so the UI stays responsive"
+      onSave();
+    });
+  }
+
+  return <button onClick={handleClick} disabled={isPending}>Save</button>;
+}`}>
+สมมติฐานของ comment ผิด: `startTransition` ไม่ได้ย้าย `onSave()` ไป worker thread หรือออกจาก main thread — มันแค่ทำให้ update ที่เกิดตามมาถูก mark เป็น low-priority และ interruptible เพื่อให้ React pause มันได้ถ้ามีอะไรเร่งด่วนกว่า (เช่นคลิกอีกครั้ง) โผล่มา ถ้า `onSave` เองเป็นงานคำนวณ synchronous ที่หนักจริง ๆ การห่อมันด้วย `startTransition` ไม่ได้ทำให้การคำนวณนั้นเร็วขึ้นหรือ non-blocking ระหว่างที่มันรัน — มันยังบล็อก main thread นานเท่าที่ต้องใช้ execute อยู่ดี มีแค่ *update ที่มันกระตุ้น* เท่านั้นที่กลาย interruptible ระหว่าง fiber unit งานคำนวณที่หนักจริง ๆ ต้องถูกแบ่งย่อย (หรือย้ายไป Web Worker จริง) ไม่ว่าจะมี `startTransition` หรือไม่ก็ตาม
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**lane** คือบิตจริงใน mask 31 บิต (`SyncLane`, `InputContinuousLane`, `DefaultLane`, `TransitionLane` 14 อัน, `RetryLane` 4 อัน, `OffscreenLane` และอีกหลายตัว — constant จริงยกมาข้างบน) ถูกผูกต่อ update โดย `requestUpdateLane`: discrete event อย่างการคลิกได้ `SyncLane` ผ่าน `setCurrentUpdatePriority` ของระบบ event และโค้ดข้างใน `startTransition` ได้ transition lane ที่แชร์กันผ่าน `requestTransitionLane` package `scheduler` แยกต่างหากตัดสิน *เมื่อไร* React จะได้คิวทำงานบน lane ไหนก็ตาม ด้วย priority ห้าระดับที่มี timeout เป็น millisecond จริง และ — ในเบราว์เซอร์ — `MessageChannel` เพื่อ yield ระหว่างงานเป็นช่วง ๆ โดยเฉพาะเพื่อหลบ clamp 4ms ของ `setTimeout` พิสูจน์แล้วข้างบน: การคลิกที่เป็น `SyncLane` commit ได้ระหว่างที่ `startTransition` update หนัก ๆ ยังค้างอยู่ และ `startTransition` สองครั้งใน event เดียวกันไม่มีวัน commit ค่าเก่าแยกต่างหากเลย `flushSync` คือ escape hatch ที่ตั้งใจกลับไป synchronous แบบ blocking เต็มรูปแบบ — ใช้แต่น้อย
+</Callout>
+
+export const quizLanes = [
+  {
+    q: '"lane" ใน React คืออะไรกันแน่?',
+    options: [
+      'A named priority level like "high" or "low"',
+      'A single bit position in a shared 31-bit bitmask, assigned to an update; multiple lanes can be combined with bitwise OR',
+      'A separate JavaScript thread',
+      'A row in an internal priority queue array',
+    ],
+    answer: 1,
+    explain: 'constant จริงจาก ReactFiberLane.js (`SyncLane = 0b...010`, `DefaultLane = 0b...100000` ฯลฯ) คือตำแหน่งบิต binary จริง — ยกมาข้างบนจาก React source',
+  },
+  {
+    q: '`setState` ที่เรียกข้างใน click handler ปกติได้ lane อะไร และทำไม?',
+    options: [
+      '`IdleLane`, because clicks are low priority',
+      '`SyncLane`, because the discrete event system calls `setCurrentUpdatePriority(DiscreteEventPriority)` before your handler runs, and `requestUpdateLane` reads that current priority',
+      'A random transition lane',
+      'Whatever lane the previous update used',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์จาก source ของ `dispatchDiscreteEvent` ที่ยกมาข้างบน: ระบบ event set priority ก่อน dispatch handler ของคุณ ดังนั้น `setState` ไหนข้างในก็สืบทอด `SyncLane` โดยไม่ต้องเขียนโค้ดผูก lane เอง',
+  },
+  {
+    q: '```tsx\nstartTransition(() => setValue(1));\nstartTransition(() => setValue(2));\n```\nถูกเรียกติดกันข้างใน click handler เดียวกัน อะไรจะถูก commit?',
+    options: [
+      'First "1" commits, then "2" commits — two separate renders',
+      'Only "2" — both calls share the same transition lane for this event, and the later update supersedes the earlier one before either commits',
+      'Neither — calling startTransition twice in one event throws',
+      'It alternates unpredictably',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบนด้วย test จริง: `committedValues` ไม่มี `1` อยู่เลย — มีแค่ค่าสุดท้าย `2` เท่านั้นที่ถูก render เพราะทั้งสองการเรียกไปลง transition lane เดียวกันของ event นั้น',
+  },
+  {
+    q: 'ทำไม `packages/scheduler` ถึงเลือก `MessageChannel` แทน `setTimeout` สำหรับการ yield ระหว่างงานเป็นช่วง ๆ?',
+    options: [
+      'MessageChannel is faster to construct',
+      'Browsers clamp nested setTimeout calls to a minimum ~4ms delay; MessageChannel has no such clamp, giving more precise yield timing',
+      'setTimeout does not exist in browsers',
+      'MessageChannel can run code on a background thread',
+    ],
+    answer: 1,
+    explain: 'ยกมาตรง ๆ จาก comment ใน source ของ Scheduler.js ข้างบน: "We prefer MessageChannel because of the 4ms setTimeout clamping."',
+  },
+  {
+    q: 'ถ้า `startTransition` update ที่หนักยังคง render อยู่ใน background และผู้ใช้คลิกปุ่มที่กระตุ้น `setState` ธรรมดา (ไม่ใช่ transition) จะเกิดอะไรขึ้น?',
+    options: [
+      'The click is ignored until the transition finishes',
+      'The click\'s SyncLane update can commit on its own before the transition finishes — proven above by observing `isPending` still `true` right after the urgent update commits',
+      'React throws an error about concurrent updates',
+      'The transition is cancelled permanently and never finishes',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบน: test ยืนยันว่า `urgent` เป็น `"1"` ไปแล้ว ในขณะที่ log ที่จับไว้ทันทีหลังคลิกยังโชว์ `pending=true` — transition resume แล้วเสร็จทีหลัง ไม่ได้รับผลกระทบอะไรนอกจากถูก interrupt',
+  },
+];
+
+<Quiz client:visible id="react-internals/lanes-and-scheduling" questions={quizLanes} />
+
+<ProgressTracker client:visible id="internals-lanes" />

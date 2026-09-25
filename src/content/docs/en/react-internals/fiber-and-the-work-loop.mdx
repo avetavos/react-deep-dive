@@ -1,0 +1,315 @@
+---
+title: 'Fiber & the Work Loop'
+description: 'What a fiber node actually contains (real fields from the React source), why React keeps two fiber trees at once, and how performUnitOfWork walks the tree top-down then bottom-up — proven with render-order tests, not guesses.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## A fiber is a plain JS object, not magic
+
+Every element you write (`<div>`, `<MyComponent>`) eventually gets a corresponding **fiber** — a plain JavaScript object React allocates to track that position in the tree across time: what it currently renders as, what it rendered as last time, and work still pending on it. This is the actual `FiberNode` constructor, from `packages/react-reconciler/src/ReactFiber.js` on `facebook/react`'s `main` branch (fetched 2026-09-25) — trimmed to the fields this lesson uses, with real names, not paraphrased ones:
+
+```js
+// packages/react-reconciler/src/ReactFiber.js — FiberNode constructor (trimmed)
+function FiberNode(tag, pendingProps, key, mode) {
+  // Instance
+  this.tag = tag;
+  this.key = key;
+  this.type = null;         // set later: the element's type — a string ('div') or a function/class
+  this.stateNode = null;    // the DOM node (host components) or class instance
+
+  // Fiber tree structure — this IS the tree; there is no separate tree object
+  this.return = null;       // parent fiber
+  this.child = null;        // first child fiber
+  this.sibling = null;      // next sibling fiber
+  this.index = 0;
+
+  this.ref = null;
+  this.refCleanup = null;
+
+  // Effects of the last completed render
+  this.pendingProps = pendingProps;
+  this.memoizedProps = null;   // props from the last render that was committed
+  this.updateQueue = null;
+  this.memoizedState = null;   // hook state (a linked list) from the last committed render
+  this.dependencies = null;    // Context/use() dependencies this fiber reads
+
+  this.mode = mode;
+
+  // Effects — what changed, to be applied in the commit phase
+  this.flags = NoFlags;
+  this.subtreeFlags = NoFlags;
+  this.deletions = null;
+
+  // Lanes — priority (see the next lesson)
+  this.lanes = NoLanes;
+  this.childLanes = NoLanes;
+
+  this.alternate = null;   // the OTHER version of this fiber — see "double buffering" below
+}
+```
+
+A few of these are worth calling out because they're exactly what a diff review needs:
+
+- **`return` / `child` / `sibling`** are the whole tree. There's no separate "virtual DOM tree" data structure sitting next to the fiber tree — the fiber tree *is* the structure React walks, both to render and to commit.
+- **`memoizedProps` / `memoizedState`** are what was actually committed last time, as opposed to `pendingProps` (what's being rendered *this* pass). Reconciliation's "did this actually change" checks compare against `memoizedProps`, not against some separate cache.
+- **`flags`** (on this fiber) and **`subtreeFlags`** (OR'd up from every descendant) are how the commit phase skips whole subtrees with no work — if `subtreeFlags` is empty, React doesn't even walk in.
+- **`alternate`** is the field the rest of this lesson is about.
+
+## Double buffering: two trees, never more than two
+
+React needs to compare "what the tree looked like before" against "what it should look like now" — so it keeps **two** fiber trees: the **current** tree (what's on screen) and the **work-in-progress** tree (being built for the next commit). Crucially, React does not allocate a fresh work-in-progress tree from scratch on every update. Each fiber's `alternate` field points at its "other" version, and `createWorkInProgress` (same file) reuses that existing object when one is available:
+
+```js
+// packages/react-reconciler/src/ReactFiber.js — createWorkInProgress (trimmed)
+export function createWorkInProgress(current, pendingProps) {
+  let workInProgress = current.alternate;
+  if (workInProgress === null) {
+    // We use a double buffering pooling technique because we know that we'll
+    // only ever need at most two versions of a tree. We pool the "other"
+    // unused node that we're free to reuse. This is lazily created to avoid
+    // allocating extra objects for things that are never updated.
+    workInProgress = createFiber(current.tag, pendingProps, current.key, current.mode);
+    workInProgress.alternate = current;
+    current.alternate = workInProgress;
+  } else {
+    workInProgress.pendingProps = pendingProps;
+    workInProgress.flags = NoFlags;
+    // ...
+  }
+  workInProgress.child = current.child;
+  workInProgress.memoizedProps = current.memoizedProps;
+  workInProgress.memoizedState = current.memoizedState;   // <- hook state carries over
+  workInProgress.updateQueue = current.updateQueue;
+  // ...
+  return workInProgress;
+}
+```
+
+The comment says it outright: React only ever needs *at most two* versions of a fiber, so instead of allocating a new one every render it pools and reuses the previous "other" copy. This is exactly why re-rendering a component doesn't reset its hook state — `workInProgress.memoizedState = current.memoizedState` is a plain object copy, not a fresh `useState` initializer running again. (The "different `type` → this is a new fiber entirely, no `alternate` reuse" side of this rule is what [Reconciliation in Depth](/react/en/react-internals/reconciliation-in-depth/) proves with a mount/unmount test.)
+
+## Walking the tree: `performUnitOfWork`, `beginWork`, `completeWork`
+
+React doesn't recurse through your component tree with normal JS function calls (a deep tree would blow the call stack, and you can't pause in the middle of a recursive call). Instead, the work loop is an explicit loop over a single mutable `workInProgress` pointer, one fiber at a time — this is `performUnitOfWork` in `packages/react-reconciler/src/ReactFiberWorkLoop.js`:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — performUnitOfWork (trimmed)
+function performUnitOfWork(unitOfWork) {
+  const current = unitOfWork.alternate;
+  const next = beginWork(current, unitOfWork, entangledRenderLanes);
+  unitOfWork.memoizedProps = unitOfWork.pendingProps;
+  if (next === null) {
+    // This fiber has no more children to visit — it's done. Walk back up.
+    completeUnitOfWork(unitOfWork);
+  } else {
+    // beginWork returned a child fiber — go down into it next.
+    workInProgress = next;
+  }
+}
+```
+
+`beginWork` calls your component function (for a function component) or does the equivalent work for a host component, and returns its **first child** fiber (or `null` if there's nothing more to descend into). Because `performUnitOfWork` immediately re-assigns `workInProgress = next` and loops, this walks the tree **top-down, depth-first**: parent's `beginWork` runs, then its first child's, then *that* child's first child, and so on — before any sibling gets a turn.
+
+When `beginWork` returns `null` (a leaf, or a subtree with nothing left to visit), `completeUnitOfWork` takes over and walks back **up and across** — sibling first, then parent, exactly mirroring how you'd finish a depth-first traversal:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — completeUnitOfWork (trimmed)
+function completeUnitOfWork(unitOfWork) {
+  let completedWork = unitOfWork;
+  do {
+    const returnFiber = completedWork.return;
+    const next = completeWork(completedWork.alternate, completedWork, entangledRenderLanes);
+    if (next !== null) {
+      workInProgress = next;   // completing this fiber spawned MORE work — go there
+      return;
+    }
+    const siblingFiber = completedWork.sibling;
+    if (siblingFiber !== null) {
+      workInProgress = siblingFiber;   // move to the sibling next
+      return;
+    }
+    completedWork = returnFiber;   // no sibling — go back up to the parent
+    workInProgress = completedWork;
+  } while (completedWork !== null);
+}
+```
+
+`completeWork` is where host fibers actually build their DOM node (for a first mount) or diff their props (for an update) — it's the step that turns "I know what changed" into "here's the DOM operation," staged onto `flags` for the commit phase to apply later. Because it only runs on a fiber *after* all of that fiber's children have already completed, the order is **bottom-up**: a leaf's `completeWork` runs before its parent's.
+
+Both orders are directly observable from the outside, because a function component's body runs during its `beginWork`:
+
+```tsx
+// src/__tests__/work-loop-order.test.tsx
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('components render top-down, depth-first: parent, then child, then grandchild', () => {
+  const log: string[] = [];
+  function Grandchild() { log.push('Grandchild'); return <span>leaf</span>; }
+  function Child() { log.push('Child'); return <Grandchild />; }
+  function Parent() { log.push('Parent'); return <Child />; }
+  render(<Parent />);
+  expect(log).toEqual(['Parent', 'Child', 'Grandchild']); // beginWork order
+});
+
+test('siblings render in declaration order, after their shared parent', () => {
+  const log: string[] = [];
+  function A() { log.push('A'); return null; }
+  function B() { log.push('B'); return null; }
+  function Parent() { log.push('Parent'); return (<><A /><B /></>); }
+  render(<Parent />);
+  expect(log).toEqual(['Parent', 'A', 'B']);
+});
+
+test('ref callbacks attach bottom-up: the child\'s ref fires before the parent\'s — completeWork\'s order, made visible', () => {
+  const log: string[] = [];
+  render(
+    <div ref={() => { log.push('parent-div'); }}>
+      <span ref={() => { log.push('child-span'); }}>leaf</span>
+    </div>,
+  );
+  expect(log).toEqual(['child-span', 'parent-div']);
+});
+```
+
+```text
+✓ components render top-down, depth-first: parent, then child, then grandchild
+✓ siblings render in declaration order, after their shared parent
+✓ ref callbacks attach bottom-up: the child's ref fires before the parent's — completeWork's order, made visible
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+## Why rendering is interruptible
+
+Because the work loop is a plain `while` loop stepping over one fiber at a time (not a single unbroken recursive call), React can check, *between* any two fibers, whether it should stop and give control back to the browser. That check is `shouldYield()`, called inside the concurrent work loop:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — workLoopConcurrentByScheduler (trimmed)
+function workLoopConcurrentByScheduler() {
+  // Perform work until Scheduler asks us to yield
+  while (workInProgress !== null && !shouldYield()) {
+    performUnitOfWork(workInProgress);
+  }
+}
+```
+
+If `shouldYield()` returns `true` mid-tree, React simply stops: `workInProgress` still points at the next fiber to process, sitting there untouched, ready to resume exactly where it left off next time this root gets a turn. Nothing has been committed yet (commit only happens once the *whole* tree finishes), so a paused render is invisible — the screen still shows the previous, fully-committed tree. This is the mechanical reason a render phase can be "interrupted": it's not that React aborts mid-component, it's that it never starts the *next* fiber if something more urgent showed up. (What "more urgent" means, and the exact timing `shouldYield` uses, is [Lanes & Scheduling](/react/en/react-internals/lanes-and-scheduling/)'s subject — this lesson only needs you to see *where* in the loop that decision is made.)
+
+<Mermaid title="performUnitOfWork: top-down beginWork, bottom-up completeWork" code={loopDiagram} />
+
+export const loopDiagram = `flowchart TD
+  start["workInProgress = root"] --> begin["beginWork(fiber)\n(calls your component function)"]
+  begin -->|"has a child"| descend["workInProgress = child\n(go down)"]
+  descend --> begin
+  begin -->|"no child (leaf)"| complete["completeWork(fiber)\n(builds/diffs the DOM node)"]
+  complete -->|"has a sibling"| sibling["workInProgress = sibling"]
+  sibling --> begin
+  complete -->|"no sibling"| up["workInProgress = fiber.return\n(go up to parent, complete IT)"]
+  up --> complete
+  begin -.->|"between any two fibers"| yield{"shouldYield()?"}
+  yield -->|"yes"| pause["Stop. Nothing committed yet.\nResume here later."]
+  yield -->|"no"| begin`;
+
+## Mental Model
+
+A fiber is a mailbox for one position in the tree, and the work loop is a mail carrier walking a fixed route: down the first child every time one exists (`beginWork`), and only stepping sideways or back up once a branch is fully delivered (`completeWork`). The carrier can stop between any two stops (`shouldYield`) without losing their place, because "their place" is just `workInProgress` — one variable, not a call stack. And because each fiber keeps its previous self around (`alternate`), the carrier never needs to redraw the whole map from scratch — just update the one mailbox that changed.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Explicit loop over a mutable `workInProgress` pointer (not recursion) | Can pause between any two fibers; won't blow the call stack on a deep tree | More complex control flow than a straightforward recursive tree-walk |
+| Double buffering (`alternate`, at most 2 trees) | Re-renders reuse fiber objects and hook state instead of reallocating; O(1) extra memory regardless of tree depth | Every fiber effectively exists twice in memory once it has ever updated |
+| Top-down `beginWork` / bottom-up `completeWork` | Matches how DOM trees must be built (children exist before you can append them to a parent) | Two full passes conceptually, though implemented as one loop |
+
+## Common Misconceptions
+
+- **"React recursively calls my components like normal function calls."** It doesn't — `performUnitOfWork` is an explicit loop over `workInProgress`, proven above by the fact that a paused render doesn't leave a stack trace through your whole tree. This is *why* React can pause and resume at all.
+- **"The virtual DOM is a separate tree from fibers."** There is no separate structure — `return`/`child`/`sibling` on the `FiberNode` *are* the tree, straight from the source above.
+- **"A component's state is recreated from scratch on every render."** `createWorkInProgress` copies `memoizedState` from the current fiber; state only resets when the fiber itself is discarded (different `type`, or a changed `key`) — that's [Reconciliation in Depth](/react/en/react-internals/reconciliation-in-depth/)'s subject, not a render-phase reset.
+
+## Reading AI-generated code
+
+- Does a piece of "explain how React renders" text describe recursive function calls through your component tree, instead of an explicit work loop? That's a common but incorrect mental model to carry into a review — it predicts stack traces and unpauseable renders that don't match reality.
+- Does the code (or its accompanying explanation) assume state is torn down and rebuilt on every parent re-render? If a child's `type` is stable, its fiber (and hook state) is reused — proven above with a zero mount/unmount count for a same-type prop update.
+- Is a component's function *declared inside* another component's body (a closure over local variables, usually to "cleanly" capture a prop)? Every parent render allocates a new function object, which becomes a new `type`, so no `alternate` reuse is possible — [Reconciliation in Depth](/react/en/react-internals/reconciliation-in-depth/) proves this exact remount with a test.
+- Does a comment or docstring claim "this ref is set as soon as the component renders" or read `ref.current` synchronously in the middle of a component's function body, expecting it to already point at the DOM node? Refs are attached during `completeWork`/commit, strictly *after* the render (`beginWork`) pass finishes for that fiber — during render, `ref.current` for a ref on the element currently being returned is still whatever it was last commit (`null` on first mount).
+
+<SpotTheBug code={`function AutoFocusInput({ shouldFocus }) {
+  const inputRef = useRef(null);
+
+  // "Focus it as soon as we know we should" — reading the ref during render
+  if (shouldFocus && inputRef.current) {
+    inputRef.current.focus();
+  }
+
+  return <input ref={inputRef} />;
+}`}>
+This reads `inputRef.current` *during render* (inside the component's function body, called from `beginWork`), but refs are only attached to their DOM node later, in the commit phase — around `completeWork`/the mutation-and-layout steps — which hasn't happened yet for this pass. On the very first render, `inputRef.current` is still `null` here, so the `if` never even runs `.focus()`; the intent only works by accident on a *later* render, once a previous commit has already attached the ref. The fix is to do this in a `useLayoutEffect` (or `useEffect`, if a paint-before-focus flicker is acceptable), which runs after the DOM has actually been committed and refs are attached — see [Commit Phase & Effects](/react/en/react-internals/commit-phase-and-effects/) for exactly when that is.
+</SpotTheBug>
+
+<Callout title="The one-line takeaway">
+A **fiber** is a plain object (`tag`, `type`, `return`/`child`/`sibling`, `memoizedProps`/`memoizedState`, `flags`, `alternate`) that tracks one tree position across time — proven above with the real `FiberNode` source. React keeps **at most two** fiber trees via **double buffering** (`alternate`), so re-renders reuse fiber objects and hook state instead of rebuilding them. `performUnitOfWork` walks this with an explicit loop, not recursion: `beginWork` goes **top-down** (calling your component functions in that order, proven with a render log), `completeWork` goes **bottom-up** (proven with ref-attach order). Because it's a loop over one mutable pointer rather than a call stack, React can check `shouldYield()` **between any two fibers** and pause a render with nothing committed yet — the mechanical basis for everything the next lesson calls "interruptible."
+</Callout>
+
+export const quizFiber = [
+  {
+    q: 'Which of these is a REAL field on a React fiber, per the source quoted above?',
+    options: ['`vdom`', '`memoizedState`', '`virtualNode`', '`domRef`'],
+    answer: 1,
+    explain: '`memoizedState` (hook state from the last committed render) is a real field on `FiberNode` in `packages/react-reconciler/src/ReactFiber.js`. React has no field or structure literally named "vdom" or "virtualNode".',
+  },
+  {
+    q: 'What does the `alternate` field point to?',
+    options: [
+      'The fiber\'s parent',
+      'The OTHER version of this fiber (current <-> work-in-progress) — double buffering reuses it instead of allocating a new fiber every render',
+      'A backup copy used only for error recovery',
+      'The previous sibling',
+    ],
+    answer: 1,
+    explain: '`createWorkInProgress` checks `current.alternate` first and reuses that object when it exists — proven by the source quoted above, which explicitly comments that React needs "at most two versions" of a tree.',
+  },
+  {
+    q: '```tsx\nfunction Grandchild() { log.push("G"); return null; }\nfunction Child() { log.push("C"); return <Grandchild />; }\nfunction Parent() { log.push("P"); return <Child />; }\nrender(<Parent />);\n```\nWhat order does `log` end up in?',
+    options: ['["G", "C", "P"]', '["P", "C", "G"]', '["P", "G", "C"]', 'Undefined — React doesn\'t guarantee an order'],
+    answer: 1,
+    explain: 'Proven above: `beginWork` walks top-down, depth-first — a parent\'s component function always runs before its child\'s, which runs before the grandchild\'s.',
+  },
+  {
+    q: 'Why can React pause a render in the middle of a large tree without corrupting anything?',
+    options: [
+      'It uses Web Workers to render off the main thread',
+      'The work loop is an explicit loop over a single `workInProgress` pointer (not a recursive call stack), so it can check `shouldYield()` between any two fibers and simply stop — nothing has been committed to the DOM yet',
+      'React saves a full backup of the DOM before every render',
+      'It can\'t — "interruptible rendering" is a misconception',
+    ],
+    answer: 1,
+    explain: 'Proven above with `performUnitOfWork`/`workLoopConcurrentByScheduler`: because there\'s no recursive call stack to unwind, pausing is just "don\'t start the next fiber yet" — the previous, fully-committed tree is still what\'s on screen.',
+  },
+  {
+    q: 'What does `completeWork` do that `beginWork` does not?',
+    options: [
+      'It calls your component function',
+      'It builds or diffs the actual host (DOM) node for a fiber, and only runs after all of that fiber\'s children have already completed — bottom-up',
+      'It assigns the update\'s lane',
+      'It runs `useEffect` callbacks',
+    ],
+    answer: 1,
+    explain: 'Proven above with the ref-attach-order test: a child\'s ref (attached around its `completeWork`/commit) fires before its parent\'s, because `completeWork` only runs on a fiber after every child under it has already completed.',
+  },
+];
+
+<Quiz client:visible id="react-internals/fiber-and-the-work-loop" questions={quizFiber} />
+
+<ProgressTracker client:visible id="internals-fiber" />

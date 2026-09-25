@@ -1,0 +1,175 @@
+---
+title: 'React ทำงานอย่างไรข้างใน'
+description: 'ทำไม render loop, lane, reconciliation, commit phase และ hydration ถึงเป็นสิ่งที่ทำให้คุณตัดสินโค้ด React ที่ไม่คุ้นเคยหรือ AI เขียนได้จริง ๆ — module map พร้อม diagram เดียวที่ครอบคลุมทั้ง update'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## โมดูลนี้มีไว้ทำไม
+
+ทุกโมดูลก่อนหน้าในคอร์สนี้สอนให้คุณ *ใช้* React: hook, state, Context, Suspense, Server Components ไม่มีอันไหนต้องรู้เลยว่า React ทำอะไรกับ function call ของคุณหลังจากคุณเขียนมันไป คุณเขียน `useEffect` ที่ทำงานได้ เขียน list ที่มี `key` ถูกต้อง เขียน `<Suspense>` boundary ได้ — โดยไม่เคยต้องถามว่า React ตัดสินใจ *เมื่อไร* component function ของคุณจะรัน, *ทำไม* update หนึ่งถึง interrupt อีกอันได้, หรือ *จริง ๆ แล้ว* เกิดอะไรขึ้นระหว่าง "ฉันเรียก `setState`" กับ "หน้าจอเปลี่ยน"
+
+ช่องว่างนั้นคือจุดที่โค้ด React ที่ AI เขียนพังในแบบที่ผิวเผินดูโอเค: component ที่ประกาศไว้ข้างในอีก component หนึ่ง, index ที่ใช้เป็น `key` ของ list ที่ reorder ได้, `useLayoutEffect` ที่สู้กับ browser, `useEffect` ที่สมมติว่ารันหลัง paint เสมอ ไม่มีอันไหนเป็น syntax error ไม่มีอันไหนที่ `tsc` จับได้ ทุกอันเป็นข้อเท็จจริงเกี่ยวกับ runtime ล้วน ๆ
+
+โมดูลนี้มีงานเดียว: ให้ความรู้ runtime ห้าชิ้นที่ทำให้คุณมองโค้ด **React ของคนอื่น** — ไม่ต้องรัน ไม่ต้อง profile แค่อ่าน — แล้วตอบได้ว่า:
+
+1. **โค้ดนี้จะ remount หรือ update ในที่เดิม?** (fiber, work loop, reconciliation)
+2. **โค้ดนี้จะบล็อกการกดคีย์ครั้งถัดไปไหม หรือ React interrupt มันได้?** (lane, scheduling)
+3. **ระหว่าง child สองตัวที่หน้าตาคล้ายกัน อันไหนเก็บ state ไว้?** (กฎ type+key ของ reconciliation)
+4. **ref, `useInsertionEffect`, `useLayoutEffect`, `useEffect` ของฉันรันตามลำดับไหนจริง ๆ?** (commit phase)
+5. **ทำไมหน้าเว็บถึงเพิ่งโชว์ hydration error และ React ทำอะไรกับมัน?** (hydration และ streaming)
+
+ทุก claim ในโมดูลนี้อ้างอิงหนึ่งในสามอย่าง: [react.dev](https://react.dev), React source จริงบน `github.com/facebook/react` (ดึงจาก branch `main` อ้างชื่อไฟล์และ function) หรือ test ใน harness ของคอร์สนี้ที่วาง output จริงไว้ข้างล่าง — ไม่มีการเดา internals เด็ดขาด
+
+<Callout title="หมายเหตุเรื่องเวอร์ชัน พูดครั้งเดียว">
+`npm view react version` ให้ผลเป็น `19.3.0` ณ ตอนที่เขียนโมดูลนี้ ส่วนคอร์สนี้เล็งเป้าที่ React 19.0 API เป็นหลัก source ที่ยกมาทั้งโมดูลนี้ดึงจาก branch `main` ของ `facebook/react` ซึ่งนำหน้า release ที่ tag ไว้ทุกอัน — ตรงไหนที่บทยกกลไกมา จะบอกชื่อไฟล์และ function ให้คุณ diff กับเวอร์ชันที่คุณกำลังอ่านได้ และจะบอกชัดตรงไหนที่พฤติกรรมที่อธิบายใหม่กว่า 19.0
+</Callout>
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บท | ตอบคำถาม |
+|---|---|
+| [Fiber & the Work Loop](/react/th/react-internals/fiber-and-the-work-loop/) | fiber คืออะไร และ React เดิน tree เพื่อสร้างมันอย่างไร? |
+| [Lanes & Scheduling](/react/th/react-internals/lanes-and-scheduling/) | React ตัดสิน priority ของ update อย่างไร และ `startTransition` เปลี่ยนมันอย่างไร? |
+| [Reconciliation in Depth](/react/th/react-internals/reconciliation-in-depth/) | จาก tree เก่ากับ tree ใหม่ React เก็บ ย้าย หรือทิ้ง node ไหนบ้างกันแน่? |
+| [Commit Phase & Effects](/react/th/react-internals/commit-phase-and-effects/) | พอ React ตัดสินใจแล้วว่าอะไรเปลี่ยน มันแตะ DOM และรัน effect ของคุณตามลำดับไหน? |
+| [Hydration & Streaming](/react/th/react-internals/hydration-and-streaming/) | หน้าที่ render จาก server กลายเป็น interactive ได้อย่างไร และเกิดอะไรขึ้นเมื่อ client กับ server ไม่ตรงกัน? |
+
+บท [Rendering & Reconciliation](/react/th/foundations/rendering-and-reconciliation/) พิสูจน์ไปแล้วจากมุมภายนอก (render/commit แยกกัน, กฎ type-vs-key ผ่าน mount/unmount count) โมดูลนี้ไปลึกกว่านั้นถึงกลไกที่ผลิตตัวเลขพวกนั้นออกมา และลิงก์กลับแทนที่จะพิสูจน์ซ้ำ [Transitions](/react/th/concurrent-and-suspense/transitions/) โชว์ API ฝั่งผู้ใช้ของ `useTransition` ไปแล้ว [Lanes & Scheduling](/react/th/react-internals/lanes-and-scheduling/) โชว์ว่า "lane" ข้างใต้มันคืออะไรกันแน่
+
+## คำถามที่รันได้จริง: component นี้ update ในที่เดิม หรือเริ่มใหม่?
+
+ก่อนจะลงลึกกลไก นี่คือข้อเท็จจริงข้อเดียวที่ทั้งโมดูลนี้หมุนรอบ: React ตัดสิน "ของเดิม update มันไป" กับ "ของใหม่ ทิ้งแล้วสร้างใหม่" ด้วยการเทียบ `type` ของ element กับ fiber ที่นั่งอยู่ตำแหน่งนั้นอยู่แล้ว — ไม่มีอะไรมากไปกว่านั้น
+
+```tsx
+// src/__tests__/module-preview.test.tsx
+import { useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('same type across renders: no mount, no unmount, just a prop update', () => {
+  const log: string[] = [];
+  function Row({ label }: { label: string }) {
+    useEffect(() => {
+      log.push(`mount:${label}`);
+      return () => { log.push(`unmount:${label}`); };
+    }, []);
+    return <li>{label}</li>;
+  }
+  const { rerender } = render(<Row label="a" />);
+  log.length = 0;
+  rerender(<Row label="b" />); // same component, new prop
+  expect(log).toEqual([]); // proves: React updated the existing fiber in place
+});
+```
+
+```text
+✓ same type across renders: no mount, no unmount, just a prop update
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+ทุกบทในโมดูลนี้จริง ๆ แล้วคือคำตอบของ "ทำไมกฎนั้นถึงเป็นจริง และมีอะไรตามมาจากมันอีก"
+
+<Mermaid title="หนึ่ง update ตั้งแต่ต้นจนจบ" code={bigDiagram} />
+
+export const bigDiagram = `flowchart TD
+  trigger["Update triggered\n(setState, startTransition, hydration)"] --> lane["Lane assigned — priority\n(Lanes & Scheduling)"]
+  lane --> render["Render phase\nbeginWork top-down / completeWork bottom-up\ninterruptible via shouldYield\n(Fiber & the Work Loop)"]
+  render --> recon["Reconciliation\ndiff by type, then by key\n(Reconciliation in Depth)"]
+  recon --> commit["Commit phase\nbefore-mutation -> mutation -> layout -> PAINT -> passive\n(Commit Phase & Effects)"]
+  commit --> current["Work-in-progress tree becomes 'current'"]
+  entry["Server sends HTML"] --> stream["renderToPipeableStream ... hydrateRoot\nselective hydration, mismatch recovery\n(Hydration & Streaming)"]
+  stream --> render`;
+
+## Mental Model
+
+การอ่านโค้ด React ที่ไม่คุ้นเคยให้ดี คือการรันเครื่องเล็ก ๆ ในหัวคุณ ในขณะที่ตาเห็นแค่ JSX: *element นี้ type อะไร, มี key อะไร, update นี้อยู่ lane ไหน, และตอนนี้อยู่ phase ไหนของ commit* ห้าบทในที่นี้คือสี่คำถามนั้นเป๊ะ ๆ บทละหนึ่งคำถาม (fiber/work-loop คลุม "type อะไร และ React ไปถึงตรงนั้นได้อย่างไร"; lanes คลุม "priority อะไร"; reconciliation คลุม "key เดียวกัน = instance เดียวกัน"; commit คลุม "phase ไหน ลำดับอะไร"; hydration คลุมสิ่งที่เกิดขึ้นเมื่อ render แรกสุดมี DOM ให้ reconcile ด้วยอยู่แล้ว)
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"internals มีไว้สำหรับคนที่อยาก contribute ให้ React"** คุณต้องรู้แค่พอจะ *อ่าน* diff ได้ ไม่ต้องถึงขั้น reimplement reconciler ทุกข้อเท็จจริงในโมดูลนี้คือสิ่งที่คุณชี้ไปที่ pull request ของคนอื่นได้
+- **"ถ้า compile ผ่านและ render ถูกครั้งแรก โค้ดก็โอเคแล้ว"** component ที่ประกาศข้างในอีก component, `useLayoutEffect` ที่วัดค่าก่อน ref จะ attach, index key บน list ที่ reorder ได้ — ทั้งหมดนี้ render ถูกใน pass *แรก* บั๊กจะโผล่เฉพาะ render ที่สอง ซึ่งเป็น pass เดียวกับที่การเทสด้วยมือเร็ว ๆ มักข้ามไป
+- **"พฤติกรรม internal ของ React เป็นเวทมนตร์ที่ไม่มีเอกสาร"** เกือบทุกอย่างในโมดูลนี้ระบุไว้บน react.dev หรืออ่านได้ตรง ๆ ใน `packages/react-reconciler` — มันไม่คุ้นเคย ไม่ใช่ว่าไม่มีเอกสาร
+
+## อ่านโค้ดที่ AI เขียน
+
+จุดประสงค์ทั้งหมดของโมดูลนี้คือ section นี้ ซ้ำห้าครั้ง — บทละหนึ่ง เป็นตัวอย่างนำร่อง นี่คือเวอร์ชันสำรวจภาพรวม: โค้ดที่ render ถูกในครั้งแรก แต่ยังคงผิดอยู่ดี
+
+<SpotTheBug code={`function ProductList({ products }) {
+  function ProductCard({ product }) {
+    return <li>{product.name}</li>;
+  }
+  return (
+    <ul>
+      {products.map((p) => <ProductCard key={p.id} product={p} />)}
+    </ul>
+  );
+}`}>
+`ProductCard` ถูกประกาศ *ข้างใน* render body ของ `ProductList` ทุกครั้งที่ `ProductList` render มันสร้าง function ใหม่เอี่ยม — `type` ใหม่ — ทั้งที่โค้ดหน้าตาเหมือนเดิมทุกประการ reconciler ของ React เทียบ `type` ของ element (ตัว function reference เอง) กับสิ่งที่อยู่ตรงนั้นก่อนหน้า function reference ใหม่แปลว่า "นี่คือ component คนละตัว" ดังนั้นทุก `ProductCard` จะ unmount แล้ว remount ทุกครั้งที่ `ProductList` re-render ไม่ว่าจะมี `key` หรือไม่ก็ตาม state ข้างใน `ProductCard` reset ทุกครั้ง ทางแก้คือย้าย `ProductCard` ออกไปไว้ top level ของ module (ข้างนอก `ProductList`) เพื่อให้ `type` เป็น function reference เดียวกันข้ามทุก render [Fiber & the Work Loop](/react/th/react-internals/fiber-and-the-work-loop/) กับ [Reconciliation in Depth](/react/th/react-internals/reconciliation-in-depth/) พิสูจน์กลไกนี้ด้วย test จริง
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+ห้ากลไกตัดสินว่าเกิดอะไรขึ้นหลังจากคุณเขียน component: **fiber** (work-in-progress tree ที่ React สร้างและเดินจริง ๆ), **lane** (priority ที่ update วิ่งอยู่), **reconciliation** (type+key เดียวกัน = update ในที่เดิม ไม่งั้น remount), **commit phase** ต่าง ๆ (mutation แล้ว layout แล้ว paint แล้ว passive effect — ลำดับตายตัว ไม่ใช่คำแนะนำ) และ **hydration** (การผูกพฤติกรรมเข้ากับ HTML ของ server ที่มีอยู่แล้ว) ไม่มีอันไหนแปลกใหม่เกินเหตุ — มันอยู่บน react.dev และใน `packages/react-reconciler` — แต่แทบไม่มีโค้ดที่ AI สร้างอันไหนเขียนโดยคำนึงถึงมัน ซึ่งเป็นเหตุผลว่าทำไมมันถึงคุ้มค่าที่จะมีอยู่ในหัวตอนคุณ review โค้ด
+</Callout>
+
+export const quizInternalsIndex = [
+  {
+    q: "เป้าหมายหลักของโมดูลนี้คืออะไร (What is this module's central goal)?",
+    options: [
+      'Teach you to reimplement React\'s reconciler',
+      'Let you judge, by reading unfamiliar React source, whether it will remount, block input, or misorder effects',
+      'Replace the need for React DevTools',
+      'Cover every internal React source file line by line',
+    ],
+    answer: 1,
+    explain: 'โมดูลนี้ตั้งใจ scope ไว้ที่ทักษะการอ่าน: จากโค้ด React ของคนอื่น คุณทำนายได้ไหมว่า reconciler กับ commit phase จะทำอะไรจริง ๆ จากแค่ source เท่านั้น',
+  },
+  {
+    q: 'React ใช้การเทียบค่าอะไรเพียงอย่างเดียวเพื่อตัดสิน "update fiber นี้ในที่เดิม" กับ "ทิ้งแล้วสร้างใหม่"?',
+    options: [
+      'Whether the props changed',
+      'Whether the element\'s `type` (and `key`, for a sibling in a list) matches what was previously in that position',
+      'Whether the component has state',
+      'Whether the component is memoized',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้วย test ตัวอย่างนำร่องข้างบน: type เดิมข้าม render ให้ mount/unmount call เป็นศูนย์ — มีแค่ prop ที่เปลี่ยนถูก apply เข้าไป Reconciliation in Depth ลงลึกถึง function จริงที่ implement การเทียบนี้',
+  },
+  {
+    q: '```tsx\nfunction Parent() {\n  function Child() { return <p>hi</p>; }\n  return <Child />;\n}\n```\nทำไม `Child` ถึง remount ทุกครั้งที่ `Parent` render ทั้งที่โค้ดข้างในไม่เคยเปลี่ยน?',
+    options: [
+      'React always remounts nested function declarations',
+      'A new `Child` function object is created every render, so its `type` is a different reference each time — React sees "a different component," not the same one',
+      'It doesn\'t — this is a common misconception',
+      '`Child` needs a `key` to avoid remounting',
+    ],
+    answer: 1,
+    explain: 'function identity คือความหมายของ type สำหรับ component function ที่ประกาศข้างในอีก function เป็นวัตถุใหม่ทุกครั้งที่เรียก ดังนั้นการเทียบ type ของ reconciliation ล้มเหลวทุกครั้ง ไม่ว่าจะมี key หรือไม่',
+  },
+  {
+    q: 'จริงหรือเท็จ: ทุกข้อเท็จจริงในโมดูลนี้ระบุไว้บน react.dev, ยกมาจาก React source พร้อมชื่อไฟล์และ function หรือพิสูจน์ด้วย test ที่โชว์ output จริง',
+    options: ['True', 'False — some internals had to be guessed', 'Only the fiber lesson follows this rule', 'Only true for React 19.0'],
+    answer: 0,
+    explain: 'นี่คือกฎการอ้างอิงที่ระบุไว้ชัดเจนในบทนำ — ไม่มีชื่อ field หรือตัวเลขที่เดาเอาเองในห้าบทนี้เลย',
+  },
+  {
+    q: 'บทไหนอธิบายว่าทำไม update หนึ่ง (เช่นการกรอง list ที่เร็ว) ถึงไม่บล็อก update ที่เร่งด่วนกว่า (เช่นการกดคีย์ครั้งถัดไป)?',
+    options: ['Commit Phase & Effects', 'Hydration & Streaming', 'Lanes & Scheduling', 'Reconciliation in Depth'],
+    answer: 2,
+    explain: 'Lanes & Scheduling คลุม priority bitmask ที่ React ผูกกับทุก update และ startTransition เปลี่ยน lane ที่ update ตกไปอยู่อย่างไร',
+  },
+];
+
+<Quiz client:visible id="react-internals/index" questions={quizInternalsIndex} />
+
+<ProgressTracker client:visible id="internals-index" />

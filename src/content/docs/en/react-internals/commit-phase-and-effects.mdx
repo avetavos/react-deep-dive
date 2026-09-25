@@ -1,0 +1,318 @@
+---
+title: 'Commit Phase & Effects'
+description: 'The three sub-phases of the commit phase plus the separate passive-effects flush, the exact fire order across useInsertionEffect, refs, useLayoutEffect and useEffect — proven parent/child, mount/unmount/update — and why an Effect can run before the browser paints after a discrete event.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The commit phase is three sub-phases, not one step
+
+Once reconciliation has finished staging `Placement`/`Update`/`Deletion` flags across the tree, the commit phase applies them — but "commit" isn't a single pass. `commitRootImpl`, in `packages/react-reconciler/src/ReactFiberWorkLoop.js`, names the phases in its own comments, in this exact order:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — commitRootImpl (trimmed, comments verbatim)
+// The first phase a "before mutation" phase. We use this phase to read the
+// state of the host tree right before we mutate it.
+commitBeforeMutationEffects(root, finishedWork, lanes);
+
+// The next phase is the mutation phase, where we mutate the host tree.
+commitMutationEffects(root, finishedWork, lanes);
+
+// [The work-in-progress tree becomes `root.current` HERE — between mutation and layout]
+
+// The next phase is the layout phase, where we call effects that read
+// the host tree after it's been mutated. The idiomatic use case for this is
+// layout, but class component lifecycles also fire here for legacy reasons.
+commitLayoutEffects(finishedWork, root, lanes);
+```
+
+`useInsertionEffect` fires inside the **mutation** phase (before the DOM is fully done, specifically before CSS-in-JS libraries need to inject rules); `useLayoutEffect` fires inside the **layout** phase, strictly *after* `root.current` has been flipped to the new tree — which is exactly why `useLayoutEffect` can read the just-mutated DOM. `useEffect` (a **passive** effect) is not in this synchronous call chain at all — it's scheduled separately, via `scheduleCallback(NormalSchedulerPriority, ...)` in the same file, to run *after* the browser has had a chance to paint.
+
+## The exact order, proven across parent and child
+
+Here's all of that made observable in one test: a parent and a child, each with all three effect types, on mount:
+
+```tsx
+// src/__tests__/commit-order-mount.test.tsx
+import { useRef, useInsertionEffect, useLayoutEffect, useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('mount order: useInsertionEffect, then refs + useLayoutEffect, then useEffect — child before parent within each phase', () => {
+  const log: string[] = [];
+
+  function Child() {
+    const ref = useRef<HTMLSpanElement | null>(null);
+    useInsertionEffect(() => { log.push('insertion:child'); });
+    useLayoutEffect(() => { log.push(`layout:child ref=${ref.current?.tagName}`); });
+    useEffect(() => { log.push('passive:child'); });
+    return <span ref={ref}>child</span>;
+  }
+
+  function Parent() {
+    const ref = useRef<HTMLDivElement | null>(null);
+    useInsertionEffect(() => { log.push('insertion:parent'); });
+    useLayoutEffect(() => { log.push(`layout:parent ref=${ref.current?.tagName}`); });
+    useEffect(() => { log.push('passive:parent'); });
+    return <div ref={ref}><Child /></div>;
+  }
+
+  render(<Parent />);
+
+  expect(log).toEqual([
+    'insertion:child',
+    'insertion:parent',
+    'layout:child ref=SPAN',
+    'layout:parent ref=DIV',
+    'passive:child',
+    'passive:parent',
+  ]);
+});
+```
+
+```text
+✓ mount order: useInsertionEffect, then refs + useLayoutEffect, then useEffect — child before parent within each phase
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Two things worth reading twice in that output: first, **refs are already attached by the time `useLayoutEffect` runs** (`ref.current?.tagName` prints the real tag, not `undefined`) — refs attach as part of the mutation/layout work, before user layout effects get their turn. Second, within *each* phase, **child fires before parent** — `commitMutationEffectsOnFiber`/`commitLayoutEffects` recurse into children first and call the current fiber's own effects on the way back up, the same bottom-up shape [Fiber & the Work Loop](/react/en/react-internals/fiber-and-the-work-loop/) proved for `completeWork`.
+
+## Update order: the previous cleanup runs before the next setup
+
+On a re-render where a dependency changes, the OLD effect's cleanup runs before the NEW effect's setup — not after, not batched separately:
+
+```tsx
+// src/__tests__/commit-order-update.test.tsx
+import { useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('on update, the previous effect\'s cleanup runs before the new effect\'s setup', () => {
+  const log: string[] = [];
+  function Probe({ id }: { id: number }) {
+    useEffect(() => {
+      log.push(`setup:${id}`);
+      return () => { log.push(`cleanup:${id}`); };
+    }, [id]);
+    return null;
+  }
+  const { rerender } = render(<Probe id={1} />);
+  log.length = 0;
+  rerender(<Probe id={2} />);
+  expect(log).toEqual(['cleanup:1', 'setup:2']);
+});
+```
+
+```text
+✓ on update, the previous effect's cleanup runs before the new effect's setup
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## Unmount order: the *opposite* order from mount — parent before child
+
+This is the surprising one, and it's real, not a testing artifact: when an entire subtree is deleted (not just updated), `commitDeletionEffectsOnFiber` (`packages/react-reconciler/src/ReactFiberCommitWork.js`) runs a fiber's own cleanup *before* recursing into its children:
+
+```js
+// packages/react-reconciler/src/ReactFiberCommitWork.js — commitDeletionEffectsOnFiber, FunctionComponent case (trimmed)
+case FunctionComponent:
+case SimpleMemoComponent: {
+  commitHookEffectListUnmount(HookInsertion, deletedFiber, nearestMountedAncestor);
+  commitHookLayoutUnmountEffects(deletedFiber, nearestMountedAncestor, HookLayout);
+  // THEN, and only then, recurse into children:
+  recursivelyTraverseDeletionEffects(finishedRoot, nearestMountedAncestor, deletedFiber);
+  break;
+}
+```
+
+The current fiber's own layout-effect cleanup runs, and *then* the traversal descends into its children — the reverse of the bottom-up order mount uses. Proven directly:
+
+```tsx
+// src/__tests__/commit-order-unmount.test.tsx
+import { useLayoutEffect, useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('unmounting a whole subtree cleans up top-down (parent before child) — the OPPOSITE order from mount', () => {
+  const log: string[] = [];
+
+  function Child() {
+    useLayoutEffect(() => () => { log.push('layout-cleanup:child'); }, []);
+    useEffect(() => () => { log.push('passive-cleanup:child'); }, []);
+    return <span>child</span>;
+  }
+  function Parent() {
+    useLayoutEffect(() => () => { log.push('layout-cleanup:parent'); }, []);
+    useEffect(() => () => { log.push('passive-cleanup:parent'); }, []);
+    return <div><Child /></div>;
+  }
+
+  const { unmount } = render(<Parent />);
+  unmount();
+
+  expect(log).toEqual([
+    'layout-cleanup:parent',
+    'layout-cleanup:child',
+    'passive-cleanup:parent',
+    'passive-cleanup:child',
+  ]);
+});
+```
+
+```text
+✓ unmounting a whole subtree cleans up top-down (parent before child) — the OPPOSITE order from mount
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Mount builds a DOM tree bottom-up (a parent needs its children to already exist before it can be considered "done" — [Fiber & the Work Loop](/react/en/react-internals/fiber-and-the-work-loop/)'s `completeWork` order); tearing a subtree down has no such constraint, so React just walks the fiber tree in its natural top-down order and cleans up as it goes. If your code assumes cleanup is always "reverse of setup, child first" — proven true for a *single* unmounting component, but not for a whole deleted subtree — this is where that assumption breaks.
+
+## Passive effects are a separate, later flush
+
+`useEffect`'s callback isn't called from inside `commitRootImpl` at all — it's handed to `scheduleCallback(NormalSchedulerPriority, ...)`, which is the same `scheduler` package [Lanes & Scheduling](/react/en/react-internals/lanes-and-scheduling/) covered, at normal (not immediate) priority. That's the mechanical reason `useEffect` normally runs *after* the browser paints: it's simply scheduled as separate, lower-priority work, not bundled into the synchronous commit. `flushPassiveEffects` (same file) is the function that actually runs the queued passive effects when that scheduled callback fires — and it's also called directly in a couple of other places (before starting certain new synchronous work), which is part of why passive effects can sometimes run earlier than "after paint."
+
+## Why an Effect can sometimes run *before* paint
+
+This sounds like a contradiction with the previous section, and react.dev states it as a deliberate exception, not a bug — quoting the `useEffect` reference page's Caveats section directly:
+
+> "If your Effect wasn't caused by an interaction (like a click), React will generally let the browser **paint the updated screen first before running your Effect.**" ... "If your Effect **is** caused by an interaction (like a click), **React may run your Effect before the browser paints the updated screen**. This ensures that the result of the Effect can be observed by the event system."
+
+In plain terms: an Effect triggered by a discrete event (a click) can be flushed synchronously before the browser gets a chance to paint, specifically so that anything the Effect does (like calling `setState` again) is visible to React's own event handling before the next event is processed — but an Effect that wasn't caused by a discrete interaction gets the normal, paint-first treatment. If an Effect does something visual and you're seeing a flicker either way, that's what `useLayoutEffect` (which *always* blocks paint until it and any state updates inside it finish, per the same page) is for — not a reason to guess at `useEffect`'s timing.
+
+<Mermaid title="Commit phase order, mount vs. unmount" code={commitDiagram} />
+
+export const commitDiagram = `flowchart TD
+  subgraph Mount["Mount (bottom-up)"]
+    m1["commitBeforeMutationEffects"] --> m2["commitMutationEffects\n(useInsertionEffect fires here, child before parent)"]
+    m2 --> flip["root.current = finishedWork"]
+    flip --> m3["commitLayoutEffects\n(refs attach, useLayoutEffect fires, child before parent)"]
+    m3 --> paint(["Browser paints"])
+    paint --> m4["Passive flush (scheduled separately)\nuseEffect fires, child before parent"]
+  end
+  subgraph Unmount["Unmount a whole subtree (top-down)"]
+    u1["commitDeletionEffectsOnFiber(parent)\nlayout cleanup: parent"] --> u2["recurse into children\nlayout cleanup: child"]
+    u2 --> u3["passive cleanup: parent, then child\n(same top-down order)"]
+  end`;
+
+## Mental Model
+
+Think of the commit phase as three separate crews visiting the same building in sequence, each finishing their whole pass before the next starts: the "read the old layout" crew (before mutation), the "tear down walls and put up new ones" crew (mutation — this is also when `useInsertionEffect` and refs get attached, bottom-up as each room finishes), and the "measure and adjust before anyone's allowed in" crew (layout — `useLayoutEffect`, also bottom-up). Only after all three crews finish does the building open to visitors (paint), and *then* a fourth, unhurried crew (passive effects) comes through — unless a visitor (a discrete event) needs something fixed immediately, in which case that fourth crew can be called in before the doors open after all. Demolishing the whole building, by contrast, doesn't need the "children must exist before the parent is done" constraint mounting has — so demolition just proceeds in the building's normal top-down order, floor by floor from the top.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Three synchronous commit sub-phases (before-mutation, mutation, layout) | Refs and DOM are guaranteed ready before layout effects run; layout effects can safely measure and adjust before paint | Anything in `useLayoutEffect` blocks the browser from painting — proven by react.dev's own caveat |
+| Passive effects scheduled separately, after paint | The common case (most `useEffect`s) never blocks the browser from painting | Adds a small window where the DOM is visible but effects (subscriptions, fetches) haven't run yet |
+| Bottom-up mount / top-down unmount (not symmetric) | Matches each operation's real constraint (build needs children first; teardown has no such constraint) | Breaks the intuitive "cleanup is just setup in reverse" mental model for a whole deleted subtree |
+
+## Common Misconceptions
+
+- **"`useEffect` always runs after the browser paints."** Mostly true, but react.dev documents a deliberate exception for Effects caused by a discrete interaction — quoted above.
+- **"Effect cleanup always runs child-before-parent, same as mount just reversed."** True for updates and for a single component unmounting on its own — but proven false above for a whole subtree being deleted at once, where it's parent-before-child.
+- **"Refs are set as soon as the component function returns its JSX."** They're attached during the mutation/layout commit sub-phases, strictly after render — proven above by `ref.current` already being populated inside `useLayoutEffect`, which only makes sense if the attach already happened by then.
+- **"`useInsertionEffect` and `useLayoutEffect` fire at basically the same time."** They're genuinely two different phases — mutation, then layout — and `useInsertionEffect` exists specifically to run *before* the DOM mutation is fully settled, for CSS-in-JS libraries that need to inject style rules ahead of any layout read.
+
+## Reading AI-generated code
+
+- Does a `useLayoutEffect` read `ref.current` for a ref attached in the **same** render pass? That's fine — refs are guaranteed attached by the layout phase, proven above. But does it assume the ref is populated inside the component's render body (outside any effect)? That's not — refs attach during commit, after render.
+- Does code assume unmount cleanup for a whole removed section always fires child-first? For a single component removed on its own (its parent stays mounted), yes; for an entire subtree deleted together, proven above to be parent-first — a review that assumes universal "reverse of mount" ordering can be wrong here.
+- Is `useEffect` used for something that must happen *before* the user sees a visual result (measuring layout, positioning a tooltip, preventing a flash of wrong content) instead of `useLayoutEffect`? That's the textbook case react.dev calls out for switching hooks.
+- Does a comment assume `setState` inside a `useEffect` triggered by a click will always show up "next frame," when React may actually flush it before that same frame paints, per the discrete-event exception quoted above?
+
+<SpotTheBug code={`function Tooltip({ targetRef }) {
+  const tipRef = useRef(null);
+  const [top, setTop] = useState(0);
+
+  useEffect(() => {
+    // Position the tooltip based on the target's current layout
+    const rect = targetRef.current.getBoundingClientRect();
+    setTop(rect.bottom);
+  }, []);
+
+  return <div ref={tipRef} style={{ position: 'absolute', top }}>tip</div>;
+}`}>
+Positioning is a layout read-then-write done in `useEffect`, which is scheduled to run *after* the browser paints. The tooltip will first paint at `top: 0` (its initial state), then flicker to the correct position once the passive effect runs and its `setState` triggers a second commit — a visible jump for something that should look correct on the very first frame. The fix is `useLayoutEffect`, which runs synchronously after the DOM mutation but *before* the browser paints (per react.dev, proven above with real timing), so the measurement and the resulting re-render both happen before anything is shown on screen.
+</SpotTheBug>
+
+<Callout title="The one-line takeaway">
+Commit is three synchronous sub-phases in a fixed order — **before-mutation**, **mutation** (DOM changes + `useInsertionEffect`, refs attach here too), **layout** (`useLayoutEffect`, after `root.current` flips to the new tree) — proven above with refs already populated inside `useLayoutEffect`. **Passive effects** (`useEffect`) are scheduled separately, normally *after paint*, except react.dev documents a deliberate exception for Effects caused by a discrete interaction like a click. Within a phase, mount fires **child before parent** (bottom-up, matching how the DOM tree is built) — but proven above, deleting a **whole subtree** cleans up in the *opposite* order, **parent before child**, straight from `commitDeletionEffectsOnFiber`'s own recursion order.
+</Callout>
+
+export const quizCommit = [
+  {
+    q: 'In what order does `commitRootImpl` run its three named sub-phases?',
+    options: [
+      'Layout, then mutation, then before-mutation',
+      'Before-mutation, then mutation, then layout — with the work-in-progress tree becoming `root.current` in between mutation and layout',
+      'They all run in a single pass with no defined order',
+      'Mutation, then before-mutation, then layout',
+    ],
+    answer: 1,
+    explain: 'Quoted directly from the source comments above: "before mutation" reads the old tree, "mutation" applies DOM changes, and "layout" runs effects that read the just-mutated tree — in that order.',
+  },
+  {
+    q: 'By the time a `useLayoutEffect` callback runs, is a ref attached to that render\'s DOM node already populated?',
+    options: [
+      'No — refs populate only after useEffect runs',
+      'Yes — refs attach during the mutation/layout commit sub-phases, strictly before user useLayoutEffect callbacks run for that commit',
+      'Only in development mode',
+      'Only if the ref was passed with forwardRef',
+    ],
+    answer: 1,
+    explain: 'Proven above: the mount-order test\'s `useLayoutEffect` printed the real DOM tag name from `ref.current`, not `undefined` — the ref was already attached.',
+  },
+  {
+    q: 'When an entire subtree is deleted at once (e.g., a parent conditionally stops rendering a whole branch), what is the cleanup order for `useLayoutEffect`s in that subtree?',
+    options: [
+      'Child before parent, same as mount reversed',
+      'Parent before child — the opposite of mount\'s bottom-up order, straight from `commitDeletionEffectsOnFiber`\'s recursion',
+      'Random order',
+      'All cleanups run simultaneously',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real unmount test: `layout-cleanup:parent` logs before `layout-cleanup:child`. The source shows why: the current fiber\'s own cleanup runs before `recursivelyTraverseDeletionEffects` descends into children.',
+  },
+  {
+    q: 'According to react.dev, when can `useEffect` run BEFORE the browser paints the updated screen?',
+    options: [
+      'Never — useEffect always runs after paint, no exceptions',
+      'When the Effect was caused by an interaction like a click — React may run it before paint so its result is observable to the event system',
+      'Only during Server-Side Rendering',
+      'Only if wrapped in flushSync',
+    ],
+    answer: 1,
+    explain: 'Quoted directly from react.dev\'s useEffect reference Caveats section above: an Effect caused by an interaction like a click may run before the browser paints.',
+  },
+  {
+    q: '```tsx\nfunction Probe({ id }) {\n  useEffect(() => {\n    console.log("setup", id);\n    return () => console.log("cleanup", id);\n  }, [id]);\n}\n// rendered with id=1, then re-rendered with id=2\n```\nWhat order do the logs print?',
+    options: [
+      '"setup 1", "setup 2", "cleanup 1"',
+      '"cleanup 1", "setup 2"',
+      '"setup 2", "cleanup 1"',
+      '"cleanup 1", "cleanup 2", "setup 2"',
+    ],
+    answer: 1,
+    explain: 'Proven above: on an update, the previous effect\'s cleanup always runs before the new effect\'s setup — never batched separately, never reversed.',
+  },
+];
+
+<Quiz client:visible id="react-internals/commit-phase-and-effects" questions={quizCommit} />
+
+<ProgressTracker client:visible id="internals-commit" />

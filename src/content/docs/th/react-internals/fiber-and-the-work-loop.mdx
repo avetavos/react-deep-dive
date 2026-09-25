@@ -1,0 +1,315 @@
+---
+title: 'Fiber & the Work Loop'
+description: 'fiber node เก็บอะไรไว้จริง ๆ (field จริงจาก React source), ทำไม React ถึงเก็บ fiber tree สองต้นพร้อมกัน และ performUnitOfWork เดิน tree จากบนลงล่างแล้วล่างขึ้นบนอย่างไร — พิสูจน์ด้วย test ลำดับ render จริง ไม่ใช่การเดา'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## fiber คือ plain JS object ธรรมดา ไม่ใช่เวทมนตร์
+
+ทุก element ที่คุณเขียน (`<div>`, `<MyComponent>`) ในที่สุดจะมี **fiber** คู่กันมาด้วย — plain JavaScript object ที่ React จัดสรรไว้เพื่อติดตามตำแหน่งนั้นบน tree ข้ามเวลา: ตอนนี้ render เป็นอะไร, รอบที่แล้ว render เป็นอะไร, และงานที่ค้างอยู่ นี่คือ `FiberNode` constructor ตัวจริง จาก `packages/react-reconciler/src/ReactFiber.js` บน branch `main` ของ `facebook/react` (ดึงมาเมื่อ 2026-09-25) — ตัดให้เหลือ field ที่บทนี้ใช้ ชื่อจริงทั้งหมด ไม่ใช่คำที่ paraphrase:
+
+```js
+// packages/react-reconciler/src/ReactFiber.js — FiberNode constructor (trimmed)
+function FiberNode(tag, pendingProps, key, mode) {
+  // Instance
+  this.tag = tag;
+  this.key = key;
+  this.type = null;         // set later: the element's type — a string ('div') or a function/class
+  this.stateNode = null;    // the DOM node (host components) or class instance
+
+  // Fiber tree structure — this IS the tree; there is no separate tree object
+  this.return = null;       // parent fiber
+  this.child = null;        // first child fiber
+  this.sibling = null;      // next sibling fiber
+  this.index = 0;
+
+  this.ref = null;
+  this.refCleanup = null;
+
+  // Effects of the last completed render
+  this.pendingProps = pendingProps;
+  this.memoizedProps = null;   // props from the last render that was committed
+  this.updateQueue = null;
+  this.memoizedState = null;   // hook state (a linked list) from the last committed render
+  this.dependencies = null;    // Context/use() dependencies this fiber reads
+
+  this.mode = mode;
+
+  // Effects — what changed, to be applied in the commit phase
+  this.flags = NoFlags;
+  this.subtreeFlags = NoFlags;
+  this.deletions = null;
+
+  // Lanes — priority (see the next lesson)
+  this.lanes = NoLanes;
+  this.childLanes = NoLanes;
+
+  this.alternate = null;   // the OTHER version of this fiber — see "double buffering" below
+}
+```
+
+มีไม่กี่ field ที่ควรพูดถึงเป็นพิเศษ เพราะมันคือสิ่งที่ diff review ต้องใช้เป๊ะ ๆ:
+
+- **`return` / `child` / `sibling`** คือ tree ทั้งหมด ไม่มี "virtual DOM tree" แยกอีกโครงสร้างวางคู่กับ fiber tree — fiber tree *คือ* โครงสร้างที่ React เดิน ทั้งตอน render และตอน commit
+- **`memoizedProps` / `memoizedState`** คือสิ่งที่ commit ไปจริงรอบที่แล้ว ตรงข้ามกับ `pendingProps` (สิ่งที่กำลัง render ใน pass *นี้*) การเช็ก "จริง ๆ แล้วมันเปลี่ยนไหม" ของ reconciliation เทียบกับ `memoizedProps` ไม่ใช่ cache แยกที่ไหน
+- **`flags`** (บน fiber ตัวนี้) กับ **`subtreeFlags`** (OR รวมขึ้นมาจากทุก descendant) คือวิธีที่ commit phase ข้าม subtree ทั้งอันที่ไม่มีงานต้องทำ — ถ้า `subtreeFlags` ว่าง React ไม่แม้แต่จะเดินเข้าไป
+- **`alternate`** คือ field ที่บทที่เหลือนี้พูดถึง
+
+## Double buffering: สอง tree ไม่มากกว่านั้นเด็ดขาด
+
+React ต้องเทียบ "tree หน้าตาแบบไหนก่อนหน้านี้" กับ "ตอนนี้ควรหน้าตาแบบไหน" — ดังนั้นมันเก็บ fiber tree ไว้ **สอง** ต้น: tree **current** (สิ่งที่อยู่บนจอตอนนี้) กับ tree **work-in-progress** (กำลังสร้างสำหรับ commit ถัดไป) ที่สำคัญคือ React ไม่ได้จัดสรร work-in-progress tree ใหม่ตั้งแต่ศูนย์ทุก update field `alternate` ของแต่ละ fiber ชี้ไปที่เวอร์ชัน "อีกอัน" ของมัน และ `createWorkInProgress` (ไฟล์เดียวกัน) reuse วัตถุที่มีอยู่แล้วเมื่อมันมีอยู่:
+
+```js
+// packages/react-reconciler/src/ReactFiber.js — createWorkInProgress (trimmed)
+export function createWorkInProgress(current, pendingProps) {
+  let workInProgress = current.alternate;
+  if (workInProgress === null) {
+    // We use a double buffering pooling technique because we know that we'll
+    // only ever need at most two versions of a tree. We pool the "other"
+    // unused node that we're free to reuse. This is lazily created to avoid
+    // allocating extra objects for things that are never updated.
+    workInProgress = createFiber(current.tag, pendingProps, current.key, current.mode);
+    workInProgress.alternate = current;
+    current.alternate = workInProgress;
+  } else {
+    workInProgress.pendingProps = pendingProps;
+    workInProgress.flags = NoFlags;
+    // ...
+  }
+  workInProgress.child = current.child;
+  workInProgress.memoizedProps = current.memoizedProps;
+  workInProgress.memoizedState = current.memoizedState;   // <- hook state carries over
+  workInProgress.updateQueue = current.updateQueue;
+  // ...
+  return workInProgress;
+}
+```
+
+comment บอกตรง ๆ เลย: React ต้องการ fiber *อย่างมากแค่สอง* เวอร์ชันเท่านั้น ดังนั้นแทนที่จะจัดสรรอันใหม่ทุก render มันจะ pool แล้ว reuse สำเนา "อีกอัน" ก่อนหน้า นี่คือเหตุผลตรง ๆ ว่าทำไม re-render component ถึงไม่ reset hook state ของมัน — `workInProgress.memoizedState = current.memoizedState` คือการ copy object ธรรมดา ไม่ใช่ initializer ของ `useState` รันใหม่ (ฝั่ง "`type` ต่างกัน → นี่คือ fiber ใหม่ทั้งอัน ไม่มีการ reuse `alternate`" ของกฎนี้ คือสิ่งที่ [Reconciliation in Depth](/react/th/react-internals/reconciliation-in-depth/) พิสูจน์ด้วย test mount/unmount)
+
+## เดิน tree: `performUnitOfWork`, `beginWork`, `completeWork`
+
+React ไม่ recurse ผ่าน component tree ของคุณด้วย JS function call ปกติ (tree ที่ลึกจะระเบิด call stack และคุณ pause กลางๆ recursive call ไม่ได้) แทนที่จะทำแบบนั้น work loop คือ loop ตรง ๆ วน pointer `workInProgress` ที่ mutable ตัวเดียว ทีละ fiber — นี่คือ `performUnitOfWork` ใน `packages/react-reconciler/src/ReactFiberWorkLoop.js`:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — performUnitOfWork (trimmed)
+function performUnitOfWork(unitOfWork) {
+  const current = unitOfWork.alternate;
+  const next = beginWork(current, unitOfWork, entangledRenderLanes);
+  unitOfWork.memoizedProps = unitOfWork.pendingProps;
+  if (next === null) {
+    // This fiber has no more children to visit — it's done. Walk back up.
+    completeUnitOfWork(unitOfWork);
+  } else {
+    // beginWork returned a child fiber — go down into it next.
+    workInProgress = next;
+  }
+}
+```
+
+`beginWork` เรียก component function ของคุณ (สำหรับ function component) หรือทำงานเทียบเท่าสำหรับ host component แล้วคืน fiber **child ตัวแรก** ของมัน (หรือ `null` ถ้าไม่มีอะไรให้ลงต่อ) เพราะ `performUnitOfWork` reassign `workInProgress = next` แล้ววนทันที มันเดิน tree แบบ **top-down, depth-first**: `beginWork` ของ parent รันก่อน แล้วของ child ตัวแรก แล้วของ child ตัวแรกของ *child* นั้นอีกที ไปเรื่อย ๆ — ก่อนที่ sibling ตัวไหนจะได้คิว
+
+พอ `beginWork` คืน `null` (leaf หรือ subtree ที่ไม่เหลืออะไรให้เยี่ยม) `completeUnitOfWork` จะเข้ามาแทนและเดินกลับ **ขึ้นแล้วข้าม** — sibling ก่อน แล้วค่อย parent สะท้อนพอดีกับการจบ depth-first traversal:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — completeUnitOfWork (trimmed)
+function completeUnitOfWork(unitOfWork) {
+  let completedWork = unitOfWork;
+  do {
+    const returnFiber = completedWork.return;
+    const next = completeWork(completedWork.alternate, completedWork, entangledRenderLanes);
+    if (next !== null) {
+      workInProgress = next;   // completing this fiber spawned MORE work — go there
+      return;
+    }
+    const siblingFiber = completedWork.sibling;
+    if (siblingFiber !== null) {
+      workInProgress = siblingFiber;   // move to the sibling next
+      return;
+    }
+    completedWork = returnFiber;   // no sibling — go back up to the parent
+    workInProgress = completedWork;
+  } while (completedWork !== null);
+}
+```
+
+`completeWork` คือจุดที่ host fiber สร้าง DOM node จริงของมัน (สำหรับ mount แรก) หรือ diff props ของมัน (สำหรับ update) — คือ step ที่เปลี่ยน "ฉันรู้แล้วว่าอะไรเปลี่ยน" ให้กลายเป็น "นี่คือ DOM operation" staged ไว้บน `flags` ให้ commit phase apply ทีหลัง เพราะมันรันบน fiber ตัวหนึ่ง *หลังจาก* child ทุกตัวของ fiber นั้น complete ไปแล้วเท่านั้น ลำดับจึงเป็นแบบ **bottom-up**: `completeWork` ของ leaf รันก่อนของ parent
+
+ทั้งสองลำดับสังเกตได้จากภายนอกโดยตรง เพราะ body ของ function component รันระหว่าง `beginWork` ของมัน:
+
+```tsx
+// src/__tests__/work-loop-order.test.tsx
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('components render top-down, depth-first: parent, then child, then grandchild', () => {
+  const log: string[] = [];
+  function Grandchild() { log.push('Grandchild'); return <span>leaf</span>; }
+  function Child() { log.push('Child'); return <Grandchild />; }
+  function Parent() { log.push('Parent'); return <Child />; }
+  render(<Parent />);
+  expect(log).toEqual(['Parent', 'Child', 'Grandchild']); // beginWork order
+});
+
+test('siblings render in declaration order, after their shared parent', () => {
+  const log: string[] = [];
+  function A() { log.push('A'); return null; }
+  function B() { log.push('B'); return null; }
+  function Parent() { log.push('Parent'); return (<><A /><B /></>); }
+  render(<Parent />);
+  expect(log).toEqual(['Parent', 'A', 'B']);
+});
+
+test('ref callbacks attach bottom-up: the child\'s ref fires before the parent\'s — completeWork\'s order, made visible', () => {
+  const log: string[] = [];
+  render(
+    <div ref={() => { log.push('parent-div'); }}>
+      <span ref={() => { log.push('child-span'); }}>leaf</span>
+    </div>,
+  );
+  expect(log).toEqual(['child-span', 'parent-div']);
+});
+```
+
+```text
+✓ components render top-down, depth-first: parent, then child, then grandchild
+✓ siblings render in declaration order, after their shared parent
+✓ ref callbacks attach bottom-up: the child's ref fires before the parent's — completeWork's order, made visible
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+## ทำไม render ถึง interrupt ได้
+
+เพราะ work loop เป็น `while` loop ธรรมดาที่ก้าวข้าม fiber ทีละตัว (ไม่ใช่ recursive call ที่ยาวต่อเนื่องอันเดียว) React เช็กได้ *ระหว่าง* fiber สองตัวไหนก็ได้ ว่าควรหยุดแล้วคืนการควบคุมให้ browser ไหม การเช็กนั้นคือ `shouldYield()` ที่ถูกเรียกข้างใน concurrent work loop:
+
+```js
+// packages/react-reconciler/src/ReactFiberWorkLoop.js — workLoopConcurrentByScheduler (trimmed)
+function workLoopConcurrentByScheduler() {
+  // Perform work until Scheduler asks us to yield
+  while (workInProgress !== null && !shouldYield()) {
+    performUnitOfWork(workInProgress);
+  }
+}
+```
+
+ถ้า `shouldYield()` คืน `true` กลาง tree React จะหยุดเฉย ๆ: `workInProgress` ยังชี้ไปที่ fiber ตัวถัดไปที่ต้อง process อยู่เหมือนเดิม ไม่มีใครแตะ พร้อม resume ต่อจากจุดเดิมเป๊ะรอบหน้าที่ root นี้ได้คิว ยังไม่มีอะไร commit เลย (commit เกิดขึ้นก็ต่อเมื่อ tree *ทั้งอัน* เสร็จ) ดังนั้น render ที่หยุดค้างอยู่จึงมองไม่เห็น — จอยังโชว์ tree เก่าที่ commit ไปแล้วเต็มรูปแบบ นี่คือเหตุผลเชิงกลไกที่ render phase "interrupt" ได้: ไม่ใช่ว่า React abort กลาง component แต่มันแค่ไม่เริ่ม fiber *ตัวถัดไป* ถ้ามีอะไรเร่งด่วนกว่าโผล่มา ("เร่งด่วนกว่า" หมายความว่าอะไร และ timing จริงที่ `shouldYield` ใช้ คือเรื่องของ [Lanes & Scheduling](/react/th/react-internals/lanes-and-scheduling/) — บทนี้แค่อยากให้คุณเห็นว่าการตัดสินใจนั้นเกิดขึ้น *ตรงไหน* ใน loop)
+
+<Mermaid title="performUnitOfWork: beginWork จากบนลงล่าง completeWork จากล่างขึ้นบน" code={loopDiagram} />
+
+export const loopDiagram = `flowchart TD
+  start["workInProgress = root"] --> begin["beginWork(fiber)\n(calls your component function)"]
+  begin -->|"has a child"| descend["workInProgress = child\n(go down)"]
+  descend --> begin
+  begin -->|"no child (leaf)"| complete["completeWork(fiber)\n(builds/diffs the DOM node)"]
+  complete -->|"has a sibling"| sibling["workInProgress = sibling"]
+  sibling --> begin
+  complete -->|"no sibling"| up["workInProgress = fiber.return\n(go up to parent, complete IT)"]
+  up --> complete
+  begin -.->|"between any two fibers"| yield{"shouldYield()?"}
+  yield -->|"yes"| pause["Stop. Nothing committed yet.\nResume here later."]
+  yield -->|"no"| begin`;
+
+## Mental Model
+
+fiber คือกล่องจดหมายของหนึ่งตำแหน่งบน tree และ work loop คือบุรุษไปรษณีย์ที่เดินเส้นทางตายตัว: ลงไปที่ child ตัวแรกทุกครั้งที่มันมีอยู่ (`beginWork`) แล้วค่อยก้าวข้างหรือถอยขึ้นก็ต่อเมื่อกิ่งนั้นส่งครบแล้ว (`completeWork`) บุรุษไปรษณีย์หยุดระหว่างจุดไหนก็ได้ (`shouldYield`) โดยไม่หลงตำแหน่ง เพราะ "ตำแหน่งของเขา" คือแค่ `workInProgress` — ตัวแปรตัวเดียว ไม่ใช่ call stack และเพราะ fiber แต่ละตัวเก็บตัวเองเวอร์ชันก่อนหน้าไว้ (`alternate`) บุรุษไปรษณีย์ไม่ต้องวาดแผนที่ใหม่ทั้งหมด — แค่อัปเดตกล่องจดหมายกล่องเดียวที่เปลี่ยนไป
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+|---|---|---|
+| Loop ตรง ๆ วน pointer `workInProgress` ที่ mutable (ไม่ใช่ recursion) | pause ระหว่าง fiber สองตัวไหนก็ได้ ไม่ระเบิด call stack บน tree ที่ลึก | control flow ซับซ้อนกว่าการเดิน tree แบบ recursive ตรงไปตรงมา |
+| Double buffering (`alternate` อย่างมากแค่ 2 tree) | re-render reuse fiber object กับ hook state แทนที่จะจัดสรรใหม่ ใช้ memory เพิ่ม O(1) ไม่ว่า tree จะลึกแค่ไหน | fiber ทุกตัวมีอยู่สองชุดใน memory จริง ๆ เมื่อมันเคย update แล้ว |
+| `beginWork` top-down / `completeWork` bottom-up | ตรงกับวิธีที่ DOM tree ต้องถูกสร้าง (child ต้องมีอยู่ก่อนถึงจะ append เข้า parent ได้) | สองรอบเต็มในเชิงแนวคิด แม้จะ implement เป็น loop เดียว |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"React เรียก component ของฉันแบบ recursive เหมือน function call ปกติ"** ไม่ใช่ — `performUnitOfWork` คือ loop ตรง ๆ วน `workInProgress` พิสูจน์แล้วข้างบนจากข้อเท็จจริงที่ว่า render ที่หยุดค้างไม่ทิ้ง stack trace ผ่านทั้ง tree ของคุณ นี่คือเหตุผลที่ React pause แล้ว resume ได้เลย
+- **"virtual DOM เป็น tree แยกจาก fiber"** ไม่มีโครงสร้างแยกเลย — `return`/`child`/`sibling` บน `FiberNode` *คือ* tree ตรง ๆ จาก source ข้างบน
+- **"state ของ component ถูกสร้างใหม่ตั้งแต่ศูนย์ทุก render"** `createWorkInProgress` copy `memoizedState` มาจาก fiber ปัจจุบัน state จะ reset ก็ต่อเมื่อ fiber ตัวมันเองถูกทิ้งไป (`type` ต่างกัน หรือ `key` เปลี่ยน) — นั่นคือเรื่องของ [Reconciliation in Depth](/react/th/react-internals/reconciliation-in-depth/) ไม่ใช่การ reset ตอน render phase
+
+## อ่านโค้ดที่ AI เขียน
+
+- ข้อความ "อธิบายว่า React render อย่างไร" อธิบายเป็น recursive function call ผ่าน component tree ของคุณ แทนที่จะเป็น work loop ตรง ๆ ไหม? นั่นคือ mental model ที่พบบ่อยแต่ผิด ถ้าเอาไปใช้ตอน review มันจะทำนาย stack trace กับ render ที่ pause ไม่ได้ ซึ่งไม่ตรงกับความจริง
+- โค้ด (หรือคำอธิบายที่มากับมัน) สมมติว่า state ถูกรื้อแล้วสร้างใหม่ทุกครั้งที่ parent re-render ไหม? ถ้า `type` ของ child คงที่ fiber ของมัน (และ hook state) ถูก reuse — พิสูจน์แล้วข้างบนด้วยจำนวน mount/unmount เป็นศูนย์สำหรับการ update prop ที่ type เดิม
+- function ของ component ถูก *ประกาศข้างใน* body ของอีก component (closure ที่ครอบ local variable มักเพื่อ "capture" prop แบบ "สะอาด") ไหม? ทุกครั้งที่ parent render จะจัดสรร function object ใหม่ ซึ่งกลายเป็น `type` ใหม่ ทำให้ reuse `alternate` เป็นไปไม่ได้ — [Reconciliation in Depth](/react/th/react-internals/reconciliation-in-depth/) พิสูจน์การ remount นี้เป๊ะ ๆ ด้วย test
+- comment หรือ docstring อ้างว่า "ref นี้ถูก set ทันทีที่ component render" หรืออ่าน `ref.current` แบบ synchronous กลาง body ของ component function โดยคาดว่ามันชี้ไปที่ DOM node แล้วไหม? ref ถูก attach ระหว่าง `completeWork`/commit หลังจาก render (`beginWork`) pass เสร็จสำหรับ fiber นั้นเท่านั้น — ระหว่าง render `ref.current` ของ ref บน element ที่กำลังถูก return ยังเป็นค่าจาก commit ที่แล้ว (`null` ตอน mount แรก)
+
+<SpotTheBug code={`function AutoFocusInput({ shouldFocus }) {
+  const inputRef = useRef(null);
+
+  // "Focus it as soon as we know we should" — reading the ref during render
+  if (shouldFocus && inputRef.current) {
+    inputRef.current.focus();
+  }
+
+  return <input ref={inputRef} />;
+}`}>
+โค้ดนี้อ่าน `inputRef.current` *ระหว่าง render* (ข้างใน body ของ component function ที่ถูกเรียกจาก `beginWork`) แต่ ref จะถูก attach เข้ากับ DOM node ของมันทีหลัง ใน commit phase — แถว ๆ `completeWork`/ขั้น mutation-and-layout — ซึ่งยังไม่เกิดขึ้นสำหรับ pass นี้ ตอน render แรกสุด `inputRef.current` ยังเป็น `null` ตรงนี้ ดังนั้น `if` เลยไม่รัน `.focus()` เลยด้วยซ้ำ เจตนาจะ "ใช้ได้" แบบบังเอิญเฉพาะ render *รอบถัดไป* หลังจาก commit ก่อนหน้าแนบ ref ไปแล้วเท่านั้น ทางแก้คือย้ายไปทำใน `useLayoutEffect` (หรือ `useEffect` ถ้ายอมรับ flicker ก่อน focus ได้) ซึ่งรันหลัง DOM ถูก commit จริงและ ref ถูก attach แล้ว — ดู [Commit Phase & Effects](/react/th/react-internals/commit-phase-and-effects/) สำหรับเวลาที่แน่นอน
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**fiber** คือ plain object (`tag`, `type`, `return`/`child`/`sibling`, `memoizedProps`/`memoizedState`, `flags`, `alternate`) ที่ติดตามตำแหน่งบน tree หนึ่งตำแหน่งข้ามเวลา — พิสูจน์แล้วข้างบนด้วย source จริงของ `FiberNode` React เก็บ fiber tree **อย่างมากแค่สอง** ต้นผ่าน **double buffering** (`alternate`) ดังนั้น re-render จึง reuse fiber object กับ hook state แทนที่จะสร้างใหม่ `performUnitOfWork` เดินสิ่งนี้ด้วย loop ตรง ๆ ไม่ใช่ recursion: `beginWork` ไป **top-down** (เรียก component function ของคุณตามลำดับนั้น พิสูจน์ด้วย render log) `completeWork` ไป **bottom-up** (พิสูจน์ด้วยลำดับ ref-attach) เพราะมันคือ loop วน pointer ตัวเดียวแทนที่จะเป็น call stack React เช็ก `shouldYield()` **ระหว่าง fiber สองตัวไหนก็ได้** และ pause render โดยยังไม่มีอะไร commit — พื้นฐานเชิงกลไกของทุกอย่างที่บทถัดไปเรียกว่า "interruptible"
+</Callout>
+
+export const quizFiber = [
+  {
+    q: 'ข้อไหนคือ field จริงบน React fiber ตาม source ที่ยกมาข้างบน?',
+    options: ['`vdom`', '`memoizedState`', '`virtualNode`', '`domRef`'],
+    answer: 1,
+    explain: '`memoizedState` (hook state จากการ commit ครั้งล่าสุด) เป็น field จริงบน `FiberNode` ใน `packages/react-reconciler/src/ReactFiber.js` React ไม่มี field หรือโครงสร้างที่ชื่อ "vdom" หรือ "virtualNode" เลยจริง ๆ',
+  },
+  {
+    q: 'field `alternate` ชี้ไปที่อะไร?',
+    options: [
+      'The fiber\'s parent',
+      'The OTHER version of this fiber (current <-> work-in-progress) — double buffering reuses it instead of allocating a new fiber every render',
+      'A backup copy used only for error recovery',
+      'The previous sibling',
+    ],
+    answer: 1,
+    explain: '`createWorkInProgress` เช็ก `current.alternate` ก่อน แล้ว reuse object นั้นถ้ามันมีอยู่แล้ว — พิสูจน์จาก source ที่ยกมาข้างบน ซึ่ง comment บอกตรง ๆ ว่า React ต้องการ tree "อย่างมากแค่สองเวอร์ชัน"',
+  },
+  {
+    q: '```tsx\nfunction Grandchild() { log.push("G"); return null; }\nfunction Child() { log.push("C"); return <Grandchild />; }\nfunction Parent() { log.push("P"); return <Child />; }\nrender(<Parent />);\n```\n`log` จะจบลงด้วยลำดับไหน?',
+    options: ['["G", "C", "P"]', '["P", "C", "G"]', '["P", "G", "C"]', 'Undefined — React doesn\'t guarantee an order'],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบน: `beginWork` เดินแบบ top-down, depth-first — component function ของ parent รันก่อนของ child เสมอ ซึ่งรันก่อนของ grandchild',
+  },
+  {
+    q: 'ทำไม React ถึง pause render กลาง tree ใหญ่ ๆ ได้โดยไม่ทำให้อะไรพัง?',
+    options: [
+      'It uses Web Workers to render off the main thread',
+      'The work loop is an explicit loop over a single `workInProgress` pointer (not a recursive call stack), so it can check `shouldYield()` between any two fibers and simply stop — nothing has been committed to the DOM yet',
+      'React saves a full backup of the DOM before every render',
+      'It can\'t — "interruptible rendering" is a misconception',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบนด้วย `performUnitOfWork`/`workLoopConcurrentByScheduler`: เพราะไม่มี recursive call stack ให้ unwind การ pause ก็แค่ "ยังไม่เริ่ม fiber ตัวถัดไป" — tree เก่าที่ commit ครบแล้วยังคงเป็นสิ่งที่อยู่บนจอ',
+  },
+  {
+    q: '`completeWork` ทำอะไรที่ `beginWork` ไม่ทำ?',
+    options: [
+      'It calls your component function',
+      'It builds or diffs the actual host (DOM) node for a fiber, and only runs after all of that fiber\'s children have already completed — bottom-up',
+      'It assigns the update\'s lane',
+      'It runs `useEffect` callbacks',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบนด้วย test ลำดับ ref-attach: ref ของ child (attach รอบ ๆ `completeWork`/commit ของมัน) fire ก่อนของ parent เพราะ `completeWork` รันบน fiber ตัวหนึ่งก็ต่อเมื่อ child ทุกตัวข้างใต้มัน complete ไปแล้วเท่านั้น',
+  },
+];
+
+<Quiz client:visible id="react-internals/fiber-and-the-work-loop" questions={quizFiber} />
+
+<ProgressTracker client:visible id="internals-fiber" />

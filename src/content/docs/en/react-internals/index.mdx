@@ -1,0 +1,175 @@
+---
+title: 'How React Works'
+description: 'Why the render loop, lanes, reconciliation, commit phases, and hydration are what let you actually judge unfamiliar or AI-generated React code — a module map plus one end-to-end diagram of an update.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## What this module is for
+
+Every earlier module in this course taught you to *use* React: hooks, state, Context, Suspense, Server Components. None of it required knowing what React does with your function calls after you write them. You can write a working `useEffect`, a correct list with `key`s, a `<Suspense>` boundary — without ever asking how React decides *when* your component function runs, *why* one update can interrupt another, or *what exactly* happens between "I called `setState`" and "the screen changed."
+
+That gap is exactly where AI-generated React fails in ways that look fine on the surface: a component defined inside another component's render, an index used as a `key` on a list that reorders, a `useLayoutEffect` that fights the browser, a `useEffect` that assumes it always runs after paint. None of these are syntax errors. None of them are caught by `tsc`. All of them are facts about the runtime.
+
+This module has one job: give you the five pieces of runtime knowledge that let you look at **someone else's React code** — not run it, not profile it, just read it — and answer:
+
+1. **Will this remount or update in place?** (fibers, the work loop, reconciliation)
+2. **Will this block the next keystroke, or can React interrupt it?** (lanes, scheduling)
+3. **Which of two similar-looking children keeps its state?** (reconciliation's type + key rules)
+4. **In what order do my refs, `useInsertionEffect`, `useLayoutEffect`, and `useEffect` actually fire?** (the commit phase)
+5. **Why did the page just show a hydration error, and what does React do about it?** (hydration and streaming)
+
+Every claim in this module is backed by one of three things: [react.dev](https://react.dev), the actual React source on `github.com/facebook/react` (fetched from the `main` branch, cited by file and function name), or a test in this course's harness whose real output is pasted below it — never a guess about internals.
+
+<Callout title="A version note, stated once">
+`npm view react version` returns `19.3.0` at the time this module was written; this course otherwise targets React 19.0 APIs. The source quoted throughout this module is fetched from `facebook/react`'s `main` branch, which is ahead of any tagged release — where a lesson quotes a mechanism, it names the file and function so you can diff it against whatever version you're actually reading, and it flags anywhere the described behavior is newer than 19.0.
+</Callout>
+
+## What this module covers
+
+| Lesson | Answers the question |
+|---|---|
+| [Fiber & the Work Loop](/react/en/react-internals/fiber-and-the-work-loop/) | What is a fiber, and how does React walk the tree to build one? |
+| [Lanes & Scheduling](/react/en/react-internals/lanes-and-scheduling/) | How does React decide an update's priority, and how does `startTransition` change it? |
+| [Reconciliation in Depth](/react/en/react-internals/reconciliation-in-depth/) | Given an old tree and a new one, exactly which nodes does React keep, move, or throw away? |
+| [Commit Phase & Effects](/react/en/react-internals/commit-phase-and-effects/) | Once React has decided what changed, in what order does it touch the DOM and run your effects? |
+| [Hydration & Streaming](/react/en/react-internals/hydration-and-streaming/) | How does a server-rendered page become interactive, and what happens when the client disagrees with the server? |
+
+The [Rendering & Reconciliation](/react/en/foundations/rendering-and-reconciliation/) lesson already introduced the render/commit split and proved the type-vs-key rules from the outside (mount/unmount counts). This module goes past the outside view into the mechanism that produces those counts, and links back rather than repeating the proofs. [Transitions](/react/en/concurrent-and-suspense/transitions/) already showed `useTransition`'s user-facing API; [Lanes & Scheduling](/react/en/react-internals/lanes-and-scheduling/) shows what a "lane" actually is underneath it.
+
+## A runnable question: does this component update in place, or start over?
+
+Before any of the deeper mechanism, here is the single fact this whole module orbits: React decides "same thing, update it" vs. "different thing, throw it away and rebuild" by comparing an element's `type` to the fiber currently sitting in that position — nothing more, nothing less.
+
+```tsx
+// src/__tests__/module-preview.test.tsx
+import { useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('same type across renders: no mount, no unmount, just a prop update', () => {
+  const log: string[] = [];
+  function Row({ label }: { label: string }) {
+    useEffect(() => {
+      log.push(`mount:${label}`);
+      return () => { log.push(`unmount:${label}`); };
+    }, []);
+    return <li>{label}</li>;
+  }
+  const { rerender } = render(<Row label="a" />);
+  log.length = 0;
+  rerender(<Row label="b" />); // same component, new prop
+  expect(log).toEqual([]); // proves: React updated the existing fiber in place
+});
+```
+
+```text
+✓ same type across renders: no mount, no unmount, just a prop update
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Every lesson in this module is really an answer to "why does that rule hold, and what else follows from it."
+
+<Mermaid title="One update, start to finish" code={bigDiagram} />
+
+export const bigDiagram = `flowchart TD
+  trigger["Update triggered\n(setState, startTransition, hydration)"] --> lane["Lane assigned — priority\n(Lanes & Scheduling)"]
+  lane --> render["Render phase\nbeginWork top-down / completeWork bottom-up\ninterruptible via shouldYield\n(Fiber & the Work Loop)"]
+  render --> recon["Reconciliation\ndiff by type, then by key\n(Reconciliation in Depth)"]
+  recon --> commit["Commit phase\nbefore-mutation -> mutation -> layout -> PAINT -> passive\n(Commit Phase & Effects)"]
+  commit --> current["Work-in-progress tree becomes 'current'"]
+  entry["Server sends HTML"] --> stream["renderToPipeableStream ... hydrateRoot\nselective hydration, mismatch recovery\n(Hydration & Streaming)"]
+  stream --> render`;
+
+## Mental Model
+
+Reading unfamiliar React well means running a small machine in your head while your eyes only see JSX: *what type is this, what key does it have, what lane is this update on, and which phase of the commit am I in.* The five lessons here are exactly those four questions, one lesson each (fiber/work-loop covers "what type, and how does React get there"; lanes covers "what priority"; reconciliation covers "same key, same instance"; commit covers "which phase, in what order"; hydration covers what happens when the very first render already has DOM to reconcile against).
+
+## Common Misconceptions
+
+- **"Internals are for people who want to contribute to React."** You need enough of this to *read* a diff, not to reimplement the reconciler. Every fact in this module is something you can point to in someone else's pull request.
+- **"If it compiles and renders correctly once, the code is fine."** A component defined inside another component's render, a `useLayoutEffect` that measures before a ref attaches, an index key on a reorderable list — all render correctly on the *first* pass. The bug only shows up on the second render, exactly the pass a quick manual test skips.
+- **"React's internal behavior is undocumented magic."** Nearly everything in this module is either stated on react.dev or directly readable in `packages/react-reconciler` — it's unfamiliar, not undocumented.
+
+## Reading AI-generated code
+
+The whole point of this module is this section, five times over — one per lesson. As a preview, here is the survey-level version: a snippet that renders correctly the first time and is still wrong.
+
+<SpotTheBug code={`function ProductList({ products }) {
+  function ProductCard({ product }) {
+    return <li>{product.name}</li>;
+  }
+  return (
+    <ul>
+      {products.map((p) => <ProductCard key={p.id} product={p} />)}
+    </ul>
+  );
+}`}>
+`ProductCard` is defined *inside* `ProductList`'s render body. Every time `ProductList` renders, this creates a brand-new function — a new `type` — even though the code looks identical. React's reconciler compares an element's `type` (the function reference itself) to what was there before; a new function reference means "this is a different component," so every `ProductCard` unmounts and remounts on every single `ProductList` re-render, `key` or no `key`. Any state inside `ProductCard` resets every time. The fix is to move `ProductCard` to the module's top level (outside `ProductList`), so `type` is the same function reference across renders. [Fiber & the Work Loop](/react/en/react-internals/fiber-and-the-work-loop/) and [Reconciliation in Depth](/react/en/react-internals/reconciliation-in-depth/) prove exactly this mechanism with a test.
+</SpotTheBug>
+
+<Callout title="The one-line takeaway">
+Five mechanisms decide what happens after you write a component: **fibers** (the work-in-progress tree React actually builds and walks), **lanes** (the priority an update runs at), **reconciliation** (same `type`+`key` = update in place, otherwise remount), the **commit phases** (mutation, then layout, then paint, then passive effects — a fixed order, not a suggestion), and **hydration** (attaching behavior to server HTML that already exists). None of these are exotic — they're on react.dev and in `packages/react-reconciler` — but almost no AI-generated code is written with them in mind, which is exactly why they're worth having in your head when you review one.
+</Callout>
+
+export const quizInternalsIndex = [
+  {
+    q: "What is this module's central goal?",
+    options: [
+      'Teach you to reimplement React\'s reconciler',
+      'Let you judge, by reading unfamiliar React source, whether it will remount, block input, or misorder effects',
+      'Replace the need for React DevTools',
+      'Cover every internal React source file line by line',
+    ],
+    answer: 1,
+    explain: 'The module is scoped deliberately to reading skill: given someone else\'s React code, can you predict what the reconciler and commit phase will actually do, from the source alone.',
+  },
+  {
+    q: 'What single comparison does React use to decide "update this fiber in place" vs. "throw it away and rebuild"?',
+    options: [
+      'Whether the props changed',
+      'Whether the element\'s `type` (and `key`, for a sibling in a list) matches what was previously in that position',
+      'Whether the component has state',
+      'Whether the component is memoized',
+    ],
+    answer: 1,
+    explain: 'Proven by the module preview test above: the same `type` across renders produces zero mount/unmount calls — only the changed prop is applied. Reconciliation in Depth goes into the exact source functions that implement this comparison.',
+  },
+  {
+    q: '```tsx\nfunction Parent() {\n  function Child() { return <p>hi</p>; }\n  return <Child />;\n}\n```\nWhy does `Child` remount on every render of `Parent`, even though the code inside it never changes?',
+    options: [
+      'React always remounts nested function declarations',
+      'A new `Child` function object is created every render, so its `type` is a different reference each time — React sees "a different component," not the same one',
+      'It doesn\'t — this is a common misconception',
+      '`Child` needs a `key` to avoid remounting',
+    ],
+    answer: 1,
+    explain: 'Function identity is what `type` means for a component. A function declared inside another function\'s body is a new object every call, so reconciliation\'s `type` comparison fails every time, regardless of `key`.',
+  },
+  {
+    q: 'True or false: every fact in this module is either stated on react.dev, quoted from the React source with a file and function name, or proven by a test whose real output is shown.',
+    options: ['True', 'False — some internals had to be guessed', 'Only the fiber lesson follows this rule', 'Only true for React 19.0'],
+    answer: 0,
+    explain: 'This is the module\'s explicit sourcing rule, stated in the intro — no invented field names or numbers anywhere in these five lessons.',
+  },
+  {
+    q: 'Which lesson explains why one update (like a fast list filter) does not block a more urgent one (like the next keystroke)?',
+    options: ['Commit Phase & Effects', 'Hydration & Streaming', 'Lanes & Scheduling', 'Reconciliation in Depth'],
+    answer: 2,
+    explain: 'Lanes & Scheduling covers the priority bitmask React assigns to every update and how `startTransition` changes which lane an update lands on.',
+  },
+];
+
+<Quiz client:visible id="react-internals/index" questions={quizInternalsIndex} />
+
+<ProgressTracker client:visible id="internals-index" />

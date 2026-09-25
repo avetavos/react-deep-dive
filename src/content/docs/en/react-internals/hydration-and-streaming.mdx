@@ -1,0 +1,278 @@
+---
+title: 'Hydration & Streaming'
+description: 'renderToPipeableStream and hydrateRoot, selective hydration as chunked independent units, the exact console error and onRecoverableError behavior for a real text mismatch reproduced in this course''s own harness, and the static react-dom/static prerender API.'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## Two ends of the same handshake: `renderToPipeableStream` and `hydrateRoot`
+
+Everything else in this module assumed a render starting from nothing. Server rendering is different: the server produces HTML first, and the client's job is to attach React's behavior (event handlers, state) to DOM nodes that **already exist**, rather than creating them. `renderToPipeableStream` (`react-dom/server`, for a Node.js `Stream`) is react.dev's documented entry point on the server side:
+
+```js
+// Server
+import { renderToPipeableStream } from 'react-dom/server';
+const { pipe } = renderToPipeableStream(<App />, {
+  bootstrapScripts: ['/main.js'],
+  onShellReady() {
+    // the initial HTML shell is ready — safe to start streaming the response
+  },
+  onError(error) {
+    // fires for any server error, recoverable or not
+  },
+});
+```
+
+react.dev's own reference page states the contract plainly: "On the client, call `hydrateRoot` to make the server-generated HTML interactive." `hydrateRoot` (`react-dom/client`) is that other half:
+
+```js
+// Client
+import { hydrateRoot } from 'react-dom/client';
+hydrateRoot(document.getElementById('root'), <App />);
+```
+
+`hydrateRoot`'s own caveat, stated directly on its reference page, is the one rule this whole lesson is about: "The React tree you pass to `hydrateRoot` needs to produce **the same output** as it did on the server." Hydration isn't a fresh render — it's React walking the existing DOM and the element tree *together*, verifying they match as it attaches behavior.
+
+## Selective hydration: chunks, not one atomic step
+
+A large page doesn't have to hydrate all at once. React ships this, per react.dev, as **Selective Hydration**: "It works by hydrating your app's initial HTML *in chunks*, enabling some components to become interactive even if other components on the page haven't loaded their code or data yet." `<Suspense>` boundaries are what create those independent chunks:
+
+```jsx
+function Page() {
+  return (
+    <>
+      <MessageComposer />
+      <Suspense fallback="Loading chats...">
+        <Chats />
+      </Suspense>
+    </>
+  );
+}
+```
+
+React.dev's own example: "`MessageComposer` can be fully hydrated during the initial render of the page, even before `Chats` is mounted and starts to fetch its data." A page with **no** Suspense boundaries doesn't get this benefit — react.dev notes plainly that without one, "React must hydrate the entire page all at once," so a slow-to-hydrate section can make an otherwise-fast part (like a set of tab buttons) feel unresponsive during the hydration window. (`<Activity>`, a newer API, extends the same idea to always-visible content that isn't behind a loading state at all — react.dev's tab example shows `Home`/`Video` panels each wrapped in an `<Activity>` boundary so the tab *buttons* can hydrate before either panel's content does, without changing what's shown on screen.)
+
+## A real hydration mismatch: the actual error text, reproduced
+
+Here is the failure mode `hydrateRoot`'s own caveat warns about — server output that doesn't match what the client would render — reproduced for real in this course's harness (`react@19.2.8`, `jsdom`), by rendering one string on the "server" and hydrating with a different one:
+
+```tsx
+// src/__tests__/hydration-mismatch.test.tsx
+import { renderToString } from 'react-dom/server';
+import { hydrateRoot } from 'react-dom/client';
+import { act } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(() => { document.body.innerHTML = ''; });
+
+test('a text mismatch between server and client HTML triggers onRecoverableError with real error text, and React recovers by patching the DOM', async () => {
+  function Clock({ label }: { label: string }) {
+    return <p>{label}</p>;
+  }
+
+  const serverHtml = renderToString(<Clock label="server-label" />);
+  const container = document.createElement('div');
+  container.innerHTML = serverHtml;
+  document.body.appendChild(container);
+
+  const recoverable: string[] = [];
+
+  await act(async () => {
+    hydrateRoot(container, <Clock label="client-label" />, {
+      onRecoverableError(error) {
+        recoverable.push((error as Error).message);
+      },
+    });
+  });
+
+  expect(container.textContent).toBe('client-label'); // React recovered: client value won
+  expect(recoverable.length).toBeGreaterThan(0);
+});
+```
+
+The real `onRecoverableError` message captured from that run, byte-for-byte:
+
+```text
+Hydration failed because the server rendered text didn't match the client. As a result this tree will be regenerated on the client. This can happen if a SSR-ed Client Component used:
+
+- A server/client branch `if (typeof window !== 'undefined')`.
+- Variable input such as `Date.now()` or `Math.random()` which changes each time it's called.
+- Date formatting in a user's locale which doesn't match the server.
+- External changing data without sending a snapshot of it along with the HTML.
+- Invalid HTML tag nesting.
+
+It can also happen if the client has a browser extension installed which messes with the HTML before React loaded.
+
+https://react.dev/link/hydration-mismatch
+
+  <Clock label="client-label">
+    <p>
++     client-label
+-     server-label
+
+✓ a text mismatch between server and client HTML triggers onRecoverableError with real error text, and React recovers by patching the DOM
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+Read the bullet list in that real message — it's react.dev's own list of common causes for a hydration mismatch, embedded directly in the runtime's error output, not paraphrased documentation. And read the last two lines: React shows a `+`/`-` diff of exactly what mismatched (`client-label` vs `server-label`), then **recovers** — the test's own assertion confirms `container.textContent` ends up as `'client-label'`, meaning React discarded the mismatched server markup for that subtree and re-rendered it fresh on the client, exactly as `hydrateRoot`'s docs describe ("this tree will be regenerated on the client"). `onRecoverableError` is how you're meant to *observe* that this happened — react.dev's own guidance is to wire it up (alongside `onCaughtError`/`onUncaughtError`) for production error reporting, since a recovered mismatch doesn't throw or crash the app on its own; it silently (from the user's perspective) repaints that piece.
+
+## `react-dom/static`: hydration's other end, for static generation
+
+`renderToPipeableStream`/`renderToReadableStream` are the *streaming* SSR APIs — they can send HTML to the browser before all data has loaded. `react-dom/static`'s `prerender`/`prerenderToNodeStream` are different: react.dev states outright that "Unlike `renderToString`, `prerender` waits for all data to load before resolving," making it the fit for generating a complete static page ahead of time (SSG) rather than streaming a live request. Proven runnable, not just quoted:
+
+```tsx
+// src/__tests__/prerender-static.test.tsx
+import { prerenderToNodeStream } from 'react-dom/static';
+import { expect, test } from 'vitest';
+
+// prelude is a real Node `Readable` at runtime (async-iterable, yielding
+// Buffer chunks) — this course's probe has no ambient @types/node, so its
+// declared type is a DOM-only `ReadableStream` stub with no async iterator.
+// This local type carries just the surface this test actually uses.
+type NodeReadableIterable = AsyncIterable<{ toString(encoding: string): string }>;
+
+test('prerenderToNodeStream renders complete static HTML for a page with no pending data', async () => {
+  function App() {
+    return (
+      <html>
+        <body><main>Hello static world</main></body>
+      </html>
+    );
+  }
+  const { prelude } = await prerenderToNodeStream(<App />);
+  const stream = prelude as unknown as NodeReadableIterable;
+  let html = '';
+  for await (const chunk of stream) {
+    html += chunk.toString('utf8');
+  }
+  expect(html).toContain('Hello static world');
+});
+```
+
+```text
+stdout: <!DOCTYPE html><html><head></head><body><main>Hello static world</main></body></html>
+
+✓ prerenderToNodeStream renders complete static HTML for a page with no pending data
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+The page produced this way is still fully static HTML — you `hydrateRoot` it on the client exactly the same way as any other server-rendered page, since prerendering only changes *when* and *how completely* the HTML is produced, not what the client does with it afterward.
+
+## A framework's view of this same handshake
+
+Everything in this lesson is the React-level mechanism. A framework like Next.js wraps the exact same `renderToPipeableStream`/`hydrateRoot` pair inside a much larger request lifecycle (routing, caching layers, streaming boundaries tied to route segments) — see [the request lifecycle](/nextjs/en/foundations/the-request-lifecycle/) in the Next.js course for that end-to-end picture; this lesson deliberately stays at the React layer underneath it.
+
+<Mermaid title="From server HTML to an interactive page" code={hydrationDiagram} />
+
+export const hydrationDiagram = `flowchart LR
+  server["renderToPipeableStream\n(or prerenderToNodeStream for SSG)"] --> html["HTML sent to the browser\n(chunked per Suspense boundary)"]
+  html --> paint0(["Browser paints the static HTML"])
+  paint0 --> hydrate["hydrateRoot walks DOM + element tree together"]
+  hydrate -->|"match"| interactive["Chunk becomes interactive\n(selective — independent per boundary)"]
+  hydrate -->|"mismatch"| recover["onRecoverableError fires\nmismatched subtree regenerated on client"]`;
+
+## Mental Model
+
+Hydration is not "render, but faster because the DOM already exists" — it's a **verification pass**: React walks the element tree it would have produced and checks it against the DOM that's already sitting there, attaching event handlers and state as it goes, chunk by chunk wherever a `<Suspense>` (or `<Activity>`) boundary lets it treat a piece independently. When verification fails for a piece, React doesn't crash the whole page — it throws that one piece's server output away and re-renders it fresh on the client, reporting the discrepancy through `onRecoverableError` rather than an uncaught exception.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---|---|---|
+| Streaming SSR (`renderToPipeableStream`) | Can send HTML before all data has loaded; pairs with selective hydration for fast interactivity | More moving parts (shell vs. streamed content, `onShellReady` vs. full completion) than a single synchronous render |
+| Static prerender (`react-dom/static`) | Waits for everything, producing one complete, cacheable HTML output — ideal for SSG | No streaming benefit — you get nothing until everything is ready |
+| Selective hydration via `<Suspense>`/`<Activity>` boundaries | Independent chunks become interactive without waiting on the slowest one | Requires deliberately drawing boundaries around independent UI regions; a page with none hydrates as one big unit |
+| Recovering from a hydration mismatch instead of crashing | The page stays usable even when server/client output genuinely differs | The recovery itself does extra client-side rendering work, and papers over a bug that should still be fixed |
+
+## Common Misconceptions
+
+- **"A hydration mismatch always crashes the app."** Proven false above: `onRecoverableError` fired, but the test's own assertion confirms `container.textContent` ended up correct — React patched the mismatched subtree rather than throwing.
+- **"Hydration is just a fast render because the DOM is already there."** It's a verification-and-attach pass with its own failure mode (mismatch), not a rendering shortcut — the real error text above exists specifically because this pass can fail.
+- **"Selective hydration requires you to do nothing — React always hydrates in optimal chunks."** It requires actual `<Suspense>` (or `<Activity>`) boundaries in your tree; react.dev is explicit that a page with none hydrates all at once.
+- **"`prerender` and `renderToPipeableStream` are interchangeable."** react.dev draws the line clearly: `prerender` waits for all data before resolving (good for SSG); the streaming APIs can send a shell before data finishes loading (good for SSR).
+
+## Reading AI-generated code
+
+- Does a component read `Date.now()`, `Math.random()`, `typeof window !== 'undefined'`, or a browser-only API (like `window.matchMedia`) directly in its render output for a server-rendered page? Each of these is called out by name in the real hydration-mismatch error text captured above — they're the textbook causes, not edge cases.
+- Does the code assume a hydration mismatch will throw and halt the app? It's handled via `onRecoverableError` and a client-side re-render of just the affected subtree, proven above — the practical risk is a flash of replaced content and the extra render work, not a crash.
+- Is `suppressHydrationWarning` used on an element whose *entire subtree* differs between server and client? React's own docs limit it to one level deep, for a single unavoidably-different attribute or text node (like a timestamp) — it's not a general-purpose mismatch suppressor.
+- Does a page rely on selective hydration's benefits ("the buttons feel responsive immediately") with no `<Suspense>` or `<Activity>` boundaries anywhere in the tree? Without a boundary, react.dev is explicit that the whole page hydrates as one unit.
+- Is `prerender`/`prerenderToNodeStream` used for a route that needs to start streaming HTML before all its data is ready? That's the streaming APIs' job specifically — `prerender` waits for everything, per react.dev, so using it here throws away the exact benefit streaming SSR provides.
+
+<SpotTheBug code={`function ServerClock() {
+  // "Show the current time" — looks fine
+  return <p>{new Date().toLocaleTimeString()}</p>;
+}`}>
+`new Date().toLocaleTimeString()` evaluates once on the server (producing, say, `"3:04:05 PM"` baked into the HTML) and evaluates *again* on the client during hydration — almost certainly a different string, since real time has passed and the two environments may even use different locales. This is one of the exact causes named in the real error text captured above: "Variable input such as `Date.now()` or `Math.random()` which changes each time it's called." React will recover (patch the text to the client's value) rather than crash, but the user still sees a flash from the server's timestamp to the client's, and the console carries a hydration warning on every single page load. The fix is to render a fixed/server-supplied value initially and update the time from a `useEffect` after mount (client-only), or accept the mismatch deliberately and mark that one text node with `suppressHydrationWarning`.
+</SpotTheBug>
+
+<Callout title="The one-line takeaway">
+`renderToPipeableStream` (server) and `hydrateRoot` (client) are two ends of one handshake: the server produces HTML, and `hydrateRoot` must produce **the same output**, per its own documented caveat, or a mismatch results. `<Suspense>`/`<Activity>` boundaries let **Selective Hydration** treat independent chunks of the page separately, so a slow section doesn't block a fast one from becoming interactive. Proven above with the real, byte-for-byte error text: a genuine mismatch does **not** crash the app — it fires `onRecoverableError` (naming the exact common causes: `typeof window` branches, `Date.now()`/`Math.random()`, locale formatting, external data, invalid nesting) and React regenerates just that subtree on the client. `react-dom/static`'s `prerender`/`prerenderToNodeStream` is the non-streaming sibling: it waits for everything before resolving, for static generation rather than live streaming SSR.
+</Callout>
+
+export const quizHydration = [
+  {
+    q: 'What must the tree passed to `hydrateRoot` produce, per react.dev\'s own documented caveat?',
+    options: [
+      'Any valid HTML — React reconciles differences automatically with no side effects',
+      'The SAME output the server produced — a mismatch triggers recovery, not a silent success',
+      'Less HTML than the server, for performance',
+      'It doesn\'t matter as long as the root element matches',
+    ],
+    answer: 1,
+    explain: 'Quoted directly from react.dev\'s hydrateRoot reference page: "The React tree you pass to hydrateRoot needs to produce the same output as it did on the server."',
+  },
+  {
+    q: 'What enables Selective Hydration to hydrate one part of a page before another?',
+    options: [
+      'It happens automatically for every page with no setup required',
+      '`<Suspense>` (or `<Activity>`) boundaries, which divide the tree into independent units React can hydrate in separate chunks',
+      'Adding `async` to the component function',
+      'Server configuration only, nothing on the React side',
+    ],
+    answer: 1,
+    explain: 'react.dev is explicit: without a Suspense/Activity boundary, "React must hydrate the entire page all at once." Boundaries are what create the independent chunks.',
+  },
+  {
+    q: 'In the real hydration-mismatch test above, what happened after `onRecoverableError` fired?',
+    options: [
+      'The app crashed with an uncaught exception',
+      'React discarded the mismatched server output for that subtree and re-rendered it fresh on the client — the test confirms the final text is the CLIENT\'s value',
+      'The page froze on the stale server-rendered text forever',
+      'Nothing — onRecoverableError is purely informational and has no effect on the DOM',
+    ],
+    answer: 1,
+    explain: 'Proven above: the test asserts `container.textContent` equals `\'client-label\'` (the client\'s value) after hydration — React regenerated that subtree rather than leaving the mismatched server markup or throwing.',
+  },
+  {
+    q: 'Which of these is named directly in the real `onRecoverableError` message text captured above as a common cause of hydration mismatches?',
+    options: ['Using `useState` more than once', 'Using `Date.now()` or `Math.random()` in render', 'Passing too many props to a component', 'Forgetting `key` on a list item'],
+    answer: 1,
+    explain: 'The captured error text lists it verbatim: "Variable input such as Date.now() or Math.random() which changes each time it\'s called."',
+  },
+  {
+    q: 'Per react.dev, how does `prerender` (react-dom/static) differ from the streaming SSR APIs (`renderToPipeableStream`/`renderToReadableStream`)?',
+    options: [
+      'prerender is only for client-side rendering',
+      'prerender waits for ALL data to load before resolving (good for static generation); the streaming APIs can send a shell before all data is ready (good for live SSR)',
+      'They are exactly the same API under different names',
+      'prerender cannot produce HTML at all',
+    ],
+    answer: 1,
+    explain: 'Quoted directly from react.dev\'s prerender reference page: "Unlike renderToString, prerender waits for all data to load before resolving."',
+  },
+];
+
+<Quiz client:visible id="react-internals/hydration-and-streaming" questions={quizHydration} />
+
+<ProgressTracker client:visible id="internals-hydration" />

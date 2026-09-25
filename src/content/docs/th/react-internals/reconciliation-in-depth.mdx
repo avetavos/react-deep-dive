@@ -1,0 +1,346 @@
+---
+title: 'Reconciliation in Depth'
+description: 'algorithm จริงของ reconcileChildFibers — single element เทียบกับ array, key-map pass ที่ทำให้การ reorder เป็น O(n) แทนที่จะเป็น O(n²), flag Placement/deletion ที่มันสร้าง และทำไม function ที่ประกาศข้างใน render ถึง remount เสมอ พิสูจน์ด้วย test'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## `reconcileChildFibers`: สอง algorithm สำหรับสองรูปทรง
+
+[Rendering & Reconciliation](/react/th/foundations/rendering-and-reconciliation/) พิสูจน์พฤติกรรมจากภายนอกไปแล้ว: `type` เดียวกัน update ในที่เดิม, `type` ต่างกัน remount, และ `key` ที่คงที่ทำให้ state ตามไอเทมที่ถูกต้องใน list บทนี้พูดถึงโค้ดจริงใน `packages/react-reconciler/src/ReactChildFiber.js` ที่ผลิตผลลัพธ์เหล่านั้น — และมันคือสอง code path ที่แตกต่างกันจริง ๆ เพราะ "child ตัวเดียว" กับ "list ของ child" ต้องใช้กลยุทธ์คนละแบบ
+
+สำหรับ child ที่เป็น **element เดียว** `reconcileSingleElement` แค่ต้องเทียบกับ fiber ตัว *เดียว* ที่นั่งอยู่ตรงนั้นแล้ว:
+
+```js
+// packages/react-reconciler/src/ReactChildFiber.js — reconcileSingleElement (trimmed)
+function reconcileSingleElement(returnFiber, currentFirstChild, element, lanes) {
+  const key = element.key;
+  let child = currentFirstChild;
+  while (child !== null) {
+    if (child.key === key) {
+      const elementType = element.type;
+      if (child.elementType === elementType /* ... */) {
+        // Same key AND same type: delete any other leftover children,
+        // reuse this fiber, update its props.
+        deleteRemainingChildren(returnFiber, child.sibling);
+        const existing = useFiber(child, element.props);
+        existing.return = returnFiber;
+        return existing;
+      }
+      // Same key, DIFFERENT type: this key is claimed by something else now.
+      // Delete this fiber and everything after it, fall through to create fresh.
+      deleteRemainingChildren(returnFiber, child);
+      break;
+    } else {
+      deleteChild(returnFiber, child);
+    }
+    child = child.sibling;
+  }
+  // No match found — create a brand new fiber.
+  // ...
+}
+```
+
+อ่าน branch กลางนั้นดี ๆ: **`key` ตรงกันอย่างเดียวไม่พอ** React เช็ก `child.elementType === elementType` — reference equality ตรง ๆ บน type — *เพิ่มเติมจาก* การเทียบ key key เดียวกันแต่ type ต่างกันยังคง delete แล้วสร้างใหม่อยู่ดี นี่คือกลไกเป๊ะ ๆ ที่อยู่หลังบั๊กคลาสสิก "ฉันใส่ `key` แล้ว ทำไมมัน remount อยู่ดี" และมัน test ได้ตรง ๆ:
+
+```tsx
+// src/__tests__/type-identity-remount.test.tsx
+import { useEffect } from 'react';
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('a component function defined INSIDE another component\'s render body remounts every render, even with a stable key', () => {
+  const log: string[] = [];
+
+  function Parent({ tick }: { tick: number }) {
+    void tick; // re-rendered with a new value each time, to force Parent to re-render
+    // A new function object every call -> a new `type` every call.
+    function Inner() {
+      useEffect(() => {
+        log.push('mount');
+        return () => { log.push('unmount'); };
+      }, []);
+      return <p>inner</p>;
+    }
+    return <Inner key="looks-stable" />;
+  }
+
+  const { rerender } = render(<Parent tick={0} />);
+  log.length = 0;
+  rerender(<Parent tick={1} />); // same key, but Inner is a NEW function this time
+
+  expect(log).toEqual(['unmount', 'mount']); // full remount, per reconcileSingleElement above
+});
+```
+
+```text
+✓ a component function defined INSIDE another component's render body remounts every render, even with a stable key
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## Reconcile child ที่เป็น **array**: key-map pass
+
+list ยากกว่า: ไอเทมถูกเพิ่ม ลบ และ reorder พร้อมกันได้หมด และการเทียบ child เก่าทุกตัวกับ child ใหม่ทุกตัวแบบไร้เดียงสาจะเป็น O(n²) `reconcileChildrenArray` หลีกเลี่ยงสิ่งนั้นด้วยกลยุทธ์สองรอบเฉพาะ รอบแรกมันเดิน child เก่ากับใหม่ *พร้อมกัน ตามตำแหน่ง* ตราบใดที่ key ยังตรงกัน (fast path สำหรับ "ไม่มีอะไร reorder") ทันทีที่ key ไม่ตรง มันหยุด fast walk นั้นแล้วสร้าง lookup table จาก child เก่าที่เหลืออยู่ — นี่คือ `mapRemainingChildren`:
+
+```js
+// packages/react-reconciler/src/ReactChildFiber.js — mapRemainingChildren (trimmed)
+function mapRemainingChildren(currentFirstChild) {
+  // Add the remaining children to a temporary map so that we can find them by
+  // key quickly. Implicit (null) keys get added to this set with their index
+  // instead.
+  const existingChildren = new Map();
+  let existingChild = currentFirstChild;
+  while (existingChild !== null) {
+    if (existingChild.key !== null) {
+      existingChildren.set(existingChild.key, existingChild);
+    } else {
+      existingChildren.set(existingChild.index, existingChild);
+    }
+    existingChild = existingChild.sibling;
+  }
+  return existingChildren;
+}
+```
+
+`Map` นั้นคือกลเม็ดทั้งหมด: พอมันมีอยู่ การหา "มี fiber เก่าสำหรับ key ของ element ใหม่ตัวนี้ไหม" คือ lookup แบบ O(1) ไม่ใช่ linear scan — ซึ่งเป็นสิ่งที่ทำให้ pass ทั้งหมดเป็น O(n) แทนที่จะเป็น O(n²) สำหรับ list ที่ reorder และนี่คือเหตุผลเป๊ะ ๆ ว่าทำไม `key` ต้องเป็น *identity ของข้อมูลที่คงที่* ไม่ใช่ array index: `mapRemainingChildren` ใช้ `existingChild.index` เป็น fallback key เฉพาะสำหรับ child ที่ **ไม่มี** key — หมายความว่า "ไม่มี key" กับ "index เป็น key" ให้พฤติกรรม lookup เดียวกันเป๊ะ การใช้ index เป็น `key` ตรง ๆ ไม่ได้ทำให้คุณได้อะไรฉลาดขึ้นเลย มันแค่ทำสิ่งที่ React ทำอยู่แล้วเป็น default เมื่อไม่มี key เลยซ้ำอีกที ซึ่งเป็นเหตุผลเป๊ะ ๆ ที่มันเปราะบางเมื่อมีการ reorder
+
+## Placement กับ deletion: flag ที่ pass นี้ผลิตออกมา
+
+พอ fiber ตัวหนึ่งถูก match แล้ว (จาก key map หรือ fast walk) `placeChild` ตัดสินว่ามันต้องย้ายตำแหน่งจริงใน DOM ไหม:
+
+```js
+// packages/react-reconciler/src/ReactChildFiber.js — placeChild (trimmed)
+function placeChild(newFiber, lastPlacedIndex, newIndex) {
+  newFiber.index = newIndex;
+  const current = newFiber.alternate;
+  if (current !== null) {
+    const oldIndex = current.index;
+    if (oldIndex < lastPlacedIndex) {
+      // This existing fiber needs to MOVE forward in the DOM.
+      newFiber.flags |= Placement;
+      return lastPlacedIndex;
+    } else {
+      // This item's relative order didn't change — leave it alone.
+      return oldIndex;
+    }
+  } else {
+    // No alternate at all: this is a brand new insertion.
+    newFiber.flags |= Placement | PlacementDEV;
+    return lastPlacedIndex;
+  }
+}
+```
+
+สังเกตว่า fiber ถูก reuse ทั้งสองกรณี (`newFiber.alternate` ยังชี้ไปที่ตัวเก่า) — `Placement` ตรงนี้แปลว่า "ย้าย DOM node ที่มีอยู่แล้วตัวนี้" ไม่เคยแปลว่า "ทำลายแล้วสร้างใหม่" อะไรก็ตามจาก child เก่าที่ไม่เคยถูก match กับ element ใหม่เลย จะผ่าน `deleteChild`/`deleteRemainingChildren` แทน ซึ่ง mark `Deletion` และเตรียม fiber ให้ถูกรื้อ (state, effect, DOM node) ใน commit phase การแยกนี้ — reuse-แล้วอาจย้าย เทียบกับ ถูกลบจริง — สังเกตได้ตรง ๆ: DOM node จริงของ fiber ที่ match ได้รอดจากการ reorder
+
+```tsx
+// src/__tests__/reorder-reuses-dom-node.test.tsx
+import { render, cleanup } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+test('reordering a keyed list reuses the same DOM node — it moves, it is not destroyed', () => {
+  function List({ items }: { items: string[] }) {
+    return (
+      <ul>
+        {items.map((id) => <li key={id} data-id={id}>{id}</li>)}
+      </ul>
+    );
+  }
+  const { container, rerender } = render(<List items={['a', 'b', 'c']} />);
+  const aBefore = container.querySelector('[data-id="a"]');
+
+  rerender(<List items={['c', 'a', 'b']} />);
+  const aAfter = container.querySelector('[data-id="a"]');
+
+  expect(aAfter).toBe(aBefore); // same node instance, only its position in the DOM changed
+});
+```
+
+```text
+✓ reordering a keyed list reuses the same DOM node — it moves, it is not destroyed
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+## Fragment ก็มี key เหมือนกัน และกฎเดียวกันใช้ได้
+
+`<Fragment key={...}>` (หรือเทียบเท่า `<React.Fragment key={...}>` — syntax สั้น `<>...</>` รับ `key` ไม่ได้) ผ่าน Fragment branch ของ `reconcileSingleElement` ซึ่งเช็ก `child.tag === Fragment` แทน `elementType` แต่นอกนั้นตามกฎ "key ต้องตรง ไม่งั้นนี่คือของคนละอัน" เป๊ะเดียวกัน keyed Fragment ที่ห่อ child หลายตัว มีพฤติกรรม ในแง่ reconciliation เหมือนกับ keyed element ที่ห่อตัวเดียวเป๊ะ — state ของมัน (และ state ของ child ข้างใน) ตาม key ข้ามการ reorder:
+
+```tsx
+// src/__tests__/keyed-fragment.test.tsx
+import { Fragment, useState } from 'react';
+import { render, cleanup, act } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
+
+afterEach(cleanup);
+
+function Toggle({ label }: { label: string }) {
+  const [on, setOn] = useState(false);
+  return (
+    <button data-label={label} data-on={on} onClick={() => setOn(true)}>
+      {label}
+    </button>
+  );
+}
+
+function Group({ ids }: { ids: string[] }) {
+  return (
+    <div>
+      {ids.map((id) => (
+        <Fragment key={id}>
+          <Toggle label={id} />
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+test('a keyed Fragment carries its child\'s state across a reorder, exactly like a keyed element would', () => {
+  const { container, rerender, getByText } = render(<Group ids={['a', 'b']} />);
+  act(() => { getByText('a').click(); });
+
+  rerender(<Group ids={['b', 'a']} />);
+
+  const aButton = container.querySelector('[data-label="a"]');
+  expect(aButton?.getAttribute('data-on')).toBe('true'); // state followed "a" across the reorder
+});
+```
+
+```text
+✓ a keyed Fragment carries its child's state across a reorder, exactly like a keyed element would
+
+Test Files  1 passed (1)
+     Tests  1 passed (1)
+```
+
+<Mermaid title="reconcileChildFibers: single element เทียบกับ keyed array" code={reconDiagram} />
+
+export const reconDiagram = `flowchart TD
+  start["reconcileChildFibers(returnFiber, currentFirstChild, newChild)"] --> isArray{"newChild is an array?"}
+  isArray -->|"no — single element/Fragment"| single["reconcileSingleElement\ncheck key AND type/tag"]
+  single -->|"key+type match"| reuse1["reuse fiber, update props"]
+  single -->|"mismatch"| rebuild1["delete old, create new fiber"]
+  isArray -->|"yes — a list"| fast["Fast walk: old[i] vs new[i]\nby position, while keys line up"]
+  fast -->|"key mismatch found"| map["mapRemainingChildren\nbuild key -> old fiber Map (O(1) lookup)"]
+  map --> place["placeChild per new element:\nfound in map -> reuse + maybe Placement\nnot found -> new fiber + Placement"]
+  map --> del["old fibers never matched -> deleteChild\n(Deletion flag)"]`;
+
+## Mental Model
+
+reconciliation ถามคำถามเดียวกันเสมอ — "สิ่งที่ตำแหน่งนี้คือของเดิม หรือของใหม่" — แต่ตอบด้วยเครื่องมือต่างกันตามรูปทรง สำหรับ child ตัวเดียว มันคือการเช็ก key-แล้ว-type ตรง ๆ กับ fiber ตัวเดียวที่อยู่ตรงนั้น สำหรับ list มันคือการเช็กเดียวกัน แค่ batch ผ่าน hash map เพื่อให้ยังคง linear แทนที่จะเป็น quadratic ไม่ว่าทางไหน "เดิม" แปลว่า reuse (และอาจย้าย) fiber "ใหม่" แปลว่า delete ตัวเก่าแล้วสร้างใหม่ตั้งแต่ศูนย์ — ไม่มีตัวเลือกที่สาม ไม่มีการ reuse บางส่วนของ fiber ที่ "คล้ายกัน"
+
+## ข้อแลกเปลี่ยน
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+|---|---|---|
+| แยก code path single-element กับ array | แต่ละ path เรียบง่ายสำหรับรูปทรงของตัวเอง ไม่มี overhead ของ generic tree-diff สำหรับกรณี "child เดียว" ที่พบบ่อย | ต้องเข้าใจสอง algorithm ไม่ใช่หนึ่ง |
+| Key-map (`mapRemainingChildren`) สำหรับ list ที่ reorder | O(n) โดยรวมแทนที่จะเป็น O(n²) — สำคัญขึ้นเมื่อ list ใหญ่ขึ้น | ทำงานก็ต่อเมื่อ fast positional walk เจอ mismatch เท่านั้น; list ที่ reorder ทั้งหมดต้องเสียค่าสร้าง map ทั้งอัน |
+| ต้องมีทั้ง `key`+`type` ตรงกันถึงจะ reuse fiber ได้ | ป้องกัน component ที่ต่างกันจริง ๆ ไม่ให้สืบทอด state ของกันและกันโดยบังเอิญแค่เพราะ key ชนกัน | component ที่เปลี่ยน identity กลางคัน (หายาก แต่มีจริง — เช่นสลับ implementation ภายใต้ key เดิม) เสีย state เสมอ ต่อให้ตั้งใจสลับก็ตาม |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"key ที่ตรงกันพอแล้วสำหรับรักษา state ของ component"** พิสูจน์แล้วว่าไม่จริงข้างบน: key เดียวกันแต่ `type` ต่างกัน (function object ที่สร้างใหม่) ยัง remount เต็มรูปแบบอยู่ดี — `reconcileSingleElement` เช็กทั้งสองอย่าง
+- **"reorder list ทำลายแล้วสร้างไอเทมที่ย้ายใหม่"** พิสูจน์แล้วว่าไม่จริงข้างบน: DOM node ของไอเทมที่ reorder-แต่ยังอยู่ เป็น object reference เดียวกันเป๊ะหลัง reorder — `placeChild` mark มันเป็น `Placement` (ย้าย) ไม่ใช่ `Deletion` + insertion ใหม่
+- **"ใช้ array index เป็น key อย่างน้อยก็ดีกว่าไม่มี key"** มันคือสิ่งเดียวกัน — `mapRemainingChildren` fallback ไปที่ `existingChild.index` เฉพาะเมื่อไม่มี key ดังนั้น `key={index}` ที่ใส่ตรง ๆ สร้างพฤติกรรมเดียวกันเป๊ะกับการไม่มี key เลย
+- **"`<>...</>` กับ `<Fragment key={...}>` ใช้แทนกันได้"** ไม่ได้สำหรับ list: syntax สั้นรับ `key` ไม่ได้ ดังนั้นมันเข้าร่วม keyed reconciliation แบบที่ `<Fragment key={...}>` ตรง ๆ ทำได้ไม่ได้ — พิสูจน์แล้วข้างบน
+
+## อ่านโค้ดที่ AI เขียน
+
+- callback ของ `.map()` ประกาศ component function ที่ซ้อนอยู่ข้างใน (`function Row() {...}` หรือ `const Row = () => {...}`) แล้ว render มันด้วย `key` ไหม? `key` ไม่ช่วยอะไร — ตัว function เองถูกสร้างใหม่ทุก render ซึ่งเป็น `type` ใหม่ พิสูจน์แล้วข้างบนด้วยการ remount เต็มรูปแบบ
+- list ใช้ `<>...</>` (Fragment syntax สั้น) ข้างใน `.map()` ห่อ child หลายตัว โดยไม่มี `key` บนมันเลยไหม? นั่นคือปัญหา "ไม่มี key" แบบเงียบ ๆ สำหรับ group ของ child ทั้งกลุ่มพร้อมกัน — ต้องใช้ `<Fragment key={...}>` แทน
+- โค้ดสมมติว่า `key={index}` ปลอดภัยเพราะ "ลำดับ list ไม่เคยเปลี่ยน" ไหม? นั่นจริงแค่จนกว่ามันจะเปลี่ยน — และ failure mode (state ไปลงแถวผิด) พิสูจน์แล้วข้างบนและใน [Rendering & Reconciliation](/react/th/foundations/rendering-and-reconciliation/) ไม่ใช่สมมติฐาน
+- mental model ของ reviewer สมมติว่า reconciliation ทำ "similarity diff" ทั่วไประหว่าง child เก่ากับใหม่ (หา "match ที่ใกล้เคียงที่สุด") ไหม? มันไม่ทำแบบนั้น — มันคือการ match key-แล้ว-type แบบเป๊ะผ่าน hash map ไม่ใช่ fuzzy matching; key/type pair ที่เปลี่ยนชื่อหรือโครงสร้างใหม่ถูกปฏิบัติเป็นของใหม่ทั้งหมดเสมอ ไม่เคยถูกปรับให้เข้ากัน
+
+<SpotTheBug code={`function CommentList({ comments }) {
+  return (
+    <div>
+      {comments.map((c) => (
+        <>
+          <p key={c.id}>{c.text}</p>
+          <hr />
+        </>
+      ))}
+    </div>
+  );
+}`}>
+`key={c.id}` อยู่บน `<p>` ข้างใน fragment ไม่ใช่บนตัว fragment เอง — และนี่ใช้ syntax สั้น `<>...</>` ซึ่งรับ `key` ไม่ได้เลย React เห็น group ของ child สองตัว (`<p>` + `<hr>`) ที่ไม่มี key ซ้ำกันทุก comment; ภายใน `mapRemainingChildren` fallback ไปเทียบเท่ากับใช้ **index** เป็น key ของ fragment แต่ละอัน (พิสูจน์แล้วข้างบนว่าพฤติกรรมเหมือนไม่มี key เป๊ะ) ดังนั้นการแทรกหรือลบ comment กลาง list ทำให้ fragment ทุกอันหลังจุดนั้น mismatch เหมือนกับ index key ตรง ๆ ทุกประการ ทางแก้คือ `<Fragment key={c.id}>...</Fragment>` (form ยาว import จาก `'react'`) ซึ่งทำให้ group ด้านนอกเข้าร่วม keyed reconciliation ได้เอง
+</SpotTheBug>
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`reconcileChildFibers` คือสอง algorithm ไม่ใช่หนึ่ง: `reconcileSingleElement` เช็ก **`key` และ `type`** กับ fiber ตัวเดียวที่มีอยู่ (พิสูจน์แล้วข้างบน — key ที่ตรงกันแต่ `type` ใหม่ เช่น function ที่ประกาศข้างใน render ยัง remount เต็มรูปแบบอยู่ดี) ส่วน list ผ่าน fast positional walk ที่ fallback ไปที่ `mapRemainingChildren` — hash map `key -> fiber` — ทันทีที่ key เริ่มไม่ตรงกัน ซึ่งเป็นสิ่งที่ทำให้ list ที่ reorder เป็น O(n) แทนที่จะเป็น O(n²) fiber ที่ match ได้ `Placement` (มัน **ย้าย** พิสูจน์แล้วข้างบนด้วย DOM node reference เดียวกันข้าม reorder); ตัวที่ไม่ match ได้ `Deletion` `mapRemainingChildren` ใช้ **index** เป็น key ของ child ที่ไม่มี key ซึ่งเป็นเหตุผลที่แม่นยำ มี source รองรับ ว่าทำไม `key={index}` ไม่ใช่การพัฒนาอะไรจากการไม่มี key เลย — มันคือ fallback เดียวกัน แค่เขียนให้เห็นชัด ๆ
+</Callout>
+
+export const quizRecondepth = [
+  {
+    q: 'ใน `reconcileSingleElement` React เช็กสองอย่างอะไรบ้างก่อนจะ reuse fiber เก่าให้กับ element ใหม่?',
+    options: [
+      'Only the props',
+      'The element\'s `key` AND its `type` (`child.elementType === elementType`) — both must match',
+      'Only the type',
+      'The DOM tag name only',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบนด้วย test จริง: key ที่ตรงกันอย่างเดียวไม่ได้ป้องกัน remount เมื่อ type (function ที่สร้างขึ้นใหม่) ต่างกัน',
+  },
+  {
+    q: '`mapRemainingChildren` สร้างอะไรขึ้นมา และมันมีไว้ทำไม?',
+    options: [
+      'A sorted array, to binary-search old children',
+      'A `key -> old fiber` Map, so matching a new child against an old one is an O(1) lookup instead of an O(n) scan — keeping the whole reconciliation pass O(n)',
+      'A cache of rendered HTML strings',
+      'A list of components that need to re-render',
+    ],
+    answer: 1,
+    explain: 'ยกมาตรง ๆ จาก source ข้างบน: "Add the remaining children to a temporary map so that we can find them by key quickly."',
+  },
+  {
+    q: 'flag `Placement` แปลว่าอะไรเมื่อมันถูก apply กับ fiber ที่มี `alternate` อยู่แล้ว (คือมันเคยมีอยู่ก่อนหน้านี้)?',
+    options: [
+      'Delete this fiber and create a new one',
+      'Move this EXISTING fiber\'s DOM node to a new position — proven above by the DOM node reference staying identical across a reorder',
+      'Mark this fiber as an error boundary',
+      'Skip this fiber during commit',
+    ],
+    answer: 1,
+    explain: 'placeChild reuse fiber (`newFiber.alternate` ยังถูก set) แล้วแค่ flag มันไว้ให้ย้าย DOM — พิสูจน์แล้วข้างบน: node reference เดียวกันรอดจากการ reorder',
+  },
+  {
+    q: 'ตาม source ของ `mapRemainingChildren` React ใช้อะไรเป็น key ภายในสำหรับ child ที่ไม่มี `key` prop ระบุไว้เลย?',
+    options: [
+      'A random UUID generated per render',
+      'Its `index` in the children array — the exact same thing `key={index}` would produce explicitly',
+      'The child\'s `type` name',
+      'It refuses to reconcile unkeyed children',
+    ],
+    answer: 1,
+    explain: 'ยกมาข้างบน: "Implicit (null) keys get added to this set with their index instead." การเขียน `key={index}` ตรง ๆ จึงไม่เปลี่ยนอะไรเลย — มันคือ fallback ที่มีอยู่แล้ว แค่เขียนให้เห็นชัด',
+  },
+  {
+    q: '```tsx\n{items.map((id) => (\n  <>\n    <p key={id}>{id}</p>\n    <hr />\n  </>\n))}\n```\nการใช้ `key` ของโค้ดนี้ผิดตรงไหน?',
+    options: [
+      'Nothing — the key on `<p>` is enough',
+      'The short `<>...</>` Fragment syntax cannot carry a `key` at all, so the outer two-child group is effectively unkeyed and falls back to index-based matching, even though the `<p>` looks correctly keyed',
+      '`<hr />` also needs its own key',
+      'Fragments cannot contain more than one element'
+    ],
+    answer: 1,
+    explain: 'Fragment syntax สั้นไม่มีทางรับ `key` prop ได้เลย มีแค่ form ยาว `<Fragment key={...}>` เท่านั้นที่รับได้ ทางแก้ต้องสลับไปใช้ form ยาว — พิสูจน์และสาธิตแล้วข้างบน',
+  },
+];
+
+<Quiz client:visible id="react-internals/reconciliation-in-depth" questions={quizRecondepth} />
+
+<ProgressTracker client:visible id="internals-reconciliation" />
