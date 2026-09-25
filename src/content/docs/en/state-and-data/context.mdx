@@ -10,6 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import SpotTheBug from '../../../../components/SpotTheBug.astro';
+import RenderVisualizer from '../../../../components/RenderVisualizer.astro';
 
 ## Context: teleport a value down a subtree
 
@@ -256,6 +257,40 @@ test("a useMemo'd provider value lets memo bail the consumer out", () => {
 Test Files  1 passed (1)
      Tests  2 passed (2)
 ```
+
+### See it render: provider value identity
+
+<RenderVisualizer code={contextIdentityCode} />
+
+export const contextIdentityCode = `import { createContext, useContext, useState, useMemo, memo } from 'react';
+
+const LabelContext = createContext({ label: 'fixed' });
+
+const Consumer = memo(function Consumer() {
+  const { label } = useContext(LabelContext);
+  return <li>Consumer reads: {label}</li>;
+});
+
+export default function App() {
+  const [tick, setTick] = useState(0);
+  const [stable, setStable] = useState(false);
+  const stableValue = useMemo(() => ({ label: 'fixed' }), []);
+  const value = stable ? stableValue : { label: 'fixed' };
+  return (
+    <LabelContext value={value}>
+      <button onClick={() => setTick((t) => t + 1)}>Unrelated tick: {tick}</button>
+      <button onClick={() => setStable((s) => !s)}>
+        Provider value: {stable ? 'useMemo (stable)' : 'inline object (fresh every render)'}
+      </button>
+      <ul>
+        <Consumer />
+      </ul>
+    </LabelContext>
+  );
+}
+`;
+
+With the mode reading "inline object", click **Unrelated tick** a few times — `Consumer`'s row climbs on every click, even though `label` itself never changes, because `memo` cannot see past the provider's fresh object reference (proven above). Switch the mode to "useMemo (stable)" and click **Unrelated tick** again — `Consumer`'s row stops moving entirely, because the provider now hands out the same object reference every time.
 
 Two mitigations for this class of bug:
 

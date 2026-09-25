@@ -10,6 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import SpotTheBug from '../../../../components/SpotTheBug.astro';
+import RenderVisualizer from '../../../../components/RenderVisualizer.astro';
 
 ## Render is not "update the DOM"
 
@@ -219,6 +220,45 @@ export const keyDiagram = `flowchart TB
   before2["Before: [A, B, C]\nkey = index 0,1,2"] -->|prepend Z| after2["After: index 0,1,2,3"]
   after2 --> bad["With index keys:\nevery item mismatched,\nstate shifts to wrong rows"]
   same["Same component, key changes\n(e.g. key={itemId})"] --> reset["Forced unmount + remount:\nstate resets on purpose"]`;
+
+### See it render: parent tick, a memoized child, a key reset
+
+<RenderVisualizer code={parentMemoKeyCode} />
+
+export const parentMemoKeyCode = `import { useState, memo } from 'react';
+
+const MemoChild = memo(function MemoChild({ label }: { label: string }) {
+  return <li>Memo child — stays put unless its own props change: {label}</li>;
+});
+
+function Draft({ resetKey }: { resetKey: number }) {
+  const [text, setText] = useState('');
+  return (
+    <div>
+      <p>Draft (key={resetKey}) — internal state below resets when you click "New draft":</p>
+      <input value={text} onChange={(e) => setText((e.target as HTMLInputElement).value)} placeholder="type here, then click New draft" />
+    </div>
+  );
+}
+
+export default function App() {
+  const [tick, setTick] = useState(0);
+  const [resetKey, setResetKey] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>Parent tick: {tick}</button>
+      <ul>
+        <li>Parent tick value: {tick}</li>
+        <MemoChild label="stable" />
+      </ul>
+      <button onClick={() => setResetKey((k) => k + 1)}>New draft (remount via key)</button>
+      <Draft key={resetKey} resetKey={resetKey} />
+    </div>
+  );
+}
+`;
+
+Click **Parent tick** a few times: the table's `App` row climbs, but `MemoChild`'s row freezes at 1 — its only prop never changes, so `React.memo` skips calling it at all (the section above, proven with a test). Then click **New draft (remount via key)**: `Draft`'s row climbs by exactly 1 per click and whatever you typed disappears each time, because a changing `key` forces a real unmount + remount instead of an in-place update — the same "reset switch" proven just above.
 
 ## StrictMode's dev-only double render and double effect
 

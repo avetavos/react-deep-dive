@@ -10,6 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import SpotTheBug from '../../../../components/SpotTheBug.astro';
+import RenderVisualizer from '../../../../components/RenderVisualizer.astro';
 
 ## ทำไม component ถึง re-render
 
@@ -147,7 +148,44 @@ Test Files  1 passed (1)
 
 ระหว่างสองอย่างนี้: ใช้ Highlight Updates ก่อนเพื่อจับว่า *มี* อะไร re-render มากเกินไป แล้วใช้ Profiler flamegraph เพื่อดูว่า render นั้น *แพงแค่ไหน* จริง ๆ ก่อนจะหยิบ `React.memo` มาใช้
 
-{/* RenderVisualizer: Phase 4 */}
+### ลองดูของจริง: Profiler durations กับ `useDeferredValue`
+
+<RenderVisualizer code={profilerDeferredCode} />
+
+export const profilerDeferredCode = `import { useState, useDeferredValue } from 'react';
+
+function slowFilter(query: string): string[] {
+  const items: string[] = [];
+  for (let i = 0; i < 2000; i++) {
+    if (String(i).includes(query)) items.push(String(i));
+  }
+  return items;
+}
+
+function ResultsList({ query }: { query: string }) {
+  const results = slowFilter(query);
+  return <p>{results.length} matches for "{query}"</p>;
+}
+
+export default function App() {
+  const [text, setText] = useState('');
+  const deferredText = useDeferredValue(text);
+  return (
+    <div>
+      <input
+        value={text}
+        onChange={(e) => setText((e.target as HTMLInputElement).value)}
+        placeholder="type digits, e.g. 12"
+      />
+      <ResultsList query={deferredText} />
+    </div>
+  );
+}
+`;
+
+พิมพ์ตัวเลขในช่อง input ทีละตัว เปิดดู commit log: แต่ละ keystroke จะได้ commit "update" สองครั้ง — ครั้ง urgent (`deferredText` ยังลากตามหลังอยู่ ตรงตามที่ test ด้านบนพิสูจน์) แล้วตามด้วย background commit (`deferredText` ตามทัน) `ResultsList` ไม่ได้ memoize ไว้ จึงรัน filter loop ที่ตั้งใจให้ช้าใหม่ทั้งสอง commit — ดูแถวของมันในตารางเพิ่มทีละ 2 ต่อ keystroke และ duration ของทั้งสอง commit ก็ไม่น้อยเลย combination แบบนี้ — component ที่ re-render ทุก commit **และ** ทำงานจริงทุกครั้ง — คือสิ่งที่ `<Profiler onRender>` กับ DevTools flamegraph มีไว้เพื่อจับให้เห็น ก่อนจะหยิบ `React.memo` มาใช้
+
+## `useDeferredValue` เทียบ debounce
 
 ## `useDeferredValue` เทียบ debounce
 

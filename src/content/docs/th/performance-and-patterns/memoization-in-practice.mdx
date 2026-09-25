@@ -10,6 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import SpotTheBug from '../../../../components/SpotTheBug.astro';
+import RenderVisualizer from '../../../../components/RenderVisualizer.astro';
 
 ## สามเครื่องมือ สามหน้าที่
 
@@ -106,6 +107,37 @@ test('useCallback keeps the reference stable, so React.memo actually skips the r
 Test Files  1 passed (1)
      Tests  2 passed (2)
 ```
+
+### ลองดูของจริง: inline object เทียบ `useMemo`
+
+<RenderVisualizer code={inlineVsMemoCode} />
+
+export const inlineVsMemoCode = `import { useState, useMemo, memo } from 'react';
+
+const MemoChild = memo(function MemoChild({ style }: { style: { color: string } }) {
+  return <li style={style}>Memo child</li>;
+});
+
+export default function App() {
+  const [tick, setTick] = useState(0);
+  const [useStable, setUseStable] = useState(false);
+  const stableStyle = useMemo(() => ({ color: 'inherit' }), []);
+  const style = useStable ? stableStyle : { color: 'inherit' };
+  return (
+    <div>
+      <button onClick={() => setTick((t) => t + 1)}>Parent tick: {tick}</button>
+      <button onClick={() => setUseStable((s) => !s)}>
+        Mode: {useStable ? 'useMemo (stable)' : 'inline object (fresh every render)'}
+      </button>
+      <ul>
+        <MemoChild style={style} />
+      </ul>
+    </div>
+  );
+}
+`;
+
+คลิก **Parent tick** ตอนโหมดเป็น "inline object": แถว `MemoChild` จะเพิ่มทุกครั้งที่คลิก เพราะ `{ color: 'inherit' }` เป็น object ใหม่ทุก render แล้วกดปุ่มโหมดสลับเป็น "useMemo (stable)" แล้วคลิก **Parent tick** อีกครั้ง: แถว `MemoChild` จะหยุดขยับเลย เพราะ object reference เดิมจาก `useMemo` ผ่าน shallow comparison ของ `React.memo` ทุกครั้ง
 
 ## `useCallback` อย่างเดียวไม่พอ — child ต้อง memoize ด้วย
 

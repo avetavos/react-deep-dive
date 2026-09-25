@@ -1,0 +1,21 @@
+---
+// RenderVisualizer: renders a React 19 example (read-only, syntax-highlighted)
+// plus an interactive island that transpiles it with Babel standalone and
+// runs it in a sandboxed iframe wrapped in <Profiler>, showing per-component
+// render counts and a commit log. See render-visualizer-runtime.ts for the
+// architecture write-up and RenderVisualizerIsland.tsx for the UI.
+import { Code } from 'astro-expressive-code/components';
+import RenderVisualizerIsland from './RenderVisualizerIsland.tsx';
+
+interface Props {
+  code: string;
+  id?: string;
+}
+
+const { code, id } = Astro.props;
+---
+
+<div class="rv-wrap not-content" id={id}>
+  <Code code={code} lang="tsx" />
+  <RenderVisualizerIsland client:visible code={code} />
+</div>
