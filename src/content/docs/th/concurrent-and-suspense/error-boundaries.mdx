@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## component เดียว crash ไม่ควรทำทั้งแอปว่างเปล่า
 
@@ -78,8 +79,315 @@ Suspense และ error boundary เสริมกัน: Suspense จัด�
 
 เมื่อ `use()` อ่าน promise ที่ *reject* React จะ propagate error นั้นไปยัง error boundary ที่ใกล้ที่สุด — ดังนั้น boundary เดียวกันที่จัดการ render crash ก็จัดการ data-fetch failure ด้วย
 
+## `onCaughtError` / `onUncaughtError` / `onRecoverableError` (React 19)
+
+ตั้งแต่ React 19 `createRoot` (และ `hydrateRoot`) รับ option ที่ให้คุณสังเกต error ทุกตัวที่ React จัดการ — แทนที่จะพึ่งแค่ output ของ `console.error` หรือ error boundary ระดับบนสุดตัวเดียว:
+
+> "**`onCaughtError`**: Callback called when React catches an error in an Error Boundary. Called with the `error` caught by the Error Boundary, and an `errorInfo` object containing the `componentStack`." — [react.dev, `createRoot`](https://react.dev/reference/react-dom/client/createRoot)
+>
+> "**`onUncaughtError`**: Callback called when an error is thrown and not caught by an Error Boundary." — เอกสารเดียวกัน
+>
+> "**`onRecoverableError`**: Callback called when React automatically recovers from errors." — เอกสารเดียวกัน (นี่คือ hook สำหรับ hydration mismatch ที่ React ซ่อมเองเงียบ ๆ)
+
+```tsx
+// src/__tests__/rootErrorOptions.test.tsx
+import { Component, type ReactNode } from 'react';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+
+// This file doesn't import @testing-library/react (whose import has the side
+// effect of enabling React's test-act environment), so it's set explicitly.
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) return <p>fallback</p>;
+    return this.props.children;
+  }
+}
+
+function ThrowsCaught(): ReactNode {
+  throw new Error('caught-me');
+}
+
+function ThrowsUncaught(): ReactNode {
+  throw new Error('uncaught-me');
+}
+
+test('onCaughtError fires with errorInfo.componentStack when a boundary catches', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: { message: string; hasStack: boolean }[] = [];
+  const root = createRoot(container, {
+    onCaughtError(error, errorInfo) {
+      calls.push({
+        message: (error as Error).message,
+        hasStack: typeof errorInfo.componentStack === 'string' && errorInfo.componentStack.includes('ThrowsCaught'),
+      });
+    },
+    onUncaughtError() {},
+  });
+  act(() => {
+    root.render(
+      <Boundary>
+        <ThrowsCaught />
+      </Boundary>,
+    );
+  });
+  expect(calls).toHaveLength(1);
+  expect(calls[0].message).toBe('caught-me');
+  expect(calls[0].hasStack).toBe(true); // componentStack names ThrowsCaught
+  root.unmount();
+  container.remove();
+});
+
+test('onUncaughtError fires when no boundary catches the error', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const uncaught: string[] = [];
+  const root = createRoot(container, {
+    onCaughtError() {},
+    onUncaughtError(error) {
+      uncaught.push((error as Error).message);
+    },
+  });
+  // Deliberately not wrapped in act(): act() forces a synchronous rethrow to
+  // the caller for its own flush-and-check semantics, which is a test-harness
+  // artifact, not what root.render does in a real app. Calling render()
+  // directly proves the real, documented behavior: onUncaughtError receives
+  // the error asynchronously and render() does not throw to its caller.
+  root.render(<ThrowsUncaught />);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(uncaught).toEqual(['uncaught-me']);
+  root.unmount();
+  container.remove();
+});
+```
+
+```text
+✓ onCaughtError fires with errorInfo.componentStack when a boundary catches
+✓ onUncaughtError fires when no boundary catches the error
+```
+
+การต่อสายพวกนี้ที่ entry point ของแอปคือของทดแทนยุคใหม่ของการหวังว่า error จะโผล่ใน `console.error`:
+
+```jsx
+const root = createRoot(document.getElementById("root"), {
+  onCaughtError(error, errorInfo) {
+    reportToMonitoring(error, errorInfo.componentStack);
+  },
+  onUncaughtError(error, errorInfo) {
+    reportToMonitoring(error, errorInfo.componentStack, { severity: "fatal" });
+  },
+  onRecoverableError(error, errorInfo) {
+    reportToMonitoring(error, errorInfo.componentStack, { severity: "hydration" });
+  },
+});
+```
+
+## Reset pattern (`resetKeys` แบบไม่ใช้ library)
+
+state ของ error boundary เอง (`this.state.error`) เคลียร์เมื่อคุณเคลียร์เท่านั้น — React ไม่ retry subtree ที่ crash ให้อัตโนมัติแค่เพราะ props เปลี่ยน `resetKeys` ของ library `react-error-boundary` คือ pattern มาตรฐานสำหรับ "เคลียร์ error เมื่อสิ่งที่เป็นสาเหตุเปลี่ยนไปจริง ๆ"; คุณทำเองด้วย `componentDidUpdate` ได้:
+
+```tsx
+// src/__tests__/errorBoundaryResetKeys.test.tsx
+import { Component, useState, type ReactNode } from 'react';
+import { render, screen, fireEvent } from '@testing-library/react';
+
+// Remember the resetKeys array from props; if we're currently showing an
+// error AND any resetKey changed since the last render, clear the error and
+// try the children again.
+class ResettableBoundary extends Component<
+  { children: ReactNode; resetKeys: unknown[] },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  componentDidUpdate(prevProps: { resetKeys: unknown[] }) {
+    if (this.state.error && prevProps.resetKeys.some((k, i) => k !== this.props.resetKeys[i])) {
+      this.setState({ error: null });
+    }
+  }
+  render() {
+    if (this.state.error) return <p data-testid="fallback">error: {this.state.error.message}</p>;
+    return this.props.children;
+  }
+}
+
+function Widget({ broken }: { broken: boolean }) {
+  if (broken) throw new Error('widget-broken');
+  return <p data-testid="widget-ok">ok</p>;
+}
+
+function App() {
+  const [broken, setBroken] = useState(true);
+  return (
+    <div>
+      <button data-testid="fix" onClick={() => setBroken(false)}>fix</button>
+      <ResettableBoundary resetKeys={[broken]}>
+        <Widget broken={broken} />
+      </ResettableBoundary>
+    </div>
+  );
+}
+
+test('resetKeys-style pattern: changing a resetKey after fixing the underlying cause clears the boundary', () => {
+  render(<App />);
+  expect(screen.getByTestId('fallback').textContent).toBe('error: widget-broken');
+
+  // Fixing the cause AND changing the resetKey (broken flips to false) in
+  // the same update clears the boundary and retries the children.
+  fireEvent.click(screen.getByTestId('fix'));
+  expect(screen.queryByTestId('fallback')).toBeNull();
+  expect(screen.getByTestId('widget-ok')).toBeTruthy();
+});
+
+test('resetKeys-style pattern: re-rendering with the SAME resetKeys does not clear a live error', () => {
+  function StaticApp() {
+    return (
+      <ResettableBoundary resetKeys={['same']}>
+        <Widget broken={true} />
+      </ResettableBoundary>
+    );
+  }
+  const { rerender } = render(<StaticApp />);
+  expect(screen.getByTestId('fallback')).toBeTruthy();
+  rerender(<StaticApp />);
+  // resetKeys didn't change, so the boundary must not clear itself.
+  expect(screen.getByTestId('fallback')).toBeTruthy();
+});
+```
+
+```text
+✓ resetKeys-style pattern: changing a resetKey after fixing the underlying cause clears the boundary
+✓ resetKeys-style pattern: re-rendering with the SAME resetKeys does not clear a live error
+```
+
+## พิสูจน์สิ่งที่ boundary ไม่จับ: event handler ที่ throw
+
+```tsx
+// src/__tests__/eventHandlerNotCaught.test.tsx
+import { Component, type ReactNode } from 'react';
+import { render, screen, fireEvent } from '@testing-library/react';
+
+class EBoundary extends Component<{ children: ReactNode }, { error: boolean }> {
+  state = { error: false };
+  static getDerivedStateFromError() {
+    return { error: true };
+  }
+  render() {
+    if (this.state.error) return <p data-testid="eb-fallback">fallback</p>;
+    return this.props.children;
+  }
+}
+
+function ClickBoom() {
+  return (
+    <button
+      data-testid="boom-btn"
+      onClick={() => {
+        throw new Error('event-handler-boom');
+      }}
+    >
+      click
+    </button>
+  );
+}
+
+test('an error boundary does NOT catch a throw from an event handler', () => {
+  render(
+    <EBoundary>
+      <ClickBoom />
+    </EBoundary>,
+  );
+  // React's event system doesn't route a handler's throw through any error
+  // boundary — it surfaces as a plain uncaught/global error, same as any
+  // other JS throw outside of React's render.
+  let globalMessage = '';
+  const onUncaught = (e: ErrorEvent) => {
+    globalMessage = e.error?.message ?? e.message;
+  };
+  window.addEventListener('error', onUncaught);
+  try {
+    fireEvent.click(screen.getByTestId('boom-btn'));
+  } finally {
+    window.removeEventListener('error', onUncaught);
+  }
+  expect(globalMessage).toContain('event-handler-boom');
+  // The boundary never activated — the button (not a fallback) is still there.
+  expect(screen.queryByTestId('eb-fallback')).toBeNull();
+  expect(screen.getByTestId('boom-btn')).toBeTruthy();
+});
+```
+
+```text
+✓ an error boundary does NOT catch a throw from an event handler
+```
+
+ยืนยันตารางด้านบนด้วยผลลัพธ์จริง: throw ไม่ไปถึง `EBoundary` เลย — มันโผล่เป็น global/uncaught error แทน เหมือน JavaScript exception ธรรมดาที่อยู่นอก render ของ React
+
+## Mental Model
+
+error boundary คือ *circuit breaker* ของ subtree ไม่ใช่ `try/catch` แบบ global มันตัดวงจรเฉพาะความล้มเหลวใน wiring ที่มันเป็นเจ้าของจริง ๆ — call ของ render, lifecycle, และ constructor ของ component ข้างใต้ event handler, `setTimeout` callback, หรือ promise ที่ reject ที่ไม่ได้อ่านผ่าน `use()` รันบน "วงจร" คนละเส้นเลย (event loop ของ browser เอง / async code ของคุณเอง) ดังนั้นไม่มี breaker ไหนเห็นมันเลย คุณต้องต่อ `try/catch` ของตัวเองตรงนั้น `onCaughtError`/`onUncaughtError`/`onRecoverableError` อยู่สูงกว่า breaker แต่ละตัวหนึ่งชั้น — เหมือนแผงควบคุมหลักของตึก — เพื่อให้คุณ log ได้ *ทุก* ครั้งที่ trip ไม่ว่า breaker ตัวไหนจะจับได้จริงหรือไม่
+
+## Trade-offs
+
+| ได้อะไร | ประโยชน์ | ต้นทุน |
+|---|---|---|
+| error boundary รอบ widget | widget เดียวที่พัง ไม่ทำให้ทั้งหน้าว่างเปล่า | ต้องเป็น class component (ไม่มี hook เทียบเท่า) |
+| reset แบบ `resetKeys` | boundary retry ให้อัตโนมัติเมื่อสาเหตุจริงเปลี่ยน | ต้องระบุให้ถูกว่า prop/ค่าไหนหมายถึง "สาเหตุเปลี่ยนแล้ว" |
+| `onCaughtError`/`onUncaughtError` | รายงาน error รวมศูนย์ เชื่อถือได้ สำหรับ render error ทุกตัวในแอป | ครอบคลุมแค่ error ช่วง render — ยังต้อง `try/catch` เองสำหรับ handler และ async code |
+| `onRecoverableError` | เห็น hydration mismatch ที่ React ซ่อมเงียบ ๆ | ไม่ได้หยุด mismatch ไม่ให้เกิด — เป็นแค่ observability ไม่ใช่ fix |
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ห่อโค้ด event handler ไว้ใน component เดียวกับ error boundary ก็พอแล้ว"** ไม่พอ — boundary จับ error จาก *rendering* เท่านั้น ไม่ใช่จาก `onClick` (หรือ handler ไหนก็ตาม) พิสูจน์แล้วด้านบน handler ต้องมี `try/catch` ของตัวเอง
+- **boundary retry อัตโนมัติเมื่อ props เปลี่ยน** ไม่จริงโดย default — `this.state.error` ค้างอยู่จนกว่าคุณจะเคลียร์เอง `resetKeys` (หรือเช็ค `componentDidUpdate` เอง) คือสิ่งที่ทำให้ "สาเหตุเปลี่ยนแล้ว ลองใหม่" เกิดขึ้นจริง
+- **output ของ `console.error` เป็นวิธีที่เชื่อถือได้ในการรู้ว่าแอปมี error จริง** `onCaughtError`/`onUncaughtError` คือวิธีแบบ React-19-native ที่มี structure สำหรับต่อ error ทุกตัวเข้า monitoring ของคุณเอง — พร้อม `componentStack` ตรง ๆ ไม่ใช่แค่ log text
+
+## อ่านโค้ดที่ AI เขียน
+
+เวลารีวิวโค้ด error-handling ที่ generate มา ให้เช็ค:
+
+- component ห่อโค้ด *event handler แบบ synchronous* ที่เสี่ยงไว้ใน error boundary แล้วสมมติว่าพอไหม? ไม่พอ — event handler ต้องมี `try/catch` พิสูจน์แล้วด้านบน
+- ปุ่ม "retry" แค่ re-render tree เดิมโดยไม่เคลียร์ error state ของ boundary (หรือไม่มีเช็คแบบ resetKeys) ไหม? fallback จะไม่หายไปเลย
+- `componentDidCatch`/`getDerivedStateFromError` ถูกใช้เพื่อ *กลืน* ทุก error เงียบ ๆ (ไม่ report ไม่มี fallback UI) ซ่อนบั๊กจริงจากทั้ง user และ monitoring ไหม?
+- ถ้าแอปใช้ `createRoot({ onCaughtError, onUncaughtError })` โค้ดที่ generate ยังคาดหวังว่า `console.error` เป็นสัญญาณเดียวอยู่ไหม? callback เชื่อถือได้และมี structure กว่า
+
+<SpotTheBug code={`class ErrorBoundary extends Component {
+  state = { error: null };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  handleRetry = () => {
+    this.setState({ error: null }); // no check on WHY it's being retried
+  };
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div>
+          <p>Something went wrong.</p>
+          <button onClick={this.handleRetry}>Try again</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}`}>
+ปุ่ม "Try again" ของ boundary นี้เคลียร์ `this.state.error` แบบไม่มีเงื่อนไข — แต่ไม่มีอะไรเกี่ยวกับสาเหตุจริงเปลี่ยนไปเลย แค่เพราะ user คลิกปุ่ม ถ้า `this.props.children` ยัง throw ด้วยเหตุผลเดิมเป๊ะ (data เสีย, import พัง, อะไรก็ตามที่ crash ตอนแรก) boundary จะจับ error ตัวเดิมซ้ำทันทีและแสดง fallback อีกครั้ง ให้ภาพลวงตาว่า retry ทั้งที่ไม่ได้ retry อะไรใหม่เลย reset ที่แท้จริงต้องมีทั้ง `resetKeys` check (เคลียร์เฉพาะเมื่อค่าที่ผูกกับสาเหตุจริงเปลี่ยน) หรือ retry action ที่ re-fetch/re-load สิ่งที่พังไว้ก่อนเคลียร์ error
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-**error boundary** (class component ที่ใช้ `getDerivedStateFromError` + `componentDidCatch` หรือ library `react-error-boundary`) จับ error ที่ throw **ระหว่าง render** ใน children และแสดง fallback แทนที่จะ unmount ทั้งแอป แต่ **ไม่** จับ error ใน event handler, async callback หรือตัวเอง — พวกนั้นใช้ `try/catch` ครอบ `<Suspense>` ด้วย error boundary เพื่อได้ state loading, error และ success แบบ declarative
+**error boundary** (class component ที่ใช้ `getDerivedStateFromError` + `componentDidCatch` หรือ library `react-error-boundary`) จับ error ที่ throw **ระหว่าง render** ใน children และแสดง fallback แทนที่จะ unmount ทั้งแอป แต่ **ไม่** จับ error ใน event handler, async callback หรือตัวเอง — พวกนั้นใช้ `try/catch` พิสูจน์แล้วด้านบน ตั้งแต่ React 19 option `onCaughtError`/`onUncaughtError`/`onRecoverableError` ของ `createRoot` ให้คุณสังเกต render error ทุกตัวรวมศูนย์ (พร้อม `errorInfo.componentStack`) และเช็คแบบ `resetKeys` (ทำเองหรือผ่าน `react-error-boundary`) คือสิ่งที่เคลียร์ boundary ได้จริงเมื่อสาเหตุจริงเปลี่ยน — เคลียร์ `state.error` แบบไม่มีเงื่อนไขตอน "Try again" แค่จับ error ตัวเดิมซ้ำถ้าไม่มีอะไรถูกแก้จริง ครอบ `<Suspense>` ด้วย error boundary เพื่อได้ state loading, error และ success แบบ declarative
 </Callout>
 
 export const quizEb = [
@@ -92,6 +400,7 @@ export const quizEb = [
       'เฉพาะ syntax error',
     ],
     answer: 1,
+    explain: 'error boundary จับแค่ error ช่วง render/lifecycle/constructor ของ component ข้างใต้เท่านั้น — ไม่ใช่ JS error ที่ไหนก็ได้ในแอป',
   },
   {
     q: 'อันไหนที่ error boundary ไม่จับ?',
@@ -102,6 +411,7 @@ export const quizEb = [
       'error ใน lifecycle method',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วด้านบน: throw ใน onClick handler โผล่เป็น global/uncaught error ไม่ใช่สิ่งที่ error boundary ไหนเห็น',
   },
   {
     q: 'ทำไม error boundary ยังต้องเขียนเป็น class component?',
@@ -112,6 +422,7 @@ export const quizEb = [
       'เป็นแค่ความชอบด้าน style',
     ],
     answer: 1,
+    explain: 'ยังไม่มี hook เทียบเท่า getDerivedStateFromError (render phase) หรือ componentDidCatch (commit-phase side effect) จนถึง React 19',
   },
   {
     q: 'Suspense กับ error boundary ทำงานร่วมกันอย่างไร?',
@@ -122,6 +433,29 @@ export const quizEb = [
       'error boundary แทนที่ Suspense',
     ],
     answer: 1,
+    explain: 'ครอบ Suspense boundary ด้วย error boundary ทำให้ได้ทั้งสาม state ของ async UI แบบ declarative: loading, error, success',
+  },
+  {
+    q: '```jsx\nconst root = createRoot(el, {\n  onCaughtError(error, errorInfo) {\n    report(error, errorInfo.componentStack);\n  },\n});\n```\n`onCaughtError` fire เมื่อไร?',
+    options: [
+      'ทุกครั้งที่มี console.log ในแอป',
+      'เมื่อ React จับ error ใน Error Boundary — เรียกพร้อม error และ errorInfo ที่มี componentStack',
+      'เฉพาะ network request ที่ล้มเหลว',
+      'เฉพาะ development build',
+    ],
+    answer: 1,
+    explain: 'เอกสาร createRoot ของ react.dev: onCaughtError เรียกเมื่อ React จับ error ใน Error Boundary พร้อม error และ errorInfo.componentStack — พิสูจน์แล้วด้านบนด้วย componentStack จริงที่มีชื่อ component ที่ throw',
+  },
+  {
+    q: '```jsx\nhandleRetry = () => {\n  this.setState({ error: null }); // no check on WHY\n};\n```\nhandler "Try again" นี้ผิดตรงไหน?',
+    options: [
+      'ไม่ผิดเลย — แก้ปัญหาได้เสมอ',
+      'เคลียร์ error แบบไม่มีเงื่อนไข; ถ้าสาเหตุจริงยังไม่เปลี่ยน error ตัวเดิมจะ throw ซ้ำทันที',
+      'setState เรียกจาก event handler ไม่ได้',
+      'ควรเรียก componentDidCatch ตรง ๆ แทน',
+    ],
+    answer: 1,
+    explain: 'ถ้าไม่มีเช็คแบบ resetKeys ที่ผูกกับสาเหตุจริง การเคลียร์ state.error แค่ปล่อยให้ subtree ที่พังเดิม render ใหม่แล้ว throw error ตัวเดิมซ้ำ พิสูจน์แล้วด้านบน',
   },
 ];
 

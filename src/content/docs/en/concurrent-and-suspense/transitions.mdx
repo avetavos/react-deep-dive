@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The problem: a slow update blocks a fast one
 
@@ -76,8 +77,246 @@ function SearchResults({ allItems, query }) {
 
 Both keep urgent input responsive by letting the expensive re-render happen in interruptible background work. Neither makes the expensive work faster — they change its *priority*, not its cost. (For genuinely huge lists, you still want virtualization.)
 
+## Async transitions: `startTransition(async () => {...})`
+
+Since React 19, the function you pass to `startTransition` can be `async`. React keeps `isPending` `true` for the whole callback — including across any `await` — and only flips it back to `false` once the callback finishes. This is what makes `useTransition` work naturally with Server Functions and other async actions: `isPending` reflects the entire operation, not just its first synchronous tick.
+
+```jsx
+function SaveButton({ formData }) {
+  const [isPending, startTransition] = useTransition();
+
+  function handleSave() {
+    startTransition(async () => {
+      await saveToServer(formData);   // isPending stays true across this await
+      showToast("Saved!");
+    });
+  }
+
+  return <button onClick={handleSave} disabled={isPending}>{isPending ? "Saving…" : "Save"}</button>;
+}
+```
+
+### The pitfall: a `setState` after `await` is not automatically part of the transition
+
+Here's the part almost every AI-generated snippet gets wrong. React's own docs are explicit about it:
+
+> "Any async calls that are awaited in the action will be included in the Transition, but currently require wrapping any `set` functions after the `await` in an additional `startTransition`" — [react.dev, `useTransition` troubleshooting](https://react.dev/reference/react/useTransition#react-doesnt-treat-my-state-update-after-await-as-a-transition)
+
+In plain terms: everything *before* the first `await` runs as part of the transition. A state update issued *after* an `await`, if it isn't re-wrapped in its own `startTransition`, is treated as a normal, urgent update — not a low-priority one. The clearest way to see the difference is what happens when that update causes a component to suspend. When an update is genuinely part of a transition, React keeps the old content on screen (no Suspense fallback) while the new content loads in the background. When it *isn't* part of a transition, React falls back to the nearest Suspense boundary immediately, exactly like any other ordinary update that suspends.
+
+```tsx
+// src/__tests__/asyncTransitionAwaitPitfall.test.tsx
+import { useState, useTransition, use, Suspense } from 'react';
+import { render, screen, act } from '@testing-library/react';
+
+function makeResource() {
+  const cache = new Map<string, Promise<string>>();
+  return (key: string) => {
+    if (!cache.has(key)) {
+      cache.set(key, new Promise((resolve) => setTimeout(() => resolve(`data:${key}`), 10)));
+    }
+    return cache.get(key)!;
+  };
+}
+
+function Content({ resource, itemKey }: { resource: (k: string) => Promise<string>; itemKey: string }) {
+  const data = use(resource(itemKey));
+  return <p data-testid="content">{data}</p>;
+}
+
+function Demo({ rewrap }: { rewrap: boolean }) {
+  const resource = useState(() => makeResource())[0];
+  const [itemKey, setItemKey] = useState('a');
+  const [isPending, startTransition] = useTransition();
+
+  function run() {
+    startTransition(async () => {
+      await Promise.resolve().then(() => Promise.resolve());
+      if (rewrap) {
+        startTransition(() => setItemKey('b')); // ✅ re-wrapped — still part of the transition
+      } else {
+        setItemKey('b'); // ❌ NOT part of the transition — the classic bug
+      }
+    });
+  }
+
+  return (
+    <div>
+      <button onClick={run}>run</button>
+      <p data-testid="pending">{String(isPending)}</p>
+      <Suspense fallback={<p data-testid="fallback">loading…</p>}>
+        <Content resource={resource} itemKey={itemKey} />
+      </Suspense>
+    </div>
+  );
+}
+
+test('re-wrapped: switching to a suspending key stays part of the transition — no fallback, old content stays', async () => {
+  await act(async () => {
+    render(<Demo rewrap={true} />);
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  expect(screen.getByTestId('content').textContent).toBe('data:a');
+
+  await act(async () => {
+    screen.getByText('run').click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(screen.queryByTestId('fallback')).toBeNull();       // no fallback — still part of the transition
+  expect(screen.getByTestId('content').textContent).toBe('data:a'); // old content held while the new one loads
+  expect(screen.getByTestId('pending').textContent).toBe('true');
+});
+
+test('unwrapped: a setState after a bare await is NOT part of the transition — it falls back immediately', async () => {
+  await act(async () => {
+    render(<Demo rewrap={false} />);
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  expect(screen.getByTestId('content').textContent).toBe('data:a');
+
+  await act(async () => {
+    screen.getByText('run').click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  // Because setItemKey('b') after the bare await is a normal, urgent update,
+  // React does NOT hold the old content while it loads — the boundary falls
+  // back immediately, exactly react.dev's documented pitfall.
+  expect(screen.getByTestId('fallback')).toBeTruthy();
+});
+```
+
+Output from this exact test file, run against `react@19.2.8` under the course harness:
+
+```text
+✓ re-wrapped: switching to a suspending key stays part of the transition — no fallback, old content stays
+✓ unwrapped: a setState after a bare await is NOT part of the transition — it falls back immediately
+```
+
+### Errors thrown inside a transition reach the nearest error boundary
+
+A `startTransition` update is a normal render — if it throws (synchronously, or via a `set` call issued while still inside the transition), React propagates that error to the nearest error boundary above it, exactly as it would for any other render. `isPending`/the transition machinery isn't a substitute for error handling.
+
+```tsx
+// src/__tests__/transitionErrorBoundary.test.tsx
+import { Component, useState, useTransition, type ReactNode } from 'react';
+import { render, screen, act } from '@testing-library/react';
+
+class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) return <p data-testid="boundary-fallback">caught: {this.state.error.message}</p>;
+    return this.props.children;
+  }
+}
+
+function Boom({ shouldThrow }: { shouldThrow: boolean }) {
+  if (shouldThrow) throw new Error('transition-boom');
+  return <p data-testid="ok">ok</p>;
+}
+
+function Demo() {
+  const [shouldThrow, setShouldThrow] = useState(false);
+  const [, startTransition] = useTransition();
+  function trigger() {
+    startTransition(async () => {
+      await Promise.resolve();
+      startTransition(() => setShouldThrow(true)); // throws inside the transition's render
+    });
+  }
+  return (
+    <Boundary>
+      <button onClick={trigger}>trigger</button>
+      <Boom shouldThrow={shouldThrow} />
+    </Boundary>
+  );
+}
+
+test('a throw caused by a transition update reaches the nearest error boundary', async () => {
+  await act(async () => {
+    render(<Demo />);
+  });
+  expect(screen.getByTestId('ok')).toBeTruthy();
+
+  await act(async () => {
+    screen.getByText('trigger').click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(screen.getByTestId('boundary-fallback').textContent).toBe('caught: transition-boom');
+});
+```
+
+```text
+✓ a throw caused by a transition update reaches the nearest error boundary
+```
+
+### `startTransition` scope and batching
+
+`startTransition`'s callback can update as many pieces of state as you like — all of them share the same "non-urgent" priority and are batched into one transition render. There's nothing special about calling it once per update; group everything that should defer together inside a single `startTransition` call so React treats them as one unit of interruptible work.
+
+## Mental Model
+
+Think of two lanes into the renderer: an **express lane** (urgent — typing, clicking, anything that must feel instant) and a **freight lane** (transitions — anything you've explicitly marked non-urgent). Both lanes can carry state updates, but the express lane always merges in first; freight gets paused and re-queued whenever a new express update shows up. An `await` inside an async transition is a tollbooth: whatever loads onto the freight truck *before* the tollbooth stays freight, but anything loaded *after* it needs a new "freight" sticker (`startTransition`) or it defaults back to the express lane.
+
+## Trade-offs
+
+| What you get | Benefit | Cost |
+|---|---|---|
+| `useTransition` | You control exactly which update is deferred, plus `isPending` for UI feedback | Requires owning the setter at the call site |
+| `useDeferredValue` | Works when you only have a value (a prop), no setter needed | No `isPending`-style boolean — compare `value !== deferredValue` yourself |
+| Async `startTransition` | `isPending` spans the whole async operation, including Server Functions | Every `set` call after an `await` needs its own `startTransition`, or it silently reverts to urgent priority |
+| Not using transitions at all | Simpler code, no priority concepts | A single expensive update can block every keystroke until it finishes |
+
+## Common Misconceptions
+
+- **"Wrapping the whole async function in `startTransition` covers every update inside it."** Only the code that runs *before* the first `await` is covered. Anything after an `await` needs its own `startTransition` call — proven above.
+- **Transitions make the computation itself faster.** They don't — they change when and how interruptibly the update is applied, not its cost. A genuinely huge list still needs virtualization or a cheaper algorithm.
+- **`isPending` alone tells you an update is safely deferred.** `isPending` reflects the whole async callback's lifetime, but any individual `set` call inside it can still be "urgent" if it wasn't (re-)wrapped after an `await` — `isPending` being `true` doesn't guarantee every update in that callback is low priority.
+
+## Reading AI-generated code
+
+When you're reviewing a generated snippet that uses `startTransition` with an `async` callback, check for:
+
+- Does every `set` call **after** an `await` sit inside its own `startTransition(() => ...)`? If not, that update silently reverted to urgent priority — a very common, hard-to-spot AI-generated bug.
+- Is `isPending` used to disable a button or show a spinner, but the actual mutating call sits outside `startTransition` entirely? Then `isPending` never reflects that work.
+- If the transition can suspend (e.g. it flips a key that a `use()`-reading child depends on), does the code assume "old content stays visible"? That assumption only holds for updates that are genuinely part of the transition.
+- Does a `throw` inside the transition's callback have a nearby error boundary, or does the generated code assume `try/catch` around `startTransition` itself would catch it? (It won't — the render happens later, outside that synchronous call.)
+
+<SpotTheBug code={`function SearchPage() {
+  const [query, setQuery] = useState("");
+  const [isPending, startTransition] = useTransition();
+
+  function handleChange(e) {
+    const value = e.target.value;
+    setQuery(value);
+    startTransition(async () => {
+      const results = await searchAPI(value);
+      setSearchResults(results); // set AFTER the await, not re-wrapped
+    });
+  }
+
+  return (
+    <>
+      <input value={query} onChange={handleChange} />
+      {isPending && <span>Searching…</span>}
+      <ResultsList />
+    </>
+  );
+}`}>
+`setSearchResults(results)` runs after `await searchAPI(value)` and is **not** wrapped in its own `startTransition`. Per react.dev's `useTransition` troubleshooting section, only the code before the first `await` is treated as part of the transition — this call is a normal, urgent update. If `ResultsList` reads a promise via `use()` and this update causes it to suspend, React will **not** keep the old results on screen the way the `isPending` UI implies; it falls back to the nearest Suspense boundary immediately. The fix is `startTransition(() => setSearchResults(results))` around the post-await call.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-Transitions keep the UI responsive by marking heavy updates **non-urgent** so a keystroke can interrupt them. Reach for **`useTransition`** (`[isPending, startTransition]`) when you control the state update and can wrap it; reach for **`useDeferredValue`** when you only have a value (a prop) and want to defer reading it. Both change *priority*, not cost — they don't make slow work fast.
+Transitions keep the UI responsive by marking heavy updates **non-urgent** so a keystroke can interrupt them. Reach for **`useTransition`** (`[isPending, startTransition]`) when you control the state update and can wrap it; reach for **`useDeferredValue`** when you only have a value (a prop) and want to defer reading it. Since React 19, `startTransition` accepts an `async` callback and keeps `isPending` true across the `await` — but only code **before** the first `await` is automatically part of the transition; any `set` call after it needs its own `startTransition`, or it silently becomes urgent. Both hooks change *priority*, not cost — they don't make slow work fast.
 </Callout>
 
 export const quizTrans = [
@@ -90,6 +329,7 @@ export const quizTrans = [
       'Cancels it',
     ],
     answer: 1,
+    explain: 'React schedules the wrapped update as low-priority, interruptible background work — a more urgent update (like the next keystroke) can preempt it.',
   },
   {
     q: 'What does `useTransition` return?',
@@ -100,6 +340,7 @@ export const quizTrans = [
       'A ref',
     ],
     answer: 1,
+    explain: '`isPending` tells you whether the transition is still in flight; `startTransition` is the function you wrap the non-urgent update in.',
   },
   {
     q: 'When is `useDeferredValue` the better fit over `useTransition`?',
@@ -110,6 +351,7 @@ export const quizTrans = [
       'When there is no state',
     ],
     answer: 1,
+    explain: '`useTransition` needs the setter at the call site; when you only receive a value as a prop, `useDeferredValue` lets you defer reading it instead.',
   },
   {
     q: 'Do transitions make the expensive work faster?',
@@ -120,6 +362,29 @@ export const quizTrans = [
       'Only in production',
     ],
     answer: 1,
+    explain: 'Transitions change scheduling priority only. A genuinely expensive computation still needs its own optimization (memoization, virtualization, etc.).',
+  },
+  {
+    q: '```jsx\nstartTransition(async () => {\n  await saveToServer(formData);\n  setSaved(true); // NOT re-wrapped\n});\n```\nIs `setSaved(true)` part of the transition?',
+    options: [
+      'Yes, everything inside startTransition is automatically part of it',
+      'No — only code before the first `await` is part of the transition; this call needs its own `startTransition` to stay non-urgent',
+      'No, async callbacks are not allowed in startTransition at all',
+      'Yes, but only in development mode',
+    ],
+    answer: 1,
+    explain: "react.dev's useTransition troubleshooting section states this exactly: state updates after an await need to be wrapped in an additional startTransition, or they revert to urgent priority.",
+  },
+  {
+    q: '```jsx\nfunction Boom({ shouldThrow }) {\n  if (shouldThrow) throw new Error("boom");\n  return <p>ok</p>;\n}\n// ...\nstartTransition(() => setShouldThrow(true));\n```\nIf this update causes `Boom` to throw, what happens?',
+    options: [
+      'The error is silently swallowed because it happened inside a transition',
+      'The error propagates to the nearest error boundary above the component, exactly like any other render error',
+      'React automatically retries the transition',
+      'The app crashes with no way to recover',
+    ],
+    answer: 1,
+    explain: 'A transition update is still a normal render — a throw during it propagates to the nearest error boundary the same way a throw during any other render would.',
   },
 ];
 

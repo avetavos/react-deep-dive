@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Loading UI, declaratively
 
@@ -77,8 +78,317 @@ Suspense boundaries **nest**, and you place them to control the loading *granula
 
 Choosing where boundaries go is a UX decision: fewer boundaries = simpler but more "all or nothing"; more boundaries = progressive reveal.
 
+Nested boundaries also control *ordering*: an outer boundary that's already ready keeps its content visible while an inner one still shows its own fallback — the outer fallback never reappears just because something deeper suspended.
+
+```tsx
+// src/__tests__/nestedSuspenseFallbackOrder.test.tsx
+import { use, Suspense } from 'react';
+import { render, screen, act } from '@testing-library/react';
+
+let feedPromise: Promise<string> | null = null;
+function SlowFeed() {
+  // A stable, module-level cached promise — see "use() needs a stable
+  // promise" above for why an uncached one would suspend forever.
+  if (!feedPromise) {
+    feedPromise = new Promise((resolve) => setTimeout(() => resolve('feed-data'), 15));
+  }
+  const data = use(feedPromise);
+  return <p data-testid="feed">{data}</p>;
+}
+
+function NestedDemo() {
+  return (
+    <Suspense fallback={<p data-testid="page-fallback">page loading…</p>}>
+      <h1 data-testid="header">Header</h1>
+      <Suspense fallback={<p data-testid="feed-fallback">feed loading…</p>}>
+        <SlowFeed />
+      </Suspense>
+    </Suspense>
+  );
+}
+
+test('nested Suspense: the inner fallback shows without hiding already-ready outer content', async () => {
+  await act(async () => {
+    render(<NestedDemo />);
+  });
+  // Immediately after mount: the header (outer content) is visible, the
+  // inner fallback shows for the still-loading feed, and the OUTER
+  // (page-level) fallback never appears at all.
+  expect(screen.getByTestId('header')).toBeTruthy();
+  expect(screen.getByTestId('feed-fallback')).toBeTruthy();
+  expect(screen.queryByTestId('page-fallback')).toBeNull();
+
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 30));
+  });
+  expect(screen.getByTestId('feed').textContent).toBe('feed-data');
+});
+```
+
+```text
+✓ nested Suspense: the inner fallback shows without hiding already-ready outer content
+```
+
+## Suspense batching in React 19.2 (SSR streaming)
+
+React 19.2 changed how multiple ready Suspense boundaries reveal during **server-streamed** rendering:
+
+> "React reveals suspended content at most once every 300ms, measured from the last reveal. Boundaries that become ready within that window are revealed together rather than one at a time." — [react.dev blog, React 19.2](https://react.dev/blog/2025/10/01/react-19.2)
+
+This is specifically a *streaming SSR* optimization (it batches how the server flushes ready boundaries to the client), not something a client-only Vite probe like this course's harness can observe — there's no SSR stream here to measure. Take this as an accurate, cited fact rather than a locally-reproduced one: if you see several sections of a server-rendered page "pop in" together instead of one-by-one, this batching window is why.
+
+## `use()` needs a stable promise
+
+`use()` doesn't fetch or cache anything — it just reads whatever promise you hand it. Passing a promise created fresh on every render means every retry creates a *new* pending promise, so the component keeps re-suspending indefinitely instead of ever settling on real content. A cached promise (same instance across renders) resolves exactly once.
+
+```tsx
+// src/__tests__/usePromiseCacheRequirement.test.tsx
+import { use, Suspense } from 'react';
+import { render, screen, act } from '@testing-library/react';
+
+let uncachedCalls = 0;
+function BadResource({ id }: { id: string }) {
+  uncachedCalls++;
+  // New promise every render — even though it resolves in 5ms, by the time
+  // it does, this exact render has already been abandoned for a newer one.
+  const data = use(new Promise<string>((resolve) => setTimeout(() => resolve(`data:${id}`), 5)));
+  return <p data-testid="bad-content">{data}</p>;
+}
+
+const cache = new Map<string, Promise<string>>();
+let cachedCalls = 0;
+function GoodResource({ id }: { id: string }) {
+  cachedCalls++;
+  if (!cache.has(id)) {
+    cache.set(id, new Promise((resolve) => setTimeout(() => resolve(`data:${id}`), 5)));
+  }
+  const data = use(cache.get(id)!);
+  return <p data-testid="good-content">{data}</p>;
+}
+
+test('an uncached (new-every-render) promise never resolves the fallback away', async () => {
+  await act(async () => {
+    render(
+      <Suspense fallback={<p data-testid="bad-fallback">loading…</p>}>
+        <BadResource id="x" />
+      </Suspense>,
+    );
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 60));
+  });
+  expect(screen.queryByTestId('bad-content')).toBeNull(); // still stuck on the fallback
+  expect(screen.getByTestId('bad-fallback')).toBeTruthy();
+  expect(uncachedCalls).toBeGreaterThan(1); // re-invoked repeatedly — a real retry loop
+});
+
+test('a cached (stable) promise resolves exactly once', async () => {
+  await act(async () => {
+    render(
+      <Suspense fallback={<p data-testid="good-fallback">loading…</p>}>
+        <GoodResource id="y" />
+      </Suspense>,
+    );
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 60));
+  });
+  expect(screen.getByTestId('good-content').textContent).toBe('data:y');
+});
+```
+
+```text
+✓ an uncached (new-every-render) promise never resolves the fallback away
+✓ a cached (stable) promise resolves exactly once
+```
+
+## `lazy` + retry on a failed import
+
+`React.lazy(factory)` calls `factory` once and caches its promise **on that one `lazy()` instance forever** — including a rejection. If the chunk fails to load (a flaky network, a stale deploy), re-rendering the same `lazy()` component does *not* retry the import; you must create a **new** `lazy()` instance. The common pattern: keep the lazy component in state, keyed by an "attempt" counter, so clicking "retry" produces a fresh `lazy()` call.
+
+```tsx
+// src/__tests__/lazyRetry.test.tsx
+import { useState, useMemo, lazy, Suspense, Component, type ReactNode } from 'react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
+
+let importAttempts = 0;
+function flakyImport() {
+  importAttempts++;
+  if (importAttempts === 1) return Promise.reject(new Error('chunk load failed'));
+  return Promise.resolve({ default: () => <p data-testid="panel">loaded</p> });
+}
+
+class RetryBoundary extends Component<{ children: ReactNode; onRetry: () => void }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <button
+          data-testid="retry"
+          onClick={() => {
+            this.setState({ error: null });
+            this.props.onRetry();
+          }}
+        >
+          retry
+        </button>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function LazyDemo() {
+  const [attempt, setAttempt] = useState(0);
+  // A fresh lazy() instance per attempt — the old, permanently-rejected one is discarded.
+  const LazyPanel = useMemo(() => lazy(flakyImport), [attempt]);
+  return (
+    <RetryBoundary onRetry={() => setAttempt((a) => a + 1)}>
+      <Suspense fallback={<p data-testid="lazy-fallback">loading…</p>}>
+        <LazyPanel />
+      </Suspense>
+    </RetryBoundary>
+  );
+}
+
+test('lazy + retry: a failed import needs a brand new lazy() instance, not a re-render of the old one', async () => {
+  await act(async () => {
+    render(<LazyDemo />);
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(screen.getByTestId('retry')).toBeTruthy();
+  expect(importAttempts).toBe(1);
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('retry'));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(screen.getByTestId('panel').textContent).toBe('loaded');
+  expect(importAttempts).toBe(2);
+});
+```
+
+```text
+✓ lazy + retry: a failed import needs a brand new lazy() instance, not a re-render of the old one
+```
+
+## `key` to reset a suspended subtree
+
+React's own docs describe this pattern directly for Suspense: put a `key` on the boundary (or a component above it) so that when the key changes, React treats it as different content and shows the fallback again — instead of leaving the previous key's (now stale) content on screen.
+
+> "The `key` can go on the boundary itself or on a component above it. Suspense-integrated routers should do this automatically." — [react.dev, `<Suspense>`](https://react.dev/reference/react/Suspense)
+
+```tsx
+// src/__tests__/suspenseKeyReset.test.tsx
+import { use, Suspense, type ReactElement } from 'react';
+import { render, screen, act } from '@testing-library/react';
+
+const cache = new Map<string, Promise<string>>();
+function resourceFor(id: string) {
+  if (!cache.has(id)) {
+    cache.set(id, new Promise((resolve) => setTimeout(() => resolve(`bio:${id}`), 10)));
+  }
+  return cache.get(id)!;
+}
+
+function Bio({ id }: { id: string }) {
+  const data = use(resourceFor(id));
+  return <p data-testid="bio">{data}</p>;
+}
+
+function Profile({ userId }: { userId: string }) {
+  // key={userId} on the boundary: changing userId forces the fallback to
+  // show again instead of keeping the previous user's bio on screen.
+  return (
+    <Suspense key={userId} fallback={<p data-testid="fallback">loading…</p>}>
+      <Bio id={userId} />
+    </Suspense>
+  );
+}
+
+test('key on a Suspense boundary forces the fallback to show again on change, instead of leaving stale content', async () => {
+  let rerender!: (ui: ReactElement) => void;
+  await act(async () => {
+    ({ rerender } = render(<Profile userId="alice" />));
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  expect(screen.getByTestId('bio').textContent).toBe('bio:alice');
+
+  await act(async () => {
+    rerender(<Profile userId="bob" />);
+  });
+  // Immediately after the key change, before bob's promise resolves: the
+  // fallback shows again (not alice's stale bio).
+  expect(screen.getByTestId('fallback')).toBeTruthy();
+  expect(screen.queryByTestId('bio')).toBeNull();
+
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  expect(screen.getByTestId('bio').textContent).toBe('bio:bob');
+});
+```
+
+```text
+✓ key on a Suspense boundary forces the fallback to show again on change, instead of leaving stale content
+```
+
+## Mental Model
+
+A Suspense boundary is a *contract*, not a loading spinner: "everything below me must be ready before I show real content; until then, here's the fallback." `use()` is how a component tells that contract "I'm not ready" — by handing back a pending promise instead of a value. The promise's *identity* is the whole contract: a fresh promise every render is like signing a new, never-ending contract every time instead of waiting for the one you already signed to be fulfilled. `key` on a boundary is how you deliberately tear up the old contract and sign a brand new one — on purpose, when the underlying content really did change (a different user, a different page).
+
+## Trade-offs
+
+| What you get | Benefit | Cost |
+|---|---|---|
+| A cached promise for `use()` | Resolves once, component settles | You (or a framework/library) must own a cache keyed by request identity |
+| More/deeper Suspense boundaries | Finer loading granularity, faster perceived shell | More fallback UI to design; more places to reason about |
+| `lazy()` retry via a fresh instance | Recovers from a genuinely transient chunk-load failure | You must track an "attempt" key yourself — `lazy()` alone never retries |
+| `key` on a Suspense boundary | Forces a clean reset when content identity really changed | Always re-shows the fallback — wrong choice for "just refreshing the same thing" |
+
+## Common Misconceptions
+
+- **A new promise every render is "just a re-fetch."** It isn't a single re-fetch — it's a *new, never-ending* pending promise from `use()`'s point of view every single time, so the component can suspend indefinitely, proven above.
+- **`React.lazy(factory)` retries automatically if you just re-render it.** It doesn't — the factory's promise (including a rejection) is cached on that one `lazy()` call forever. A retry needs a new `lazy()` instance.
+- **Suspense fallbacks always show "loading," never "stale."** Without a `key`, changing the underlying data (e.g. navigating to a different user) can leave the *previous* content on screen if nothing forces a fresh suspend — `key` is exactly the tool for "I want this to reset, not linger."
+
+## Reading AI-generated code
+
+When reviewing generated code that uses `use()`, `lazy`, or Suspense, check for:
+
+- Is the promise passed to `use()` created *inside* the component body (e.g. `use(fetch(...).then(...))` directly), instead of read from a cache/framework? That's the infinite-fallback bug proven above.
+- After a `lazy()` chunk fails, does the "retry" handler just reset an error-boundary's error state without producing a **new** `lazy()` instance? The retry will call the exact same permanently-rejected promise again.
+- Does a route-level Suspense boundary lack a `key` tied to the route/resource identity, even though the framework or code comments imply "this should reset per page"? Stale content can linger.
+- Is a `<Suspense>` wrapped around something that never actually suspends, just "to be safe"? It's harmless but dead weight — check whether any child can actually suspend before keeping the boundary.
+
+<SpotTheBug code={`function Albums({ artistId }) {
+  const albums = use(fetch(\`/api/artists/\${artistId}/albums\`).then(r => r.json()));
+  return <ul>{albums.map(a => <li key={a.id}>{a.title}</li>)}</ul>;
+}
+
+function ArtistPage({ artistId }) {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Albums artistId={artistId} />
+    </Suspense>
+  );
+}`}>
+`fetch(...)` runs directly inside `Albums`'s render, so it creates a **brand-new promise on every render** — including every retry React performs after the previous promise resolves. Because `use()` never caches, this component suspends, the fetch resolves, React retries, the render body runs again, a *new* promise is created and passed to `use()`, and the cycle repeats — the fallback (`<Spinner />`) never goes away in practice. The fix is a cache keyed by `artistId` (`if (!cache.has(artistId)) cache.set(artistId, fetch(...))`) so the same promise instance is reused across retries.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-`<Suspense fallback={...}>` is a **declarative loading boundary**: while any child "suspends" (waiting on code from `React.lazy` or data from `use()`), React shows the nearest boundary's fallback, then swaps in the real content when it resolves. Nest boundaries to control loading granularity — one big spinner vs a shell that reveals progressively.
+`<Suspense fallback={...}>` is a **declarative loading boundary**: while any child "suspends" (waiting on code from `React.lazy` or data from `use()`), React shows the nearest boundary's fallback, then swaps in the real content when it resolves. Nest boundaries to control loading granularity, and give a boundary a `key` when you want a genuine content change (a different user, a different page) to reset it instead of leaving stale content behind. `use()` never fetches or caches — the promise you pass it must be stable across renders, or the component re-suspends forever; `React.lazy()` caches its factory's promise (rejection included) on that one instance forever, so retrying a failed chunk load needs a brand-new `lazy()` call, not a re-render of the old one.
 </Callout>
 
 export const quizSusp = [
@@ -91,6 +401,7 @@ export const quizSusp = [
       'Memoizes children',
     ],
     answer: 1,
+    explain: 'A Suspense boundary owns the loading UI for its subtree declaratively — no manual isLoading booleans required.',
   },
   {
     q: 'What does it mean for a component to "suspend"?',
@@ -101,6 +412,7 @@ export const quizSusp = [
       'It re-renders in a loop',
     ],
     answer: 1,
+    explain: 'Suspending is not an error — React unwinds to the nearest boundary above and retries once the awaited code or data is ready.',
   },
   {
     q: 'What does `React.lazy(() => import("./X"))` achieve?',
@@ -111,6 +423,7 @@ export const quizSusp = [
       'Preloads all components',
     ],
     answer: 1,
+    explain: 'The dynamic import() becomes its own chunk, fetched only when the lazy component first renders — a direct win for initial bundle size.',
   },
   {
     q: 'Why nest multiple Suspense boundaries?',
@@ -121,6 +434,29 @@ export const quizSusp = [
       'To improve SEO only',
     ],
     answer: 1,
+    explain: 'An outer boundary that is already ready keeps its content on screen; only the inner, still-loading boundary shows its own fallback.',
+  },
+  {
+    q: '```jsx\nfunction Albums({ artistId }) {\n  const albums = use(fetch(`/api/artists/${artistId}/albums`).then(r => r.json()));\n  return <ul>{albums.map(a => <li key={a.id}>{a.title}</li>)}</ul>;\n}\n```\nWhat happens the first time this component renders?',
+    options: [
+      'It fetches once and renders normally',
+      'It creates a new promise every render/retry, so it keeps re-suspending and the fallback never goes away',
+      'It throws a TypeScript error',
+      'It caches the fetch automatically because it is inside use()',
+    ],
+    answer: 1,
+    explain: 'use() does not cache — a promise created fresh inside the render body means every retry gets a brand-new pending promise, an effectively infinite suspend loop.',
+  },
+  {
+    q: 'A `React.lazy()` component failed its dynamic import once. What does simply re-rendering that SAME `lazy()` component do?',
+    options: [
+      'It automatically retries the import',
+      'Nothing useful — that lazy() instance permanently caches the rejected promise, so a NEW lazy() call is needed to retry',
+      'It falls back to a synchronous import',
+      'It removes the component from the tree',
+    ],
+    answer: 1,
+    explain: 'React.lazy(factory) calls factory once and caches its result (including a rejection) on that lazy() object forever — retrying requires producing a fresh lazy() instance.',
   },
 ];
 

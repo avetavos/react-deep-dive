@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The React 19 `use()` API
 
@@ -32,6 +33,75 @@ function Container({ messagePromise }) {
 ```
 
 `use()` breaks one rule you learned for other hooks: it **can be called conditionally** — inside an `if`, or in a loop. That's allowed precisely because it isn't tied to the fixed hook slots the way `useState`/`useEffect` are.
+
+```tsx
+// src/__tests__/useContextConditional.test.tsx
+import { createContext, use } from 'react';
+import { render, screen } from '@testing-library/react';
+
+const ThemeContext = createContext('light');
+
+function ConditionalReader({ enabled }: { enabled: boolean }) {
+  let theme = 'n/a';
+  if (enabled) {
+    // A plain `if` around use(Context) — would be a rules-of-hooks violation
+    // for useContext, but use() is explicitly exempt.
+    theme = use(ThemeContext);
+  }
+  return <p data-testid="theme">{theme}</p>;
+}
+
+test('use(Context) can be called conditionally inside an if', () => {
+  const { rerender } = render(
+    <ThemeContext value="dark">
+      <ConditionalReader enabled={true} />
+    </ThemeContext>,
+  );
+  expect(screen.getByTestId('theme').textContent).toBe('dark');
+
+  rerender(
+    <ThemeContext value="dark">
+      <ConditionalReader enabled={false} />
+    </ThemeContext>,
+  );
+  expect(screen.getByTestId('theme').textContent).toBe('n/a');
+});
+```
+
+```text
+✓ use(Context) can be called conditionally inside an if
+```
+
+## `use()` in Server Components vs Client Components
+
+Reading a **promise** with `use()` works in both Server and Client Components — it's the mechanism a Server Component uses to hand an in-flight promise down to a Client Component without blocking its own render on it (see [React 19: Server Components](/react/en/react-19/server-components/) for the server/client boundary itself). Reading **context** with `use()` is different:
+
+> "Reading context with `use` is not supported in Server Components." — [react.dev, `use`](https://react.dev/reference/react/use)
+
+That makes sense once you remember Server Components never re-render in the browser — there's no live subscription to a Provider to read from. If you're working in a Next.js app specifically, the request/render pipeline that decides which of your components are Server vs Client is covered in depth in [Next.js Deep Dive: the request lifecycle](/nextjs/en/foundations/the-request-lifecycle/) — this course teaches the React-level mechanism; a framework's routing and rendering pipeline is the framework's own territory.
+
+## `cacheSignal` (React 19.2, server-only)
+
+`cacheSignal()` is a React 19.2 API for React Server Components: it returns an `AbortSignal` that aborts once React has finished rendering (so `cache()`-scoped work — a per-render fetch or database call — can be cancelled cleanly instead of finishing pointlessly after nobody needs the result anymore).
+
+> "`cacheSignal` allows you to know when the `cache()` lifetime is over... It will always return `null` in Client Components... If called outside of rendering, it returns `null`." — [react.dev, `cacheSignal`](https://react.dev/reference/react/cacheSignal)
+
+```tsx
+// src/__tests__/cacheSignalClientOnly.test.tsx
+import { cacheSignal } from 'react';
+
+test('cacheSignal() returns null when called outside Server Component rendering (a Client-only environment)', () => {
+  // This probe has no React Server Components runtime — exactly the "Client
+  // Component" case react.dev describes: cacheSignal() always returns null.
+  expect(cacheSignal()).toBeNull();
+});
+```
+
+```text
+✓ cacheSignal() returns null when called outside Server Component rendering (a Client-only environment)
+```
+
+That's the whole client-side story: `cacheSignal` is a signal for server-rendered `cache()` calls to observe, not something a Client Component reaches for.
 
 ## The critical rule: cache the promise
 
@@ -70,12 +140,148 @@ export const fetchDiagram = `flowchart TB
 
 `use()` also reads **context**, and unlike `useContext` it can be called conditionally — handy for reading context inside a branch.
 
+### Proving the timing difference
+
+The diagram's claim is that starting the fetch earlier saves *real* wall-clock time, not just "feels" faster. It's easiest to see with the code-loading step made explicit: fetch-on-render can't even start the fetch until the component's own code has already loaded and mounted (so its effect can run), while render-as-you-fetch starts the data fetch *in parallel* with that code load, not after it.
+
+```tsx
+// src/__tests__/renderAsYouFetchTiming.test.tsx
+function delay<T>(ms: number, value: T): Promise<T> {
+  return new Promise((resolve) => setTimeout(() => resolve(value), ms));
+}
+
+function loadComponentCode() {
+  return delay(20, 'component-code'); // simulates a lazy-loaded chunk
+}
+function fetchData(id: string) {
+  return delay(30, `data:${id}`);
+}
+
+test('fetch-on-render (sequential): code loads, THEN the mount effect starts the fetch', async () => {
+  const start = performance.now();
+  await loadComponentCode(); // component isn't mounted (so its effect can't run) until code arrives
+  await fetchData('1'); // effect starts the fetch only after mount
+  const elapsed = performance.now() - start;
+  expect(elapsed).toBeGreaterThanOrEqual(45); // ~20 + 30, sequential
+});
+
+test('render-as-you-fetch: the fetch starts in parallel with the code load, not after it', async () => {
+  const start = performance.now();
+  const dataPromise = fetchData('1'); // kicked off immediately (e.g. in a route loader)
+  await loadComponentCode(); // runs concurrently with the fetch above
+  await dataPromise; // by the time the component can use() it, it's already well underway
+  const elapsed = performance.now() - start;
+  expect(elapsed).toBeLessThan(40); // ~max(20, 30), not the sum
+});
+```
+
+Real measured output from this exact file:
+
+```text
+✓ fetch-on-render (sequential): code loads, THEN the mount effect starts the fetch   ~54ms
+✓ render-as-you-fetch: the fetch starts in parallel with the code load, not after it  ~32ms
+```
+
+### Race conditions and abort
+
+`use()` doesn't solve races for you — if you build your own promise cache and the identity you're fetching for changes quickly (fast typing in a search box, rapid navigation), an older, slower request can still resolve *after* a newer, faster one and overwrite it unless you cancel it. `AbortController` is the standard fix.
+
+```tsx
+// src/__tests__/raceAndAbort.test.tsx
+function fetchSlow(id: string, ms: number, signal: AbortSignal): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => resolve(`data:${id}`), ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(t);
+      reject(new DOMException('Aborted', 'AbortError'));
+    });
+  });
+}
+
+test('without abort: a slow first request resolves last and overwrites the newer result (the race)', async () => {
+  let latest = '';
+  const c1 = new AbortController();
+  const c2 = new AbortController();
+  const p1 = fetchSlow('first', 40, c1.signal).then((v) => { latest = v; });
+  const p2 = fetchSlow('second', 10, c2.signal).then((v) => { latest = v; });
+  await Promise.all([p1, p2]);
+  // 'second' resolves first (fast), then 'first' resolves later and clobbers it.
+  expect(latest).toBe('data:first');
+});
+
+test('with AbortController: aborting the stale request means it never overwrites the newer result', async () => {
+  let latest = '';
+  let controller = new AbortController();
+
+  async function request(id: string, ms: number) {
+    controller.abort(); // cancel whatever request is in flight
+    controller = new AbortController();
+    const { signal } = controller;
+    try {
+      const value = await fetchSlow(id, ms, signal);
+      latest = value;
+    } catch (err) {
+      if ((err as DOMException).name !== 'AbortError') throw err;
+      // aborted requests are silently dropped, not applied to state
+    }
+  }
+
+  const p1 = request('first', 40);
+  const p2 = request('second', 10);
+  await Promise.allSettled([p1, p2]);
+  expect(latest).toBe('data:second');
+});
+```
+
+```text
+✓ without abort: a slow first request resolves last and overwrites the newer result (the race)
+✓ with AbortController: aborting the stale request means it never overwrites the newer result
+```
+
 ## You usually won't write this by hand
 
 Here's the honest part. Raw `use()` + Suspense + a hand-rolled promise cache is powerful but low-level. In real apps you almost always get render-as-you-fetch through a **framework** (a router/loader that fetches per route and provides the cache) or a **data library** like TanStack Query (which manages caching, revalidation, and Suspense integration for you). Learn `use()` to understand the mechanism; reach for a library to ship it.
 
+## Mental Model
+
+Think of `use()` as a *mailbox slot*, not a phone call. `useEffect`-based fetching is like picking up the phone only after you've already walked into the room (mounted) — you can't dial until you're there. `use()` reading a promise is like checking a mailbox slot that someone else (a loader, a parent, a framework) already started filling *before* you arrived; if the letter (data) isn't there yet, you wait (suspend) instead of dialing a fresh call yourself. The promise's identity is the mailbox's address — a new promise every render is a new, empty mailbox every time, never the one that's actually being filled.
+
+## Trade-offs
+
+| What you get | Benefit | Cost |
+|---|---|---|
+| Raw `use()` + hand-rolled cache | Full control, no dependency, understand the mechanism | You own the cache, race handling, and invalidation yourself |
+| A framework's router/loader | Fetch starts before the component even renders; cache is provided | Tied to that framework's data-loading conventions |
+| A data library (TanStack Query, etc.) | Caching, revalidation, dedup, and Suspense integration out of the box | Another dependency and its own mental model to learn |
+| `use(Context)` over `useContext` | Works conditionally, inside `if`/loops | Not supported for reading context in Server Components |
+
+## Common Misconceptions
+
+- **`use()` fetches data for you.** It doesn't — it only *reads* whatever promise you hand it. The fetch, the cache, and the retry-safety are entirely your (or your framework's) responsibility.
+- **Starting a fetch earlier only "feels" faster, but doesn't actually save time.** Proven above: kicking off the fetch in parallel with component code loading measurably shortens total wall-clock time versus waiting for mount before fetching.
+- **`use(Context)` and `useContext` are interchangeable everywhere.** They read the same context, but `use()` is allowed inside conditionals/loops and `useContext` is not — and unlike a promise, `use(Context)` is not supported in Server Components at all.
+
+## Reading AI-generated code
+
+When reviewing generated data-fetching code that uses `use()`, check for:
+
+- Is the promise passed to `use()` built fresh inside the render body (`use(fetch(...))` directly) instead of read from a stable cache? That suspends forever, per the section above.
+- When an identifier the fetch depends on (a search query, a selected id) can change quickly, is there any cancellation (`AbortController`) for the stale request — or can an older, slower response silently overwrite a newer one?
+- Does the code read context with `use()` inside a Server Component? react.dev is explicit that this isn't supported — it needs to be a Client Component.
+- Is `cacheSignal()` used (or expected to return something useful) inside a Client Component? It always returns `null` there — it's a server-only, RSC-specific API.
+
+<SpotTheBug code={`function SearchResults({ query }) {
+  const [latestQuery, setLatestQuery] = useState(query);
+  const resultsPromise = fetchResults(query);
+  const results = use(resultsPromise);
+
+  return <ul>{results.map(r => <li key={r.id}>{r.title}</li>)}</ul>;
+}`}>
+`fetchResults(query)` is called directly inside the render body, so it produces a **brand-new promise on every render** — the exact `use()`-needs-a-stable-promise bug. Beyond that, even if the promise were cached correctly, there's no cancellation: if the user types quickly, an older request for an earlier `query` can resolve after a newer one and silently show stale results. The fix is two-fold: cache the promise per `query` (e.g. in a `Map`, keyed by the exact query string) so `use()` gets a stable reference, and cancel the previous in-flight request with `AbortController` whenever `query` changes, exactly as proven in the race/abort test above.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-`use()` (React 19) reads a resource during render — pass it a **promise** and the component **suspends** until it resolves (pairing with Suspense for loading and an error boundary for rejection); it can also read context, and unlike other hooks it can be called **conditionally**. The catch: `use()` doesn't fetch or cache — the promise must be **stable across renders**, which is why you use a framework or a data library (TanStack Query) to provide the cache in practice.
+`use()` (React 19) reads a resource during render — pass it a **promise** and the component **suspends** until it resolves (pairing with Suspense for loading and an error boundary for rejection); it can also read context, and unlike other hooks it can be called **conditionally** (but not in Server Components for context). The catch: `use()` doesn't fetch or cache — the promise must be **stable across renders**, which is why you use a framework or a data library (TanStack Query) to provide the cache in practice, and why a changing identifier still needs your own `AbortController` to avoid a stale-overwrite race. `cacheSignal()` (19.2) is the server-only companion for cancelling `cache()`-scoped work when React finishes rendering — it always returns `null` on the client.
 </Callout>
 
 export const quizUse = [
@@ -88,6 +294,7 @@ export const quizUse = [
       'It blocks the main thread',
     ],
     answer: 1,
+    explain: 'use() suspends the component while the promise is pending, showing the nearest Suspense fallback, then returns the resolved value once it settles.',
   },
   {
     q: 'How is `use()` different from hooks like `useState`?',
@@ -98,6 +305,7 @@ export const quizUse = [
       'It does not need React',
     ],
     answer: 1,
+    explain: 'use() is not tied to the fixed hook-call-order rule the way useState/useEffect are, so it can be called inside a branch or loop — proven above.',
   },
   {
     q: 'Why must the promise passed to `use()` be cached / stable across renders?',
@@ -108,6 +316,7 @@ export const quizUse = [
       'It does not need to be stable',
     ],
     answer: 1,
+    explain: 'use() has no caching of its own — an uncached promise means every retry gets a fresh pending promise, an effectively endless suspend loop.',
   },
   {
     q: 'In practice, how do most apps do render-as-you-fetch?',
@@ -118,6 +327,29 @@ export const quizUse = [
       'They do not fetch data',
     ],
     answer: 1,
+    explain: 'Raw use() + a hand-rolled cache is powerful but low-level; most real apps get render-as-you-fetch through a framework or library that manages the cache for them.',
+  },
+  {
+    q: '```jsx\nfunction Panel({ userId }) {\n  return <p>{use(UserContext)}</p>;\n}\n```\nCan `use(Context)` be called from a Server Component?',
+    options: [
+      'Yes, exactly like a Client Component',
+      'No — react.dev states reading context with use() is not supported in Server Components',
+      'Only if wrapped in useEffect',
+      'Only during hydration',
+    ],
+    answer: 1,
+    explain: "react.dev's use() reference states this directly — Server Components never re-render in the browser, so there's no live Provider subscription to read from.",
+  },
+  {
+    q: 'Two requests race: an older, slower one (40ms) and a newer, faster one (10ms) for the same piece of UI. Without any cancellation, which value ends up applied last?',
+    options: [
+      'Whichever request started first always wins',
+      'The older (slower) request resolves last and overwrites the newer result — proven above',
+      'React automatically discards the stale one',
+      'Both are merged together',
+    ],
+    answer: 1,
+    explain: 'Without AbortController, resolution order (not request order) decides — the slow first request finishing last clobbers the fast second one, exactly as measured above.',
   },
 ];
 
